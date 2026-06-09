@@ -1,4 +1,5 @@
 import '../global.css';
+import '@/lib/i18n'; // initialize i18n before any screen renders
 import {
   Montserrat_400Regular,
   Montserrat_500Medium,

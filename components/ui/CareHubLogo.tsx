@@ -1,48 +1,57 @@
-import MaskedView from '@react-native-masked-view/masked-view';
-import { LinearGradient } from 'expo-linear-gradient';
-import { StyleSheet, Text, View } from 'react-native';
+import MaskedView from '@react-native-masked-view/masked-view'
+import { LinearGradient } from 'expo-linear-gradient'
+import { StyleSheet, Text, View } from 'react-native'
 
-import { fonts } from '@/constants/fonts';
+import { fonts } from '@/constants/fonts'
 
-export function CareHubLogo() {
+type Props = {
+  size?: number
+}
+
+export function CareHubLogo({ size = 130 }: Props) {
+  const scale = size / 130
+  const fontSize = Math.round(64 * scale)
+  const lineHeight = Math.round(72 * scale)
+  const cMarginLeft = Math.round(-10 * scale)
+  const borderRadius = Math.round(28 * scale)
+
+  const letterStyle = { fontFamily: fonts.bold, fontSize, lineHeight }
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { width: size, height: size, borderRadius }]}>
       <View style={styles.lettersRow}>
         {/* D — blue gradient */}
-        <MaskedView maskElement={<Text style={styles.letter}>D</Text>}>
+        <MaskedView maskElement={<Text style={letterStyle}>D</Text>}>
           <LinearGradient
             colors={['#4D7AFF', '#1A4598']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
           >
-            <Text style={[styles.letter, styles.transparent]}>D</Text>
+            <Text style={[letterStyle, styles.transparent]}>D</Text>
           </LinearGradient>
         </MaskedView>
 
-        {/* C — teal gradient, overlaps D by 10 */}
+        {/* C — teal gradient, overlaps D */}
         <MaskedView
-          style={styles.cLetter}
-          maskElement={<Text style={styles.letter}>C</Text>}
+          style={{ marginLeft: cMarginLeft }}
+          maskElement={<Text style={letterStyle}>C</Text>}
         >
           <LinearGradient
             colors={['#00E5FF', '#00BFA5']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
           >
-            <Text style={[styles.letter, styles.transparent]}>C</Text>
+            <Text style={[letterStyle, styles.transparent]}>C</Text>
           </LinearGradient>
         </MaskedView>
       </View>
     </View>
-  );
+  )
 }
 
 const styles = StyleSheet.create({
   container: {
-    width: 130,
-    height: 130,
     backgroundColor: '#12192C',
-    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -55,15 +64,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  letter: {
-    fontFamily: fonts.bold,
-    fontSize: 64,
-    lineHeight: 72,
-  },
-  cLetter: {
-    marginLeft: -10,
-  },
   transparent: {
     opacity: 0,
   },
-});
+})
