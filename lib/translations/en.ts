@@ -32,6 +32,7 @@ const en = {
   noAccount: "Don't have an account?",
   signUpFree: 'Sign Up for Free',
   typeEmail: 'Type your email',
+  typePassword: 'Type your password',
 
   // Verify
   verifyCode: 'Verify Code',

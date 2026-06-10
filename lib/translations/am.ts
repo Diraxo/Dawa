@@ -29,6 +29,7 @@ const am: TranslationKeys = {
   noAccount: 'ሂሳብ የለዎትም?',
   signUpFree: 'ነፃ ይመዝገቡ',
   typeEmail: 'ኢሜልዎን ያስገቡ',
+  typePassword: 'የይለፍ ቃልዎን ያስገቡ',
 
   verifyCode: 'ኮዱን ያረጋግጡ',
   verifySubtitle: 'እባክዎ ያስገቡን ኮድ ያስገቡ',

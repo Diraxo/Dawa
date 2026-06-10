@@ -1,22 +1,42 @@
+import { useAuth } from '@clerk/clerk-expo';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { CareHubLogo } from '@/components/ui/CareHubLogo';
 import { colors } from '@/constants/colors';
+import { useAuthStore } from '@/store/authStore';
 
 export default function SplashScreen() {
   const router = useRouter();
+  const { isSignedIn, isLoaded } = useAuth();
+  const { userRole } = useAuthStore();
+  const [timerDone, setTimerDone] = useState(false);
 
+  // Always show splash for at least 2500ms
   useEffect(() => {
-    const timer = setTimeout(() => {
-      router.replace('/(auth)/country');
-    }, 2500);
+    const timer = setTimeout(() => setTimerDone(true), 2500);
     return () => clearTimeout(timer);
-  }, [router]);
+  }, []);
+
+  // Navigate once both the timer has elapsed and Clerk has initialized
+  useEffect(() => {
+    if (!timerDone || !isLoaded) return;
+
+    if (isSignedIn && userRole === 'patient') {
+      router.replace('/(patient)/(tabs)/home' as never);
+    } else if (isSignedIn && userRole === 'doctor') {
+      router.replace('/(doctor)/registration/step-1' as never);
+    } else if (isSignedIn && !userRole) {
+      // Signed in but no role saved — let them pick
+      router.replace('/(auth)/role' as never);
+    } else {
+      router.replace('/(auth)/country' as never);
+    }
+  }, [timerDone, isLoaded, isSignedIn, userRole]);
 
   return (
     <View className="flex-1 bg-[#070E27]">

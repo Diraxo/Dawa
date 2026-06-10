@@ -29,6 +29,7 @@ const ti: TranslationKeys = {
   noAccount: 'ሕሳብ የብልካን?',
   signUpFree: 'ብናጻ ተመዝገብ',
   typeEmail: 'ኢሜልካ ምልእ',
+  typePassword: 'ምስጢራዊ ቃልካ ምልእ',
 
   verifyCode: 'ኮድ ኣረጋግጽ',
   verifySubtitle: 'በጃኻ ዘመሓለፍናልካ ኮድ ምልእ',

@@ -1,4 +1,4 @@
-# CareHub — AGENT.md
+# CareHub — AGENTS.md
 # Read this file first before every single task. Follow it strictly.
 
 ---
@@ -532,7 +532,7 @@ Persist with AsyncStorage when needed (country, language, auth token).
 7. All 3 consultation types (chat, phone, video) must work on both Android app AND website
 8. When a design image is provided, replicate it pixel-perfectly
 9. Never expose secret keys in the mobile app
-10. Always read AGENT.md before starting any task
+10. Always read AGENTS.md before starting any task
 
 ---
 
@@ -558,3 +558,112 @@ Be concise. Tell the developer:
 - What files you created or changed
 - How to test the screen
 - Any decisions you made and why
+
+## Development Rules
+
+* Always check existing files before creating new ones.
+* Reuse components whenever possible.
+* Do not duplicate business logic.
+* Keep files under 300 lines when possible.
+* Use TypeScript strict mode.
+* Fix TypeScript errors before completing a task.
+* Run lint checks after major changes.
+* Keep code clean, simple, and readable.
+
+---
+
+## Before Adding New Dependencies
+
+* Always use existing project libraries first.
+* Ask for approval before installing any new package.
+* Explain why the package is needed.
+* Prefer Expo-supported libraries when possible.
+* Do not add libraries that duplicate existing functionality.
+
+---
+
+## Git Workflow
+
+Before committing code:
+
+1. Run npm run lint
+2. Run npm run typecheck
+3. Verify the application builds successfully
+4. Verify no secrets are committed
+5. Use descriptive commit messages
+6. Ensure all new features follow AGENTS.md requirements
+
+---
+
+## Supabase Rules
+
+* Use Row Level Security (RLS) on all tables.
+* Never expose service role keys in client applications.
+* Use Clerk user IDs for authentication mapping.
+* Create migrations instead of manual database changes.
+* Validate all database writes.
+* Use Supabase Storage for uploaded files.
+* Follow least-privilege access principles.
+
+---
+
+## Security Rules
+
+* Never hardcode API keys.
+* Never expose secret keys in React Native or web clients.
+* Store secrets only in environment variables.
+* Validate all user input before database writes.
+* Sanitize uploaded file metadata.
+* Protect all sensitive operations behind authentication and authorization checks.
+* Follow OWASP security best practices.
+
+---
+
+## AI Agent Instructions
+
+Before starting any task:
+
+1. Read AGENTS.md completely.
+2. Review the existing codebase structure.
+3. Explain the implementation plan.
+4. List files that will be created or modified.
+5. Reuse existing components whenever possible.
+6. Ask for approval before:
+
+   * Adding new dependencies
+   * Making architectural changes
+   * Modifying database schemas
+   * Changing authentication flows
+
+After completing a task provide:
+
+* Files created
+* Files modified
+* Summary of work completed
+* Testing instructions
+* Any concerns or recommended follow-up work
+
+---
+
+## Expo / React Native Rules
+
+* Use Expo Router for navigation.
+* Use NativeWind as the primary styling solution.
+* Use StyleSheet only when AGENTS.md allows it.
+* Prefer functional components and hooks.
+* Use Zustand for global state management.
+* Use AsyncStorage only for persistent local preferences.
+* Follow Expo best practices and supported libraries.
+* Optimize for Android first, then web compatibility.
+
+---
+
+## Code Quality Rules
+
+* Avoid unnecessary re-renders.
+* Use TypeScript types for all API responses.
+* Keep components focused on a single responsibility.
+* Extract reusable logic into hooks when appropriate.
+* Avoid large monolithic screens.
+* Prefer composition over duplication.
+* Remove unused imports, variables, and code before completing a task.

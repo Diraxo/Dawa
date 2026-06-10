@@ -29,6 +29,7 @@ const om: TranslationKeys = {
   noAccount: 'Herrega hin qabu?',
   signUpFree: 'Bilisaan galmaa\'i',
   typeEmail: 'Imeelii kee galchi',
+  typePassword: 'Jecha iccitii galchi',
 
   verifyCode: 'Koodii mirkanneessi',
   verifySubtitle: 'Maaloo koodii erginee galchi',

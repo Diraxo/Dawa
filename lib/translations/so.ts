@@ -29,6 +29,7 @@ const so: TranslationKeys = {
   noAccount: "Ma lihid xisaab?",
   signUpFree: 'Is-diiwaan geli bilaash',
   typeEmail: 'Geli emailkaaga',
+  typePassword: 'Geli furaha sirta ah',
 
   verifyCode: 'Xaqiiji koodka',
   verifySubtitle: 'Fadlan geli koodka aan kuu soo dirnay',

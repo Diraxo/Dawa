@@ -29,6 +29,7 @@ const ar: TranslationKeys = {
   noAccount: 'ليس لديك حساب؟',
   signUpFree: 'سجّل مجاناً',
   typeEmail: 'اكتب بريدك الإلكتروني',
+  typePassword: 'اكتب كلمة مرورك',
 
   verifyCode: 'تحقق من الرمز',
   verifySubtitle: 'من فضلك أدخل الرمز الذي أرسلناه إليك',
