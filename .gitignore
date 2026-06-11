@@ -30,8 +30,14 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# local env files — .env contains real Supabase keys, never commit
+.env
 .env*.local
+
+# Firebase service account credentials — never commit these
+*firebase-adminsdk*.json
+carehub-ce3e3-*.json
+google-services.json
 
 # typescript
 *.tsbuildinfo
