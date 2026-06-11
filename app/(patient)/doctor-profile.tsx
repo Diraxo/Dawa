@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Image,
   Pressable,
@@ -16,7 +16,7 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { ALL_DOCTORS, MOCK_REVIEWS } from '@/lib/mockDoctors'
+import { supabase } from '@/lib/supabase'
 
 const CONSULT_OPTIONS = [
   { id: 'chat' as const, label: 'Chat', icon: 'chatbubble-ellipses', color: colors.tealGreen, desc: 'Text-based consultation' },
@@ -24,21 +24,92 @@ const CONSULT_OPTIONS = [
   { id: 'video' as const, label: 'Video Call', icon: 'videocam', color: '#7C3AED', desc: 'Face-to-face video call' },
 ]
 
-// 7-day dummy availability grid
 const AVAILABILITY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const AVAILABLE_DAYS = [0, 1, 2, 4] // Mon, Tue, Wed, Fri available
+const AVAILABLE_DAYS = [0, 1, 2, 3, 4] // Mon–Fri by default
+
+interface DoctorData {
+  id: string; name: string; subtitle?: string; specialty: string
+  rating_average: number; review_count: number; years_experience?: number
+  bio?: string; chat_price: number; phone_price: number; video_price: number
+  is_online: boolean; profile_photo_url?: string | null
+}
+interface ReviewData {
+  id: string; patientName: string; rating: number; comment: string; date: string
+}
 
 export default function DoctorProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const router = useRouter()
   const [bookingVisible, setBookingVisible] = useState(false)
+  const [doctor, setDoctor] = useState<DoctorData | null>(null)
+  const [reviews, setReviews] = useState<ReviewData[]>([])
+  const [loading, setLoading] = useState(true)
 
-  const doctor = ALL_DOCTORS.find(d => d.id === id) ?? ALL_DOCTORS[0]
+  useEffect(() => {
+    if (!id) return
+    Promise.all([
+      supabase
+        .from('doctor_profiles')
+        .select('*, users!inner(id, full_name, profile_photo_url)')
+        .eq('id', id)
+        .single(),
+      supabase
+        .from('reviews')
+        .select('*, patient:patient_id(full_name)')
+        .order('created_at', { ascending: false })
+        .limit(10),
+    ]).then(([{ data: dp }, { data: rv }]) => {
+      if (dp) {
+        setDoctor({
+          id: dp.id,
+          name: (dp as any).users?.full_name ?? 'Dr. Unknown',
+          subtitle: dp.hospital_name ?? undefined,
+          specialty: dp.specialty ?? 'General',
+          rating_average: Number(dp.rating_average) ?? 0,
+          review_count: dp.total_consultations ?? 0,
+          years_experience: dp.years_experience ?? undefined,
+          bio: dp.bio ?? undefined,
+          chat_price: Number(dp.chat_price) ?? 0,
+          phone_price: Number(dp.phone_price) ?? 0,
+          video_price: Number(dp.video_price) ?? 0,
+          is_online: dp.is_online ?? false,
+          profile_photo_url: (dp as any).users?.profile_photo_url ?? null,
+        })
+        // Filter reviews for this doctor using their user_id
+        const userId = (dp as any).users?.id
+        if (rv && userId) {
+          setReviews(
+            rv
+              .filter((r: any) => r.doctor_id === userId)
+              .map((r: any) => ({
+                id: r.id,
+                patientName: r.patient?.full_name ?? 'Patient',
+                rating: r.rating,
+                comment: r.comment ?? '',
+                date: new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+              }))
+          )
+        }
+      }
+      setLoading(false)
+    })
+  }, [id])
 
   const getPrice = (type: 'chat' | 'phone' | 'video') => {
+    if (!doctor) return 0
     if (type === 'chat') return doctor.chat_price
     if (type === 'phone') return doctor.phone_price
     return doctor.video_price
+  }
+
+  if (loading || !doctor) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontFamily: fonts.regular, color: '#6B7280' }}>Loading...</Text>
+        </View>
+      </SafeAreaView>
+    )
   }
 
   return (
@@ -148,8 +219,12 @@ export default function DoctorProfileScreen() {
         </Section>
 
         {/* ── Reviews ── */}
-        <Section title={`Patient Reviews (${doctor.review_count})`}>
-          {MOCK_REVIEWS.map(review => (
+        <Section title={`Patient Reviews (${reviews.length})`}>
+          {reviews.length === 0 ? (
+            <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' }}>
+              No reviews yet.
+            </Text>
+          ) : reviews.map(review => (
             <View key={review.id} style={styles.reviewCard}>
               <View style={styles.reviewHeader}>
                 <View style={styles.reviewAvatar}>
@@ -192,7 +267,7 @@ export default function DoctorProfileScreen() {
 
       <BookingModal
         visible={bookingVisible}
-        doctor={doctor}
+        doctor={doctor as any}
         onClose={() => setBookingVisible(false)}
       />
     </SafeAreaView>

@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '@clerk/clerk-expo'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Pressable,
@@ -9,23 +10,122 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import {
+  ClientRoleType,
+  IRtcEngineEventHandler,
+  RtcSurfaceView,
+  VideoSourceType,
+} from 'react-native-agora'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
+import { useAuthStore } from '@/store/authStore'
 
 export default function VideoConsultationScreen() {
-  const { doctorId, doctorName } = useLocalSearchParams<{ doctorId: string; doctorName: string }>()
+  const { doctorId, doctorName, consultationId } = useLocalSearchParams<{
+    doctorId?: string
+    doctorName?: string
+    consultationId?: string
+  }>()
   const router = useRouter()
+  const { userId } = useAuthStore()
+  const { getToken } = useAuth()
 
   const [seconds, setSeconds] = useState(0)
   const [muted, setMuted] = useState(false)
   const [cameraOff, setCameraOff] = useState(false)
   const [selfViewHidden, setSelfViewHidden] = useState(false)
+  const [remoteUid, setRemoteUid] = useState<number | null>(null)
+  const [joined, setJoined] = useState(false)
+  const [agoraToken, setAgoraToken] = useState<string | null>(null)
 
+  const channelName = consultationId ?? `consult-${doctorId ?? 'demo'}`
+  const localUid = useMemo(() => userId ? uidFromString(userId) : 1, [userId])
+  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null
+  const remoteUidRef = useRef<number | null>(null)
+
+  // Fetch Agora token
+  useEffect(() => {
+    if (!channelName) return
+    getToken().then(clerkToken => {
+      if (!clerkToken) return
+      fetchAgoraToken(channelName, localUid, clerkToken)
+        .then(setAgoraToken)
+        .catch(console.error)
+    })
+  }, [channelName, localUid, getToken])
+
+  // Timer
   useEffect(() => {
     const t = setInterval(() => setSeconds(s => s + 1), 1000)
     return () => clearInterval(t)
   }, [])
+
+  // Agora engine — video call
+  useEffect(() => {
+    if (!agoraReady) return
+
+    let mounted = true
+    let engine: ReturnType<typeof getAgoraEngine> | null = null
+
+    try {
+      engine = getAgoraEngine()
+    } catch {
+      return
+    }
+
+    const handler: IRtcEngineEventHandler = {
+      onJoinChannelSuccess: () => {
+        if (mounted) setJoined(true)
+      },
+      onUserJoined: (_conn, uid) => {
+        if (!mounted) return
+        remoteUidRef.current = uid
+        setRemoteUid(uid)
+      },
+      onUserOffline: (_conn, uid) => {
+        if (!mounted) return
+        if (uid === remoteUidRef.current) {
+          remoteUidRef.current = null
+          setRemoteUid(null)
+        }
+      },
+    }
+
+    engine.registerEventHandler(handler)
+    engine.enableAudio()
+    engine.enableVideo()
+    engine.startPreview()
+    engine.joinChannel(agoraToken ?? '', channelName, localUid, {
+      clientRoleType: ClientRoleType.ClientRoleBroadcaster,
+    })
+
+    return () => {
+      mounted = false
+      engine?.unregisterEventHandler(handler)
+      engine?.stopPreview()
+      engine?.leaveChannel()
+      releaseAgoraEngine()
+    }
+  }, [agoraReady, channelName, localUid])
+
+  // Sync mute
+  useEffect(() => {
+    if (!agoraReady) return
+    try { getAgoraEngine().muteLocalAudioStream(muted) } catch {}
+  }, [muted, agoraReady])
+
+  // Sync camera
+  useEffect(() => {
+    if (!agoraReady) return
+    try { getAgoraEngine().muteLocalVideoStream(cameraOff) } catch {}
+  }, [cameraOff, agoraReady])
+
+  const handleSwitchCamera = () => {
+    if (!agoraReady) return
+    try { getAgoraEngine().switchCamera() } catch {}
+  }
 
   const formatTime = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
@@ -47,16 +147,24 @@ export default function VideoConsultationScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={[]}>
-      {/* Doctor video background (placeholder) */}
+      {/* Remote video (full screen) */}
       <View style={styles.mainVideo}>
-        {/* Placeholder for Agora video stream */}
-        <View style={styles.videoPlaceholder}>
-          <Ionicons name="person" size={72} color="rgba(255,255,255,0.2)" />
-          <Text style={styles.videoPlaceholderText}>{doctorName ?? 'Doctor'}</Text>
-          <Text style={styles.videoNote}>Video stream via Agora</Text>
-        </View>
+        {agoraReady && remoteUid ? (
+          <RtcSurfaceView
+            canvas={{ uid: remoteUid }}
+            style={styles.fullFill}
+          />
+        ) : (
+          <View style={styles.videoPlaceholder}>
+            <Ionicons name="person" size={72} color="rgba(255,255,255,0.2)" />
+            <Text style={styles.videoPlaceholderText}>{doctorName ?? 'Doctor'}</Text>
+            <Text style={styles.videoNote}>
+              {joined ? 'Waiting for doctor to join...' : 'Connecting...'}
+            </Text>
+          </View>
+        )}
 
-        {/* Top overlay: back + timer */}
+        {/* Top overlay: LIVE + timer */}
         <View style={styles.topOverlay}>
           <View style={styles.liveChip}>
             <View style={styles.liveDot} />
@@ -67,22 +175,25 @@ export default function VideoConsultationScreen() {
 
         {/* Self view (patient) — bottom right */}
         {!selfViewHidden && (
-          <Pressable
-            style={styles.selfView}
-            onPress={() => setSelfViewHidden(true)}
-          >
-            {cameraOff ? (
-              <View style={styles.selfViewOff}>
-                <Ionicons name="videocam-off" size={20} color="rgba(255,255,255,0.5)" />
-              </View>
+          <Pressable style={styles.selfView} onPress={() => setSelfViewHidden(true)}>
+            {agoraReady && !cameraOff ? (
+              <RtcSurfaceView
+                canvas={{ uid: 0, sourceType: VideoSourceType.VideoSourceCamera }}
+                style={styles.fullFill}
+              />
             ) : (
-              <View style={styles.selfViewPlaceholder}>
-                <Ionicons name="person" size={24} color="rgba(255,255,255,0.4)" />
+              <View style={styles.selfViewOff}>
+                <Ionicons
+                  name={cameraOff ? 'videocam-off' : 'person'}
+                  size={22}
+                  color="rgba(255,255,255,0.5)"
+                />
               </View>
             )}
             <Text style={styles.selfLabel}>You</Text>
           </Pressable>
         )}
+
         {selfViewHidden && (
           <Pressable style={styles.showSelfBtn} onPress={() => setSelfViewHidden(false)}>
             <Text style={styles.showSelfText}>Show self view</Text>
@@ -90,32 +201,33 @@ export default function VideoConsultationScreen() {
         )}
       </View>
 
-      {/* Controls overlay */}
+      {/* Controls */}
       <View style={styles.controls}>
         <View style={styles.controlsRow}>
-          {/* Mute */}
           <ControlButton
             icon={muted ? 'mic-off' : 'mic'}
             label={muted ? 'Unmute' : 'Mute'}
             active={muted}
             onPress={() => setMuted(m => !m)}
           />
-          {/* Camera */}
           <ControlButton
             icon={cameraOff ? 'videocam-off' : 'videocam'}
             label={cameraOff ? 'Camera Off' : 'Camera'}
             active={cameraOff}
             onPress={() => setCameraOff(c => !c)}
           />
-          {/* Switch Camera */}
           <ControlButton
             icon="camera-reverse"
             label="Switch"
-            onPress={() => {}}
+            onPress={handleSwitchCamera}
           />
-          {/* End Call */}
           <Pressable style={styles.endBtn} onPress={handleEnd}>
-            <Ionicons name="call" size={28} color={colors.mistWhite} style={{ transform: [{ rotate: '135deg' }] }} />
+            <Ionicons
+              name="call"
+              size={28}
+              color={colors.mistWhite}
+              style={{ transform: [{ rotate: '135deg' }] }}
+            />
             <Text style={styles.endLabel}>End</Text>
           </Pressable>
         </View>
@@ -142,8 +254,8 @@ function ControlButton({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0A0A0A' },
+  fullFill: { flex: 1 },
 
-  // Doctor video
   mainVideo: { flex: 1, position: 'relative' },
   videoPlaceholder: {
     flex: 1, backgroundColor: '#111827',
@@ -152,7 +264,6 @@ const styles = StyleSheet.create({
   videoPlaceholderText: { fontFamily: fonts.bold, fontSize: 22, color: 'rgba(255,255,255,0.6)' },
   videoNote: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.3)' },
 
-  // Top overlay
   topOverlay: {
     position: 'absolute', top: 50, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -171,7 +282,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 6,
   },
 
-  // Self view
   selfView: {
     position: 'absolute', bottom: 20, right: 20,
     width: 90, height: 120, borderRadius: 14,
@@ -179,13 +289,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'flex-end',
   },
   selfViewOff: {
-    position: 'absolute', inset: 0,
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: '#1F2937',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  selfViewPlaceholder: {
-    position: 'absolute', inset: 0,
-    backgroundColor: '#1A2744',
     alignItems: 'center', justifyContent: 'center',
   },
   selfLabel: {
@@ -200,7 +305,6 @@ const styles = StyleSheet.create({
   },
   showSelfText: { fontFamily: fonts.medium, fontSize: 11, color: colors.mistWhite },
 
-  // Controls
   controls: {
     paddingHorizontal: 24, paddingTop: 16, paddingBottom: 36,
     backgroundColor: 'rgba(0,0,0,0.85)',

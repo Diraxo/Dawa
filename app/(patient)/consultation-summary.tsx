@@ -1,3 +1,4 @@
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
@@ -16,7 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { ALL_DOCTORS } from '@/lib/mockDoctors'
+import { getAuthClient } from '@/lib/supabase'
 
 const TYPE_LABELS: Record<string, string> = {
   chat: 'Chat Consultation',
@@ -31,31 +32,62 @@ const TYPE_ICONS: Record<string, string> = {
 }
 
 export default function ConsultationSummaryScreen() {
-  const { doctorId, doctorName, consultationType } = useLocalSearchParams<{
-    doctorId: string
-    doctorName: string
-    consultationType: string
+  const { doctorId, doctorName, consultationType, consultationId } = useLocalSearchParams<{
+    doctorId?: string
+    doctorName?: string
+    consultationType?: string
+    consultationId?: string
   }>()
   const router = useRouter()
+  const { getToken } = useAuth()
+  const { user } = useUser()
+
   const [rating, setRating] = useState(0)
   const [comment, setComment] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  const doctor = ALL_DOCTORS.find(d => d.id === doctorId)
-  const duration = Math.floor(Math.random() * 25) + 10 // Mock: 10-35 min
-  const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  const dateStr = new Date().toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  })
   const typeLabel = TYPE_LABELS[consultationType ?? 'chat'] ?? 'Consultation'
   const typeIcon = TYPE_ICONS[consultationType ?? 'chat'] ?? 'medical'
 
-  const handleDone = () => {
+  const handleDone = async () => {
     if (rating === 0) {
       Alert.alert('Rate Your Experience', 'Please rate your consultation before submitting.')
       return
     }
+    if (submitting) return
+    setSubmitting(true)
+
+    try {
+      const token = await getToken()
+      if (token && consultationId && user?.id) {
+        const client = getAuthClient(token)
+
+        // Get current user's Supabase id
+        const { data: userData } = await client
+          .from('users')
+          .select('id')
+          .eq('clerk_id', user.id)
+          .single()
+
+        if (userData?.id) {
+          await client.from('reviews').insert({
+            consultation_id: consultationId,
+            patient_id: userData.id,
+            rating,
+            comment: comment.trim() || null,
+          })
+        }
+      }
+    } catch {
+      // Review save is best-effort — still navigate on failure
+    }
+
+    setSubmitting(false)
     Alert.alert('Thank you!', 'Your rating has been submitted.', [
-      {
-        text: 'Done',
-        onPress: () => router.replace('/(patient)/(tabs)/home'),
-      },
+      { text: 'Done', onPress: () => router.replace('/(patient)/(tabs)/appointments') },
     ])
   }
 
@@ -76,40 +108,34 @@ export default function ConsultationSummaryScreen() {
             <Ionicons name="checkmark" size={36} color={colors.mistWhite} />
           </View>
           <Text style={styles.heroTitle}>Consultation Complete</Text>
-          <Text style={styles.heroSub}>Your session with {doctorName ?? doctor?.name} has ended</Text>
+          <Text style={styles.heroSub}>
+            Your session with {doctorName ?? 'the doctor'} has ended
+          </Text>
         </LinearGradient>
 
         {/* Session details */}
         <View style={styles.detailCard}>
           <Row icon={typeIcon} label={typeLabel} value="" accent />
           <Divider />
-          <Row icon="person-outline" label="Doctor" value={doctorName ?? doctor?.name ?? '—'} />
+          <Row icon="person-outline" label="Doctor" value={doctorName ?? '—'} />
           <Row icon="calendar-outline" label="Date" value={dateStr} />
-          <Row icon="time-outline" label="Duration" value={`${duration} minutes`} />
         </View>
 
-        {/* Clinical notes (mock) */}
+        {/* Clinical notes placeholder */}
         <SectionCard title="Chief Complaint">
-          <Text style={styles.noteText}>Patient reported recurring headaches for 3 days, described as pressure behind the eyes, worse in the morning.</Text>
+          <Text style={styles.noteText}>
+            Clinical notes from your doctor will appear here once the consultation summary is saved.
+          </Text>
         </SectionCard>
 
         <SectionCard title="Diagnosis">
-          <Text style={styles.noteText}>Tension-type headache. Likely related to stress and dehydration. No red flags identified.</Text>
-        </SectionCard>
-
-        <SectionCard title="Prescription">
-          <View style={styles.rxRow}>
-            <Ionicons name="medical" size={14} color={colors.careBlue} />
-            <Text style={styles.rxText}>Paracetamol 500mg — twice daily as needed for 3 days</Text>
-          </View>
-          <View style={styles.rxRow}>
-            <Ionicons name="water" size={14} color={colors.tealGreen} />
-            <Text style={styles.rxText}>Increase water intake to 2-3 liters per day</Text>
-          </View>
+          <Text style={styles.noteText}>Awaiting doctor notes.</Text>
         </SectionCard>
 
         <SectionCard title="Follow-up Recommendation">
-          <Text style={styles.noteText}>Return if headaches persist beyond one week or worsen in intensity. No referral needed at this time.</Text>
+          <Text style={styles.noteText}>
+            Your doctor will add follow-up instructions after reviewing the session.
+          </Text>
         </SectionCard>
 
         {/* Download button */}
@@ -124,7 +150,9 @@ export default function ConsultationSummaryScreen() {
         {/* Rating section */}
         <View style={styles.ratingSection}>
           <Text style={styles.ratingTitle}>Rate Your Doctor</Text>
-          <Text style={styles.ratingSub}>How was your experience with {doctorName ?? 'the doctor'}?</Text>
+          <Text style={styles.ratingSub}>
+            How was your experience with {doctorName ?? 'the doctor'}?
+          </Text>
           <View style={styles.starsRow}>
             {[1, 2, 3, 4, 5].map(star => (
               <Pressable key={star} onPress={() => setRating(star)}>
@@ -155,13 +183,16 @@ export default function ConsultationSummaryScreen() {
         <Pressable
           style={({ pressed }) => [styles.doneWrap, pressed && { opacity: 0.88 }]}
           onPress={handleDone}
+          disabled={submitting}
         >
           <LinearGradient
             colors={gradients.interactive}
             start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
             style={styles.doneBtn}
           >
-            <Text style={styles.doneBtnText}>Submit & Done</Text>
+            <Text style={styles.doneBtnText}>
+              {submitting ? 'Submitting...' : 'Submit & Done'}
+            </Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -169,7 +200,9 @@ export default function ConsultationSummaryScreen() {
   )
 }
 
-function Row({ icon, label, value, accent }: { icon: string; label: string; value: string; accent?: boolean }) {
+function Row({ icon, label, value, accent }: {
+  icon: string; label: string; value: string; accent?: boolean
+}) {
   return (
     <View style={rowStyles.row}>
       <View style={[rowStyles.iconWrap, accent && rowStyles.iconWrapAccent]}>
@@ -229,9 +262,6 @@ const styles = StyleSheet.create({
   },
 
   noteText: { fontFamily: fonts.regular, fontSize: 14, color: '#374151', lineHeight: 22 },
-
-  rxRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 6 },
-  rxText: { flex: 1, fontFamily: fonts.regular, fontSize: 14, color: '#374151', lineHeight: 20 },
 
   downloadBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,

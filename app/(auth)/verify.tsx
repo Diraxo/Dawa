@@ -173,7 +173,7 @@ export default function VerifyScreen() {
                 style={styles.cardIcon}
               />
               <Text style={styles.infoText}>
-                Check your spam folder if you didn't receive the email
+                Check your spam folder if you didn&apos;t receive the email
               </Text>
             </View>
           </View>

@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   ActivityIndicator,
@@ -184,7 +184,7 @@ export default function RoleScreen() {
   }
 
   // ── Card render helper ────────────────────────────────────────────────────
-  const renderCard = (role: Role, label: string, Illustration: () => JSX.Element, scale: Animated.Value) => {
+  const renderCard = (role: Role, label: string, Illustration: () => ReactElement, scale: Animated.Value) => {
     const isSelected = selectedRole === role
     const labelStyle = role === 'doctor' ? styles.cardLabelDoctor : styles.cardLabelPatient
 

@@ -144,7 +144,7 @@ export default function SignInScreen() {
       })
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive({ session: result.createdSessionId })
-        await navigateByRole(result.createdUserId ?? null)
+        await navigateByRole((result as any).createdUserId ?? null)
       } else {
         setGlobalError('Sign in failed. Please try again.')
       }

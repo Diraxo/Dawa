@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useScrollToTop } from '@react-navigation/native'
 import { useRouter } from 'expo-router'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FlatList,
   Modal,
@@ -18,7 +19,7 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { DoctorCard, Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { ALL_DOCTORS, SPECIALTIES } from '@/lib/mockDoctors'
+import { supabase } from '@/lib/supabase'
 
 const PRICE_FILTERS = [
   { label: 'Any Price', max: Infinity },
@@ -33,8 +34,30 @@ const RATING_FILTERS = [
   { label: '4.8+', min: 4.8 },
 ]
 
+function mapDoctor(d: any): Doctor {
+  return {
+    id: d.id,
+    name: d.users?.full_name ?? 'Dr. Unknown',
+    subtitle: d.hospital_name ?? undefined,
+    specialty: d.specialty ?? 'General',
+    rating_average: Number(d.rating_average) ?? 0,
+    review_count: d.total_consultations ?? 0,
+    years_experience: d.years_experience ?? undefined,
+    bio: d.bio ?? undefined,
+    chat_price: Number(d.chat_price) ?? 0,
+    phone_price: Number(d.phone_price) ?? 0,
+    video_price: Number(d.video_price) ?? 0,
+    is_online: d.is_online ?? false,
+    profile_photo_url: d.users?.profile_photo_url ?? null,
+  }
+}
+
 export default function DoctorsScreen() {
   const router = useRouter()
+  const listRef = useRef<FlatList>(null)
+  useScrollToTop(listRef)
+  const [allDoctors, setAllDoctors] = useState<Doctor[]>([])
+  const [specialties, setSpecialties] = useState<string[]>(['All Specialties'])
   const [searchQuery, setSearchQuery] = useState('')
   const [specialty, setSpecialty] = useState('All Specialties')
   const [specialtyOpen, setSpecialtyOpen] = useState(false)
@@ -43,8 +66,23 @@ export default function DoctorsScreen() {
   const [ratingIdx, setRatingIdx] = useState(0)
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
 
+  useEffect(() => {
+    supabase
+      .from('doctor_profiles')
+      .select('*, users!inner(full_name, profile_photo_url)')
+      .eq('status', 'approved')
+      .order('rating_average', { ascending: false })
+      .then(({ data }) => {
+        if (!data) return
+        const mapped = data.map(mapDoctor)
+        setAllDoctors(mapped)
+        const specs = ['All Specialties', ...Array.from(new Set(mapped.map(d => d.specialty)))]
+        setSpecialties(specs)
+      })
+  }, [])
+
   const filteredDoctors = useMemo(() => {
-    let list = [...ALL_DOCTORS]
+    let list = [...allDoctors]
     const q = searchQuery.toLowerCase().trim()
 
     if (q) {
@@ -175,6 +213,7 @@ export default function DoctorsScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <FlatList
+        ref={listRef}
         data={filteredDoctors}
         keyExtractor={item => item.id}
         renderItem={({ item }) => (
@@ -208,7 +247,7 @@ export default function DoctorsScreen() {
         <View style={styles.specialtySheet}>
           <Text style={styles.sheetTitle}>Select Specialty</Text>
           <ScrollView showsVerticalScrollIndicator={false}>
-            {SPECIALTIES.map(s => (
+            {specialties.map(s => (
               <Pressable
                 key={s}
                 style={[styles.specialtyOption, specialty === s && styles.specialtyOptionSelected]}

@@ -12,3 +12,12 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: false,
   },
 })
+
+// Use for queries that require authentication (consultations, appointments, etc.)
+// Pass the Clerk JWT token obtained via useAuth().getToken()
+export function getAuthClient(clerkToken: string) {
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${clerkToken}` } },
+  })
+}

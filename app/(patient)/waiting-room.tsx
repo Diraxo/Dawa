@@ -13,7 +13,6 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { ALL_DOCTORS } from '@/lib/mockDoctors'
 
 const ICON_MAP: Record<string, { icon: string; label: string; color: string }> = {
   chat: { icon: 'chatbubble-ellipses', label: 'Chat', color: colors.tealGreen },
@@ -29,7 +28,6 @@ export default function WaitingRoomScreen() {
     consultationType: string
   }>()
 
-  const doctor = ALL_DOCTORS.find(d => d.id === doctorId)
   const typeInfo = ICON_MAP[consultationType ?? 'chat'] ?? ICON_MAP.chat
 
   // 30-second countdown
@@ -97,7 +95,7 @@ export default function WaitingRoomScreen() {
         : '/(patient)/video-consultation'
     router.replace({
       pathname: route as any,
-      params: { doctorId, doctorName: doctorName ?? doctor?.name ?? 'Doctor' },
+      params: { doctorId, doctorName: doctorName ?? 'Doctor' },
     })
   }
 
@@ -123,10 +121,7 @@ export default function WaitingRoomScreen() {
         </View>
 
         <Text style={styles.waitingTitle}>Waiting for</Text>
-        <Text style={styles.doctorName}>{doctorName ?? doctor?.name ?? 'Doctor'}</Text>
-        {doctor?.specialty ? (
-          <Text style={styles.specialty}>{doctor.specialty}</Text>
-        ) : null}
+        <Text style={styles.doctorName}>{doctorName ?? 'Doctor'}</Text>
 
         {/* Timer */}
         <View style={styles.timerWrap}>
@@ -135,14 +130,6 @@ export default function WaitingRoomScreen() {
             00:{String(secondsLeft).padStart(2, '0')}
           </Text>
         </View>
-
-        {/* Bio snippet */}
-        {doctor?.bio ? (
-          <View style={styles.bioCard}>
-            <Text style={styles.bioLabel}>While you wait...</Text>
-            <Text style={styles.bioText} numberOfLines={3}>{doctor.bio}</Text>
-          </View>
-        ) : null}
 
         {/* Status dots */}
         <View style={styles.statusRow}>

@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useScrollToTop } from '@react-navigation/native'
 import { useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Image,
   Pressable,
@@ -20,21 +21,25 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 
-// ─── Mock data — swap with Supabase hooks when backend is ready ───────────────
+function mapDoctor(d: any): Doctor {
+  return {
+    id: d.id,
+    name: d.users?.full_name ?? 'Dr. Unknown',
+    subtitle: d.hospital_name ?? undefined,
+    specialty: d.specialty ?? 'General',
+    rating_average: Number(d.rating_average) ?? 0,
+    review_count: d.total_consultations ?? 0,
+    years_experience: d.years_experience ?? undefined,
+    bio: d.bio ?? undefined,
+    chat_price: Number(d.chat_price) ?? 0,
+    phone_price: Number(d.phone_price) ?? 0,
+    video_price: Number(d.video_price) ?? 0,
+    is_online: d.is_online ?? false,
+    profile_photo_url: d.users?.profile_photo_url ?? null,
+  }
+}
 
-// Specialties: replace with → supabase.from('specialties').select('*').order('name')
-// Admin manages this table (add/remove via the web admin dashboard)
-const MOCK_SPECIALTIES = [
-  'General',
-  'Dermatology',
-  'Pediatrics',
-  'Mental Health',
-  'Cardiology',
-  'Neurology',
-  'Orthopedics',
-]
-
-// Prices are flat per-session rates (not hourly) — chat_price / phone_price / video_price
+// ─── Placeholder until Supabase has data ─────────────────────────────────────
 const AVAILABLE_DOCTORS: Doctor[] = [
   {
     id: '1',
@@ -145,12 +150,7 @@ const TOP_RATED_DOCTORS: Doctor[] = [
   },
 ]
 
-const MOCK_APPOINTMENT = {
-  doctorName: 'Dr. Tesfaye',
-  language: 'Afaan Oromoo',
-  date: 'Oct 26',
-  time: '10:30 AM',
-}
+import { supabase } from '@/lib/supabase'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -174,12 +174,66 @@ function getFormattedDate(): string {
 export default function HomeScreen() {
   const router = useRouter()
   const { user } = useUser()
+  const scrollRef = useRef<ScrollView>(null)
+  useScrollToTop(scrollRef)
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>('General')
+  const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null)
+  const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>(AVAILABLE_DOCTORS)
+  const [topDoctors, setTopDoctors] = useState<Doctor[]>(TOP_RATED_DOCTORS)
+  const [specialties, setSpecialties] = useState<string[]>([
+    'General', 'Dermatology', 'Pediatrics', 'Mental Health', 'Cardiology', 'Neurology', 'Orthopedics',
+  ])
+  const [upcomingAppointment, setUpcomingAppointment] = useState<{
+    doctorName: string; type: string; date: string; time: string
+  } | null>(null)
 
-  // Specialties: replace useState init with Supabase fetch when ready
-  // → supabase.from('specialties').select('*').order('name')
-  const [specialties] = useState<string[]>(MOCK_SPECIALTIES)
+  useEffect(() => {
+    // Online doctors
+    supabase
+      .from('doctor_profiles')
+      .select('*, users!inner(full_name, profile_photo_url)')
+      .eq('status', 'approved')
+      .eq('is_online', true)
+      .order('rating_average', { ascending: false })
+      .limit(8)
+      .then(({ data }) => { if (data?.length) setOnlineDoctors(data.map(mapDoctor)) })
+
+    // Top rated
+    supabase
+      .from('doctor_profiles')
+      .select('*, users!inner(full_name, profile_photo_url)')
+      .eq('status', 'approved')
+      .order('rating_average', { ascending: false })
+      .limit(8)
+      .then(({ data }) => {
+        if (data?.length) {
+          const mapped = data.map(mapDoctor)
+          setTopDoctors(mapped)
+          const specs = Array.from(new Set(mapped.map(d => d.specialty)))
+          if (specs.length) setSpecialties(specs)
+        }
+      })
+
+    // Upcoming appointment (most recent pending/active consultation)
+    supabase
+      .from('consultations')
+      .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
+      .in('status', ['pending', 'active'])
+      .order('scheduled_at', { ascending: true })
+      .limit(1)
+      .then(({ data }) => {
+        if (data?.length) {
+          const appt = data[0] as any
+          const d = new Date(appt.scheduled_at)
+          setUpcomingAppointment({
+            doctorName: appt.doctor_profiles?.users?.full_name ?? 'Doctor',
+            type: appt.type ?? 'chat',
+            date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          })
+        }
+      })
+  }, [])
 
   const firstName =
     user?.firstName ?? user?.fullName?.split(' ')[0] ?? 'there'
@@ -199,6 +253,7 @@ export default function HomeScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView
+        ref={scrollRef}
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -317,7 +372,7 @@ export default function HomeScreen() {
           contentContainerStyle={styles.doctorListContent}
           style={styles.mt12}
         >
-          {AVAILABLE_DOCTORS.map((doc) => (
+          {onlineDoctors.map((doc) => (
             <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
           ))}
         </ScrollView>
@@ -335,42 +390,53 @@ export default function HomeScreen() {
           contentContainerStyle={styles.doctorListContent}
           style={styles.mt12}
         >
-          {TOP_RATED_DOCTORS.map((doc) => (
+          {topDoctors.map((doc) => (
             <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
           ))}
         </ScrollView>
 
         {/* ── Upcoming Appointment ── */}
         <Text style={[styles.sectionTitle, styles.mt28]}>Upcoming Appointment</Text>
-        <Pressable
-          style={({ pressed }) => [styles.appointmentCard, pressed && { opacity: 0.9 }]}
-          onPress={() => router.push('/(patient)/(tabs)/appointments')}
-        >
-          <LinearGradient
-            colors={gradients.hero}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
-            style={styles.appointmentGradient}
+        {upcomingAppointment ? (
+          <Pressable
+            style={({ pressed }) => [styles.appointmentCard, pressed && { opacity: 0.9 }]}
+            onPress={() => router.push('/(patient)/(tabs)/appointments')}
           >
-            <View style={styles.apptLeft}>
-              <View style={styles.apptIconWrap}>
-                <Ionicons name="time-outline" size={22} color={colors.mistWhite} />
+            <LinearGradient
+              colors={gradients.hero}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.appointmentGradient}
+            >
+              <View style={styles.apptLeft}>
+                <View style={styles.apptIconWrap}>
+                  <Ionicons name="time-outline" size={22} color={colors.mistWhite} />
+                </View>
+                <View style={styles.apptInfo}>
+                  <Text style={styles.apptTitle}>
+                    Consultation with {upcomingAppointment.doctorName}
+                  </Text>
+                  <Text style={styles.apptMeta}>
+                    {upcomingAppointment.type} · {upcomingAppointment.date} at{' '}
+                    {upcomingAppointment.time}
+                  </Text>
+                </View>
               </View>
-              <View style={styles.apptInfo}>
-                <Text style={styles.apptTitle}>
-                  Consultation with {MOCK_APPOINTMENT.doctorName}
-                </Text>
-                <Text style={styles.apptMeta}>
-                  {MOCK_APPOINTMENT.language} · {MOCK_APPOINTMENT.date} at{' '}
-                  {MOCK_APPOINTMENT.time}
-                </Text>
+              <View style={styles.viewDetailsBtn}>
+                <Text style={styles.viewDetailsText}>View Details</Text>
               </View>
-            </View>
-            <View style={styles.viewDetailsBtn}>
-              <Text style={styles.viewDetailsText}>View Details</Text>
-            </View>
-          </LinearGradient>
-        </Pressable>
+            </LinearGradient>
+          </Pressable>
+        ) : (
+          <Pressable
+            style={({ pressed }) => [styles.emptyApptCard, pressed && { opacity: 0.85 }]}
+            onPress={() => router.push('/(patient)/(tabs)/doctors')}
+          >
+            <Ionicons name="calendar-outline" size={28} color={colors.steelGrey} />
+            <Text style={styles.emptyApptText}>No upcoming appointments</Text>
+            <Text style={styles.emptyApptSub}>Book a consultation to get started</Text>
+          </Pressable>
+        )}
 
         <View style={styles.bottomPad} />
       </ScrollView>
@@ -599,6 +665,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.mistWhite,
   },
+
+  // Empty appointment state
+  emptyApptCard: {
+    marginTop: 14, borderRadius: 20, padding: 24,
+    backgroundColor: colors.mistWhite, alignItems: 'center', gap: 6,
+    borderWidth: 1.5, borderColor: colors.steelGrey, borderStyle: 'dashed',
+  },
+  emptyApptText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  emptyApptSub: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280' },
 
   // Spacing utilities
   mt12: { marginTop: 12 },
