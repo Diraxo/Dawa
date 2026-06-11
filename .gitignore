@@ -36,6 +36,7 @@ yarn-error.*
 
 # Firebase service account credentials — never commit these
 *firebase-adminsdk*.json
+carehub-ce3e3-*.json
 google-services.json
 
 # typescript
