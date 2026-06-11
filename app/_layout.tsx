@@ -12,6 +12,7 @@ import { ClerkLoaded, ClerkProvider } from '@clerk/clerk-expo'
 import * as Notifications from 'expo-notifications'
 import { SplashScreen, Stack, useRouter } from 'expo-router'
 import { useEffect } from 'react'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { OverlayProvider } from 'stream-chat-expo'
 
 import { useStreamConnection } from '@/hooks/useStreamConnection'
@@ -153,13 +154,15 @@ export default function RootLayout() {
   }
 
   return (
-    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-      <ClerkLoaded>
-        <OverlayProvider>
-          <AppInitializer />
-          <Stack screenOptions={{ headerShown: false }} />
-        </OverlayProvider>
-      </ClerkLoaded>
-    </ClerkProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+        <ClerkLoaded>
+          <OverlayProvider>
+            <AppInitializer />
+            <Stack screenOptions={{ headerShown: false }} />
+          </OverlayProvider>
+        </ClerkLoaded>
+      </ClerkProvider>
+    </GestureHandlerRootView>
   )
 }
