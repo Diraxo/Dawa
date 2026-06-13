@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useRef, useEffect, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Modal,
@@ -17,6 +19,7 @@ import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { getAuthClient } from '@/lib/supabase'
 
 type ConsultationType = 'chat' | 'phone' | 'video'
 type TimingType = 'now' | 'schedule'
@@ -49,14 +52,27 @@ function getNextDays(count: number) {
   return days
 }
 
+function parseScheduledAt(dayValue: string, timeSlot: string): string {
+  const [timePart, meridiem] = timeSlot.split(' ')
+  const [hourStr, minStr] = timePart.split(':')
+  let hour = parseInt(hourStr, 10)
+  const min = parseInt(minStr, 10)
+  if (meridiem === 'PM' && hour !== 12) hour += 12
+  if (meridiem === 'AM' && hour === 12) hour = 0
+  return `${dayValue}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`
+}
+
 export function BookingModal({ visible, doctor, onClose }: Props) {
   const router = useRouter()
+  const { getToken } = useAuth()
+  const { user } = useUser()
   const slideAnim = useRef(new Animated.Value(300)).current
   const [step, setStep] = useState<1 | 2 | 3>(1)
   const [consultType, setConsultType] = useState<ConsultationType>('chat')
   const [timing, setTiming] = useState<TimingType>('now')
   const [selectedDay, setSelectedDay] = useState(0)
   const [selectedTime, setSelectedTime] = useState('')
+  const [confirming, setConfirming] = useState(false)
   const days = getNextDays(7)
 
   useEffect(() => {
@@ -66,6 +82,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       setTiming('now')
       setSelectedDay(0)
       setSelectedTime('')
+      setConfirming(false)
       Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start()
     } else {
       Animated.timing(slideAnim, { toValue: 300, duration: 220, useNativeDriver: true }).start()
@@ -82,29 +99,70 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
 
   const selectedType = CONSULT_TYPES.find(t => t.id === consultType)!
 
-  const handleConfirm = () => {
-    Alert.alert(
-      'Payment Coming Soon',
-      'Payment integration is not yet available. Your booking request has been noted.',
-      [
-        {
-          text: 'OK',
-          onPress: () => {
-            onClose()
-            if (timing === 'now') {
-              router.push({
-                pathname: '/(patient)/waiting-room',
-                params: {
-                  doctorId: doctor.id,
-                  doctorName: doctor.name,
-                  consultationType: consultType,
-                },
-              })
-            }
+  const handleConfirm = async () => {
+    setConfirming(true)
+    try {
+      const token = await getToken()
+      if (!token || !user) throw new Error('Not authenticated')
+
+      const client = getAuthClient(token)
+
+      // Resolve the patient's users.id from their Clerk ID
+      const { data: userData, error: userErr } = await client
+        .from('users')
+        .select('id')
+        .eq('clerk_id', user.id)
+        .single()
+
+      if (userErr || !userData) throw new Error('Could not find your user profile.')
+
+      const scheduledAt = timing === 'now'
+        ? new Date().toISOString()
+        : parseScheduledAt(days[selectedDay].value, selectedTime)
+
+      const price = getPrice(consultType)
+
+      const { data: consultation, error: consultErr } = await client
+        .from('consultations')
+        .insert({
+          patient_id: userData.id,
+          doctor_id: doctor.id,
+          type: consultType,
+          status: 'pending',
+          scheduled_at: scheduledAt,
+          patient_amount: price,
+          doctor_amount: Math.round(price * 0.8),
+          platform_amount: Math.round(price * 0.2),
+          payment_status: 'pending',
+        })
+        .select('id')
+        .single()
+
+      if (consultErr || !consultation) throw new Error('Failed to create consultation. Please try again.')
+
+      onClose()
+      if (timing === 'now') {
+        router.push({
+          pathname: '/(patient)/waiting-room',
+          params: {
+            consultationId: consultation.id,
+            doctorId: doctor.id,
+            doctorName: doctor.name,
+            consultationType: consultType,
           },
-        },
-      ]
-    )
+        })
+      } else {
+        Alert.alert(
+          'Appointment Scheduled',
+          `Your ${selectedType.label} consultation with ${doctor.name} has been scheduled for ${days[selectedDay].label} at ${selectedTime}.`,
+          [{ text: 'OK' }]
+        )
+      }
+    } catch (err: any) {
+      Alert.alert('Booking Failed', err?.message ?? 'Something went wrong. Please try again.')
+    } finally {
+      setConfirming(false)
+    }
   }
 
   const canGoNext = () => {
@@ -258,14 +316,15 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
             <Pressable
               style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.75 }]}
               onPress={() => setStep(s => (s - 1) as 1 | 2 | 3)}
+              disabled={confirming}
             >
               <Text style={styles.backBtnText}>Back</Text>
             </Pressable>
           )}
           <Pressable
             onPress={handleNext}
-            disabled={!canGoNext()}
-            style={({ pressed }) => [styles.nextBtnWrap, pressed && { opacity: 0.88 }, !canGoNext() && styles.btnDisabled]}
+            disabled={!canGoNext() || confirming}
+            style={({ pressed }) => [styles.nextBtnWrap, pressed && { opacity: 0.88 }, (!canGoNext() || confirming) && styles.btnDisabled]}
           >
             <LinearGradient
               colors={gradients.interactive}
@@ -273,9 +332,13 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
               end={{ x: 1, y: 0 }}
               style={styles.nextBtn}
             >
-              <Text style={styles.nextBtnText}>
-                {step === 3 ? 'Proceed to Payment' : 'Continue →'}
-              </Text>
+              {confirming ? (
+                <ActivityIndicator color={colors.mistWhite} />
+              ) : (
+                <Text style={styles.nextBtnText}>
+                  {step === 3 ? (timing === 'now' ? 'Confirm & Find Doctor' : 'Schedule Appointment') : 'Continue →'}
+                </Text>
+              )}
             </LinearGradient>
           </Pressable>
         </View>

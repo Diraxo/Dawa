@@ -2,8 +2,8 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { useState } from 'react'
 import {
-  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -13,12 +13,21 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { CareHubAlert } from '@/components/ui/CareHubAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { supabase } from '@/lib/supabase'
+import Constants from 'expo-constants'
+import { supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { useAppStore } from '@/store/appStore'
+import { useAuthStore } from '@/store/authStore'
 
-const APP_VERSION = '1.0.0'
+const LANGUAGE_DISPLAY: Record<string, string> = {
+  en: 'English', so: 'Soomaali', am: 'አማርኛ',
+  om: 'Afaan Oromoo', ti: 'ትግርኛ', ar: 'العربية',
+}
+
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +44,8 @@ export default function ProfileScreen() {
   const { user } = useUser()
   const { signOut } = useAuth()
   const router = useRouter()
+  const { selectedLanguage } = useAppStore()
+  const { clearAuth, disconnectStream } = useAuthStore()
   const fullName =
     (user?.fullName ??
       `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()) ||
@@ -42,87 +53,44 @@ export default function ProfileScreen() {
   const email = user?.primaryEmailAddress?.emailAddress ?? ''
   const initial = (user?.firstName?.[0] ?? user?.fullName?.[0] ?? 'U').toUpperCase()
 
+  const [showLogoutAlert, setShowLogoutAlert] = useState(false)
+  const [showDeactivateAlert, setShowDeactivateAlert] = useState(false)
+  const [showDeleteAlert, setShowDeleteAlert] = useState(false)
+  const [showDeleteConfirmAlert, setShowDeleteConfirmAlert] = useState(false)
+  const [showDeleteErrorAlert, setShowDeleteErrorAlert] = useState(false)
+
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
-  const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Logout',
-        style: 'destructive',
-        onPress: async () => {
-          await signOut()
-          router.replace('/(auth)/sign-in')
-        },
-      },
-    ])
+  const handleLogout = () => setShowLogoutAlert(true)
+
+  const handleDeactivate = () => setShowDeactivateAlert(true)
+
+  const handleDeleteAccount = () => setShowDeleteAlert(true)
+
+  const confirmDeactivate = async () => {
+    setShowDeactivateAlert(false)
+    await supabase.from('users').update({ is_active: false }).eq('clerk_id', user?.id)
+    await disconnectStream()
+    await supabaseEmailAuth.auth.signOut()
+    clearAuth()
+    await signOut()
+    router.replace('/(auth)/sign-in')
   }
 
-  const handleDeactivate = () => {
-    Alert.alert(
-      'Deactivate Account',
-      'Your account will be deactivated and you will be logged out. Are you sure?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Deactivate',
-          style: 'destructive',
-          onPress: async () => {
-            await supabase
-              .from('users')
-              .update({ is_active: false })
-              .eq('clerk_id', user?.id)
-            await signOut()
-            router.replace('/(auth)/sign-in')
-          },
-        },
-      ]
-    )
+  const confirmDelete = () => {
+    setShowDeleteAlert(false)
+    setShowDeleteConfirmAlert(true)
   }
 
-  const handleDeleteAccount = () => {
-    Alert.alert(
-      'Delete Account',
-      'This will permanently delete your account and all your data. This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            Alert.alert(
-              'Confirm Deletion',
-              `Type "DELETE" to confirm. All your consultations, medical records, and account data will be removed.`,
-              [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Permanently Delete',
-                  style: 'destructive',
-                  onPress: async () => {
-                    try {
-                      // 1. Remove all user data from Supabase (cascade deletes related rows)
-                      await supabase
-                        .from('users')
-                        .delete()
-                        .eq('clerk_id', user?.id)
-                      // 2. Delete Clerk account
-                      await user?.delete()
-                      // 3. Navigate to sign-up
-                      router.replace('/(auth)/sign-up')
-                    } catch {
-                      Alert.alert(
-                        'Error',
-                        'Unable to delete account. Please contact support at support@carehub.app'
-                      )
-                    }
-                  },
-                },
-              ]
-            )
-          },
-        },
-      ]
-    )
+  const permanentlyDelete = async () => {
+    setShowDeleteConfirmAlert(false)
+    try {
+      await supabase.from('users').delete().eq('clerk_id', user?.id)
+      await user?.delete()
+      router.replace('/(auth)/sign-up')
+    } catch {
+      setShowDeleteErrorAlert(true)
+    }
   }
 
   // ── Menu definition ───────────────────────────────────────────────────────────
@@ -155,7 +123,7 @@ export default function ProfileScreen() {
     {
       icon: 'globe-outline',
       label: 'Language',
-      subtitle: 'English (US)',
+      subtitle: LANGUAGE_DISPLAY[selectedLanguage ?? 'en'] ?? 'English',
       onPress: () => router.push('/(patient)/language-settings'),
     },
     {
@@ -175,6 +143,72 @@ export default function ProfileScreen() {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
+    <>
+      <CareHubAlert
+        visible={showLogoutAlert}
+        variant="logout"
+        title="Log Out"
+        message="Are you sure you want to log out of your CareHub account?"
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowLogoutAlert(false) },
+          {
+            text: 'Log Out',
+            style: 'danger',
+            onPress: async () => {
+              setShowLogoutAlert(false)
+              await disconnectStream()
+              await supabaseEmailAuth.auth.signOut()
+              clearAuth()
+              await signOut()
+              router.replace('/(auth)/sign-in')
+            },
+          },
+        ]}
+        onClose={() => setShowLogoutAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeactivateAlert}
+        variant="warning"
+        title="Deactivate Account"
+        message="Your account will be deactivated and you will be logged out. You can reactivate by contacting support."
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowDeactivateAlert(false) },
+          { text: 'Deactivate', style: 'danger', onPress: confirmDeactivate },
+        ]}
+        onClose={() => setShowDeactivateAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteAlert}
+        variant="error"
+        title="Delete Account"
+        message="This will permanently delete your account and all your data. This cannot be undone."
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteAlert(false) },
+          { text: 'Delete', style: 'danger', onPress: confirmDelete },
+        ]}
+        onClose={() => setShowDeleteAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteConfirmAlert}
+        variant="error"
+        title="Final Confirmation"
+        message="All your consultations, medical records, and account data will be permanently removed. Are you absolutely sure?"
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteConfirmAlert(false) },
+          { text: 'Permanently Delete', style: 'danger', onPress: permanentlyDelete },
+        ]}
+        onClose={() => setShowDeleteConfirmAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteErrorAlert}
+        variant="error"
+        title="Unable to Delete"
+        message="We couldn't delete your account. Please contact support at support@carehub.app"
+        buttons={[
+          { text: 'OK', style: 'primary', onPress: () => setShowDeleteErrorAlert(false) },
+        ]}
+        onClose={() => setShowDeleteErrorAlert(false)}
+      />
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView
         style={styles.scroll}
@@ -303,6 +337,7 @@ export default function ProfileScreen() {
         <View style={styles.bottomPad} />
       </ScrollView>
     </SafeAreaView>
+    </>
   )
 }
 

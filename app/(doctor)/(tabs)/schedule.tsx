@@ -1,7 +1,9 @@
+import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
@@ -16,8 +18,9 @@ import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabase } from '@/lib/supabase'
 
-// ─── Types & Mock data ────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type DayKey = 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat' | 'Sun'
 
@@ -25,6 +28,14 @@ interface DayAvailability {
   enabled: boolean
   startTime: string
   endTime: string
+}
+
+interface Appointment {
+  id: string
+  patientName: string
+  date: string
+  time: string
+  type: 'chat' | 'phone' | 'video'
 }
 
 const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
@@ -39,16 +50,22 @@ const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
 
 const DAYS: DayKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-const MOCK_APPOINTMENTS = [
-  { id: '1', patientName: 'Abebe G.', date: 'Today', time: '10:30 AM', type: 'chat' as const, status: 'upcoming' },
-  { id: '2', patientName: 'Sara T.', date: 'Today', time: '02:00 PM', type: 'video' as const, status: 'upcoming' },
-  { id: '3', patientName: 'Kidus A.', date: 'Tomorrow', time: '11:00 AM', type: 'phone' as const, status: 'upcoming' },
-]
-
 const TYPE_ICONS = { chat: '💬', phone: '📞', video: '🎥' }
 
-function getDayLabel(day: string): string {
-  return new Date().toLocaleDateString('en-US', { weekday: 'short' }) === day ? 'Today' : day
+function formatApptDate(iso: string): { date: string; time: string } {
+  const d = new Date(iso)
+  const today = new Date()
+  const tomorrow = new Date(today)
+  tomorrow.setDate(today.getDate() + 1)
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  const date = sameDay(d, today)
+    ? 'Today'
+    : sameDay(d, tomorrow)
+      ? 'Tomorrow'
+      : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return { date, time }
 }
 
 // ─── Weekly calendar strip ────────────────────────────────────────────────────
@@ -92,21 +109,71 @@ function WeekStrip() {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ScheduleScreen() {
+  const { user } = useUser()
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
   const [acceptScheduled, setAcceptScheduled] = useState(true)
   const [onDemandOnly, setOnDemandOnly] = useState(false)
   const [savingAvailability, setSavingAvailability] = useState(false)
+  const [profileId, setProfileId] = useState<string | null>(null)
+  const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [loadingAppts, setLoadingAppts] = useState(true)
+
+  useEffect(() => {
+    if (!user?.id) return
+    ;(async () => {
+      try {
+        const { data: profile } = await supabase
+          .from('doctor_profiles')
+          .select('id, availability, user:users!inner(clerk_id)')
+          .eq('users.clerk_id', user.id)
+          .maybeSingle()
+        if (!profile) return
+        setProfileId(profile.id)
+        if (profile.availability) {
+          const saved = profile.availability as Record<string, DayAvailability>
+          setAvailability((prev) => ({ ...prev, ...saved }))
+        }
+
+        const { data: appts } = await supabase
+          .from('consultations')
+          .select('id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)')
+          .eq('doctor_id', profile.id)
+          .in('status', ['pending', 'active'])
+          .gte('scheduled_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString())
+          .order('scheduled_at', { ascending: true })
+          .limit(20)
+
+        setAppointments(
+          (appts ?? []).map((a: any) => {
+            const { date, time } = formatApptDate(a.scheduled_at)
+            return { id: a.id, patientName: a.patient?.full_name ?? 'Patient', date, time, type: a.type }
+          })
+        )
+      } finally {
+        setLoadingAppts(false)
+      }
+    })()
+  }, [user?.id])
 
   const toggleDay = (day: DayKey) =>
     setAvailability((prev) => ({ ...prev, [day]: { ...prev[day], enabled: !prev[day].enabled } }))
 
-  const handleSaveAvailability = () => {
+  const handleSaveAvailability = async () => {
+    if (savingAvailability) return
     setSavingAvailability(true)
-    // TODO: Save availability JSON to Supabase doctor_profiles
-    setTimeout(() => {
-      setSavingAvailability(false)
+    try {
+      if (!profileId) throw new Error('Doctor profile not found.')
+      const { error } = await supabase
+        .from('doctor_profiles')
+        .update({ availability })
+        .eq('id', profileId)
+      if (error) throw error
       Alert.alert('Saved', 'Your availability has been updated.')
-    }, 900)
+    } catch {
+      Alert.alert('Error', 'Could not save your availability. Please try again.')
+    } finally {
+      setSavingAvailability(false)
+    }
   }
 
   return (
@@ -183,20 +250,29 @@ export default function ScheduleScreen() {
 
         {/* Upcoming appointments */}
         <Text style={[styles.sectionTitle, styles.mt8]}>Upcoming Appointments</Text>
-        {MOCK_APPOINTMENTS.map((appt) => (
-          <View key={appt.id} style={styles.apptCard}>
-            <View style={styles.apptLeft}>
-              <Text style={styles.apptIcon}>{TYPE_ICONS[appt.type]}</Text>
-            </View>
-            <View style={styles.apptInfo}>
-              <Text style={styles.apptPatient}>{appt.patientName}</Text>
-              <Text style={styles.apptTime}>{appt.date} · {appt.time}</Text>
-            </View>
-            <View style={styles.apptStatusBadge}>
-              <Text style={styles.apptStatusText}>Upcoming</Text>
-            </View>
+        {loadingAppts ? (
+          <ActivityIndicator color={colors.careBlue} style={{ marginVertical: 20 }} />
+        ) : appointments.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Ionicons name="calendar-clear-outline" size={28} color={colors.steelGrey} />
+            <Text style={styles.emptyText}>No upcoming appointments</Text>
           </View>
-        ))}
+        ) : (
+          appointments.map((appt) => (
+            <View key={appt.id} style={styles.apptCard}>
+              <View style={styles.apptLeft}>
+                <Text style={styles.apptIcon}>{TYPE_ICONS[appt.type]}</Text>
+              </View>
+              <View style={styles.apptInfo}>
+                <Text style={styles.apptPatient}>{appt.patientName}</Text>
+                <Text style={styles.apptTime}>{appt.date} · {appt.time}</Text>
+              </View>
+              <View style={styles.apptStatusBadge}>
+                <Text style={styles.apptStatusText}>Upcoming</Text>
+              </View>
+            </View>
+          ))
+        )}
 
         {/* Block time */}
         <Pressable style={styles.blockTimeBtn}>
@@ -260,6 +336,12 @@ const styles = StyleSheet.create({
   apptTime: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginTop: 2 },
   apptStatusBadge: { backgroundColor: '#EFF6FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   apptStatusText: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.interactiveBlue },
+
+  emptyCard: {
+    backgroundColor: colors.mistWhite, borderRadius: 14, padding: 24,
+    alignItems: 'center', gap: 8, marginBottom: 10,
+  },
+  emptyText: { fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' },
 
   blockTimeBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,

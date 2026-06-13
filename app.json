@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.carehub",
+      "allowBackup": false,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",

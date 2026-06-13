@@ -1,8 +1,11 @@
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
+import { File } from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useState } from 'react'
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -19,7 +22,35 @@ import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { getAuthClient } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
+
+const CONTENT_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+}
+
+async function uploadDocument(
+  client: ReturnType<typeof getAuthClient>,
+  clerkId: string,
+  uri: string,
+  fileName: string | null,
+  label: string
+): Promise<string> {
+  const ext = (fileName ?? uri).split('.').pop()?.toLowerCase() ?? 'pdf'
+  const path = `${clerkId}/${label}-${Date.now()}.${ext}`
+  const bytes = await new File(uri).bytes()
+  const { error } = await client.storage
+    .from('doctor-documents')
+    .upload(path, bytes.buffer as ArrayBuffer, {
+      contentType: CONTENT_TYPES[ext] ?? 'application/octet-stream',
+      upsert: true,
+    })
+  if (error) throw new Error(`Failed to upload ${label}: ${error.message}`)
+  return path
+}
 
 interface PriceCardProps {
   icon: string
@@ -60,6 +91,8 @@ function PriceCard({ icon, title, description, value, onChange }: PriceCardProps
 export default function RegistrationStep4() {
   const router = useRouter()
   const store = useDoctorStore()
+  const { getToken } = useAuth()
+  const { user } = useUser()
 
   const [chatPrice, setChatPrice] = useState(store.regChatPrice)
   const [phonePrice, setPhonePrice] = useState(store.regPhonePrice)
@@ -69,16 +102,68 @@ export default function RegistrationStep4() {
   const isValid = chatPrice.length > 0 && phonePrice.length > 0 && videoPrice.length > 0
 
   const handleSubmit = async () => {
-    if (!isValid || submitting) return
+    if (!isValid || submitting || !user) return
     setSubmitting(true)
     store.updateReg({ regChatPrice: chatPrice, regPhonePrice: phonePrice, regVideoPrice: videoPrice })
 
-    // TODO: Upload data + docs to Supabase and Clerk before navigating
-    // For now navigate to under-review
-    setTimeout(() => {
-      setSubmitting(false)
+    try {
+      const token = await getToken()
+      if (!token) throw new Error('Not authenticated. Please sign in again.')
+      const client = getAuthClient(token)
+
+      // Ensure the users row exists and carries the registration info
+      const { data: userData, error: userErr } = await client
+        .from('users')
+        .upsert(
+          {
+            clerk_id: user.id,
+            email: user.primaryEmailAddress?.emailAddress ?? '',
+            full_name: store.regFullName || (user.fullName ?? ''),
+            phone: store.regPhone || null,
+            role: 'doctor',
+          },
+          { onConflict: 'clerk_id' }
+        )
+        .select('id')
+        .single()
+      if (userErr || !userData) throw new Error('Could not save your account. Please try again.')
+
+      // Upload documents to the private doctor-documents bucket
+      let licensePath: string | null = null
+      let idPath: string | null = null
+      if (store.regLicenseDocUri) {
+        licensePath = await uploadDocument(client, user.id, store.regLicenseDocUri, store.regLicenseDocName, 'license')
+      }
+      if (store.regNationalIdUri) {
+        idPath = await uploadDocument(client, user.id, store.regNationalIdUri, store.regNationalIdName, 'national-id')
+      }
+
+      // Create (or refresh) the doctor profile, pending admin approval
+      const { error: profileErr } = await client.from('doctor_profiles').upsert(
+        {
+          user_id: userData.id,
+          license_number: store.regLicenseNumber,
+          specialty: store.regSpecialty,
+          years_experience: store.regYearsOfExperience,
+          hospital_name: store.regHospitalName,
+          bio: store.regBio,
+          license_doc_url: licensePath,
+          id_doc_url: idPath,
+          chat_price: parseInt(chatPrice, 10) || 0,
+          phone_price: parseInt(phonePrice, 10) || 0,
+          video_price: parseInt(videoPrice, 10) || 0,
+          status: 'pending',
+        },
+        { onConflict: 'user_id' }
+      )
+      if (profileErr) throw new Error(`Could not submit your application: ${profileErr.message}`)
+
       router.replace('/(doctor)/registration/under-review')
-    }, 1200)
+    } catch (err) {
+      Alert.alert('Submission Failed', err instanceof Error ? err.message : 'Something went wrong. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (

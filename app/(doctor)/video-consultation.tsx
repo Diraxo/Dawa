@@ -15,6 +15,7 @@ import {
   RtcSurfaceView,
   VideoSourceType,
 } from 'react-native-agora'
+import * as ScreenCapture from 'expo-screen-capture'
 
 import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
 import { colors } from '@/constants/colors'
@@ -30,6 +31,9 @@ export default function DoctorVideoConsultationScreen() {
   const router = useRouter()
   const { userId } = useAuthStore()
   const displayName = patientName ?? 'Patient'
+
+  // Prevent screenshots and screen recording during video calls
+  ScreenCapture.usePreventScreenCapture()
 
   const [seconds, setSeconds] = useState(0)
   const [muted, setMuted] = useState(false)

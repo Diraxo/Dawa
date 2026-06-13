@@ -13,6 +13,7 @@ import {
   ClientRoleType,
   IRtcEngineEventHandler,
 } from 'react-native-agora'
+import * as ScreenCapture from 'expo-screen-capture'
 
 import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
 import { colors } from '@/constants/colors'
@@ -29,6 +30,7 @@ const STATUS_LABEL: Record<CallStatus, string> = {
 }
 
 export default function DoctorPhoneConsultationScreen() {
+  ScreenCapture.usePreventScreenCapture()
   const { patientName, chiefComplaint, consultationId } = useLocalSearchParams<{
     patientName?: string
     chiefComplaint?: string

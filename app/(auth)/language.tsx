@@ -1,3 +1,4 @@
+import { getClerkInstance } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -42,16 +43,11 @@ const LANGUAGES: Language[] = [
 
 async function saveLanguageToSupabase(language: string) {
   try {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession()
-    if (!session?.user) return
-    await supabase
-      .from('users')
-      .update({ language })
-      .eq('id', session.user.id)
+    const clerkId = getClerkInstance().user?.id
+    if (!clerkId) return
+    await supabase.from('users').update({ language }).eq('clerk_id', clerkId)
   } catch {
-    // No session yet — will persist after auth completes
+    // Not signed in yet — will persist after auth completes
   }
 }
 

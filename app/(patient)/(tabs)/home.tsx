@@ -20,6 +20,7 @@ import { QuickActionCard } from '@/components/ui/QuickActionCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabase } from '@/lib/supabase'
 
 function mapDoctor(d: any): Doctor {
   return {
@@ -38,119 +39,6 @@ function mapDoctor(d: any): Doctor {
     profile_photo_url: d.users?.profile_photo_url ?? null,
   }
 }
-
-// ─── Placeholder until Supabase has data ─────────────────────────────────────
-const AVAILABLE_DOCTORS: Doctor[] = [
-  {
-    id: '1',
-    name: 'Dr. Eleni Tesfaye',
-    subtitle: 'Tikur Anbessa Hospital',
-    specialty: 'General Practitioner',
-    rating_average: 4.9,
-    review_count: 112,
-    chat_price: 100,
-    phone_price: 150,
-    video_price: 300,
-    is_online: true,
-    profile_photo_url: null,
-  },
-  {
-    id: '2',
-    name: 'Dr. Mark Wilson',
-    subtitle: 'USA',
-    specialty: 'Dermatologist',
-    rating_average: 4.8,
-    review_count: 95,
-    chat_price: 150,
-    phone_price: 200,
-    video_price: 380,
-    is_online: true,
-    profile_photo_url: null,
-  },
-  {
-    id: '3',
-    name: 'Dr. Jean-Pierre Nshimiye',
-    subtitle: 'Rwanda',
-    specialty: 'Pediatrician',
-    rating_average: 4.7,
-    review_count: 81,
-    chat_price: 130,
-    phone_price: 180,
-    video_price: 320,
-    is_online: true,
-    profile_photo_url: null,
-  },
-  {
-    id: '4',
-    name: 'Dr. Amina Hassan',
-    subtitle: 'Somalia',
-    specialty: 'Cardiologist',
-    rating_average: 4.6,
-    review_count: 67,
-    chat_price: 200,
-    phone_price: 260,
-    video_price: 450,
-    is_online: true,
-    profile_photo_url: null,
-  },
-]
-
-const TOP_RATED_DOCTORS: Doctor[] = [
-  {
-    id: '5',
-    name: 'Dr. Samuel Bekele',
-    subtitle: 'Black Lion Hospital',
-    specialty: 'Neurologist',
-    rating_average: 5.0,
-    review_count: 243,
-    chat_price: 250,
-    phone_price: 320,
-    video_price: 500,
-    is_online: false,
-    profile_photo_url: null,
-  },
-  {
-    id: '6',
-    name: 'Dr. Fatima Al-Rashid',
-    subtitle: 'UAE',
-    specialty: 'Psychiatrist',
-    rating_average: 4.9,
-    review_count: 189,
-    chat_price: 180,
-    phone_price: 230,
-    video_price: 400,
-    is_online: true,
-    profile_photo_url: null,
-  },
-  {
-    id: '7',
-    name: 'Dr. Kidist Alemu',
-    subtitle: 'Ethiopia',
-    specialty: 'Orthopedic Surgeon',
-    rating_average: 4.8,
-    review_count: 156,
-    chat_price: 220,
-    phone_price: 280,
-    video_price: 450,
-    is_online: false,
-    profile_photo_url: null,
-  },
-  {
-    id: '8',
-    name: 'Dr. Yonas Haile',
-    subtitle: 'Yekatit 12 Hospital',
-    specialty: 'Dermatologist',
-    rating_average: 4.8,
-    review_count: 134,
-    chat_price: 160,
-    phone_price: 210,
-    video_price: 360,
-    is_online: true,
-    profile_photo_url: null,
-  },
-]
-
-import { supabase } from '@/lib/supabase'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -178,61 +66,66 @@ export default function HomeScreen() {
   useScrollToTop(scrollRef)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null)
-  const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>(AVAILABLE_DOCTORS)
-  const [topDoctors, setTopDoctors] = useState<Doctor[]>(TOP_RATED_DOCTORS)
-  const [specialties, setSpecialties] = useState<string[]>([
-    'General', 'Dermatology', 'Pediatrics', 'Mental Health', 'Cardiology', 'Neurology', 'Orthopedics',
-  ])
+  const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>([])
+  const [topDoctors, setTopDoctors] = useState<Doctor[]>([])
+  const [loadingDoctors, setLoadingDoctors] = useState(true)
+  const [specialties, setSpecialties] = useState<string[]>([])
   const [upcomingAppointment, setUpcomingAppointment] = useState<{
     doctorName: string; type: string; date: string; time: string
   } | null>(null)
 
   useEffect(() => {
-    // Online doctors
-    supabase
-      .from('doctor_profiles')
-      .select('*, users!inner(full_name, profile_photo_url)')
-      .eq('status', 'approved')
-      .eq('is_online', true)
-      .order('rating_average', { ascending: false })
-      .limit(8)
-      .then(({ data }) => { if (data?.length) setOnlineDoctors(data.map(mapDoctor)) })
+    let mounted = true
+    setLoadingDoctors(true)
 
-    // Top rated
-    supabase
-      .from('doctor_profiles')
-      .select('*, users!inner(full_name, profile_photo_url)')
-      .eq('status', 'approved')
-      .order('rating_average', { ascending: false })
-      .limit(8)
-      .then(({ data }) => {
-        if (data?.length) {
-          const mapped = data.map(mapDoctor)
-          setTopDoctors(mapped)
-          const specs = Array.from(new Set(mapped.map(d => d.specialty)))
-          if (specs.length) setSpecialties(specs)
-        }
-      })
+    // Online doctors + Top rated run in parallel
+    Promise.all([
+      supabase
+        .from('doctor_profiles')
+        .select('*, users!inner(full_name, profile_photo_url)')
+        .eq('status', 'approved')
+        .eq('is_online', true)
+        .order('rating_average', { ascending: false })
+        .limit(8),
+      supabase
+        .from('doctor_profiles')
+        .select('*, users!inner(full_name, profile_photo_url)')
+        .eq('status', 'approved')
+        .order('rating_average', { ascending: false })
+        .limit(8),
+      supabase
+        .from('consultations')
+        .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
+        .in('status', ['pending', 'active'])
+        .order('scheduled_at', { ascending: true })
+        .limit(1),
+    ]).then(([onlineRes, topRes, apptRes]) => {
+      if (!mounted) return
 
-    // Upcoming appointment (most recent pending/active consultation)
-    supabase
-      .from('consultations')
-      .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
-      .in('status', ['pending', 'active'])
-      .order('scheduled_at', { ascending: true })
-      .limit(1)
-      .then(({ data }) => {
-        if (data?.length) {
-          const appt = data[0] as any
-          const d = new Date(appt.scheduled_at)
-          setUpcomingAppointment({
-            doctorName: appt.doctor_profiles?.users?.full_name ?? 'Doctor',
-            type: appt.type ?? 'chat',
-            date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          })
-        }
-      })
+      if (onlineRes.data) setOnlineDoctors(onlineRes.data.map(mapDoctor))
+
+      if (topRes.data) {
+        const mapped = topRes.data.map(mapDoctor)
+        setTopDoctors(mapped)
+        const specs = Array.from(new Set(mapped.map(d => d.specialty)))
+        if (specs.length) setSpecialties(specs)
+      }
+
+      if (apptRes.data?.length) {
+        const appt = apptRes.data[0] as any
+        const d = new Date(appt.scheduled_at)
+        setUpcomingAppointment({
+          doctorName: appt.doctor_profiles?.users?.full_name ?? 'Doctor',
+          type: appt.type ?? 'chat',
+          date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        })
+      }
+
+      setLoadingDoctors(false)
+    })
+
+    return () => { mounted = false }
   }, [])
 
   const firstName =
@@ -366,16 +259,27 @@ export default function HomeScreen() {
           <Text style={styles.sectionTitle}>Available Now</Text>
           <View style={styles.onlineDot} />
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.doctorListContent}
-          style={styles.mt12}
-        >
-          {onlineDoctors.map((doc) => (
-            <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
-          ))}
-        </ScrollView>
+        {loadingDoctors ? (
+          <View style={[styles.emptyDoctorCard, styles.mt12]}>
+            <Text style={styles.emptyDoctorText}>Loading doctors...</Text>
+          </View>
+        ) : onlineDoctors.length === 0 ? (
+          <View style={[styles.emptyDoctorCard, styles.mt12]}>
+            <Ionicons name="person-outline" size={28} color={colors.steelGrey} />
+            <Text style={styles.emptyDoctorText}>No doctors online right now</Text>
+          </View>
+        ) : (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.doctorListContent}
+            style={styles.mt12}
+          >
+            {onlineDoctors.map((doc) => (
+              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
+            ))}
+          </ScrollView>
+        )}
 
         {/* ── Top Rated Doctors ── */}
         <View style={[styles.sectionRowSpaced, styles.mt28]}>
@@ -384,16 +288,27 @@ export default function HomeScreen() {
             <Text style={styles.seeAll}>See all</Text>
           </Pressable>
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.doctorListContent}
-          style={styles.mt12}
-        >
-          {topDoctors.map((doc) => (
-            <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
-          ))}
-        </ScrollView>
+        {loadingDoctors ? (
+          <View style={[styles.emptyDoctorCard, styles.mt12]}>
+            <Text style={styles.emptyDoctorText}>Loading...</Text>
+          </View>
+        ) : topDoctors.length === 0 ? (
+          <View style={[styles.emptyDoctorCard, styles.mt12]}>
+            <Ionicons name="medical-outline" size={28} color={colors.steelGrey} />
+            <Text style={styles.emptyDoctorText}>No approved doctors yet</Text>
+          </View>
+        ) : (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.doctorListContent}
+            style={styles.mt12}
+          >
+            {topDoctors.map((doc) => (
+              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
+            ))}
+          </ScrollView>
+        )}
 
         {/* ── Upcoming Appointment ── */}
         <Text style={[styles.sectionTitle, styles.mt28]}>Upcoming Appointment</Text>
@@ -664,6 +579,17 @@ const styles = StyleSheet.create({
     fontFamily: fonts.semiBold,
     fontSize: 12,
     color: colors.mistWhite,
+  },
+
+  // Empty doctor state
+  emptyDoctorCard: {
+    alignItems: 'center', justifyContent: 'center', gap: 8,
+    height: 80, borderRadius: 16, borderWidth: 1.5,
+    borderColor: colors.steelGrey, borderStyle: 'dashed',
+    backgroundColor: colors.mistWhite,
+  },
+  emptyDoctorText: {
+    fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF',
   },
 
   // Empty appointment state

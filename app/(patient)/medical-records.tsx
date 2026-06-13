@@ -1,8 +1,10 @@
+import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
@@ -15,10 +17,11 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabase } from '@/lib/supabase'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type RecordCategory = 'all' | 'lab' | 'prescription' | 'imaging' | 'summary'
+type RecordCategory = 'all' | 'prescription' | 'summary'
 
 interface MedicalRecord {
   id: string
@@ -27,52 +30,13 @@ interface MedicalRecord {
   date: string
   doctor: string
   fileType: 'pdf' | 'image' | 'text'
+  detail: string
 }
-
-// ─── Mock data — replace with Supabase query when ready ──────────────────────
-// supabase.from('consultation_summaries').select('*').eq('patient_id', userId)
-
-const MOCK_RECORDS: MedicalRecord[] = [
-  {
-    id: '1',
-    title: 'Blood Test Results',
-    category: 'lab',
-    date: 'Dec 10, 2025',
-    doctor: 'Dr. Eleni Tesfaye',
-    fileType: 'pdf',
-  },
-  {
-    id: '2',
-    title: 'Prescription — Antibiotics',
-    category: 'prescription',
-    date: 'Nov 28, 2025',
-    doctor: 'Dr. Jean-Pierre Nshimiye',
-    fileType: 'pdf',
-  },
-  {
-    id: '3',
-    title: 'Chest X-Ray',
-    category: 'imaging',
-    date: 'Oct 15, 2025',
-    doctor: 'Dr. Samuel Bekele',
-    fileType: 'image',
-  },
-  {
-    id: '4',
-    title: 'Consultation Summary',
-    category: 'summary',
-    date: 'Sep 3, 2025',
-    doctor: 'Dr. Fatima Al-Rashid',
-    fileType: 'text',
-  },
-]
 
 const CATEGORIES: { key: RecordCategory; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'lab', label: 'Lab' },
-  { key: 'prescription', label: 'Prescription' },
-  { key: 'imaging', label: 'Imaging' },
   { key: 'summary', label: 'Summary' },
+  { key: 'prescription', label: 'Prescription' },
 ]
 
 const FILE_ICONS: Record<string, React.ComponentProps<typeof Ionicons>['name']> = {
@@ -83,9 +47,7 @@ const FILE_ICONS: Record<string, React.ComponentProps<typeof Ionicons>['name']> 
 
 const CATEGORY_COLORS: Record<RecordCategory, string> = {
   all: colors.tealGreen,
-  lab: '#0288D1',
   prescription: colors.tealGreen,
-  imaging: colors.interactiveBlue,
   summary: '#7C3AED',
 }
 
@@ -93,23 +55,84 @@ const CATEGORY_COLORS: Record<RecordCategory, string> = {
 
 export default function MedicalRecordsScreen() {
   const router = useRouter()
+  const { user } = useUser()
   const [active, setActive] = useState<RecordCategory>('all')
+  const [records, setRecords] = useState<MedicalRecord[]>([])
+  const [loading, setLoading] = useState(true)
 
-  const filtered =
-    active === 'all' ? MOCK_RECORDS : MOCK_RECORDS.filter((r) => r.category === active)
+  useEffect(() => {
+    if (!user?.id) return
+    ;(async () => {
+      try {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('id')
+          .eq('clerk_id', user.id)
+          .maybeSingle()
+        if (!userData) return
+
+        const { data: summaries } = await supabase
+          .from('consultation_summaries')
+          .select(`
+            id, diagnosis, prescription, chief_complaint, followup_recommendation, created_at,
+            consultation:consultations!inner(
+              patient_id,
+              doctor:doctor_profiles!doctor_id(user:users(full_name))
+            )
+          `)
+          .eq('consultation.patient_id', userData.id)
+          .order('created_at', { ascending: false })
+
+        const result: MedicalRecord[] = []
+        for (const s of (summaries ?? []) as any[]) {
+          const doctorName = s.consultation?.doctor?.user?.full_name ?? 'Doctor'
+          const date = new Date(s.created_at).toLocaleDateString('en-US', {
+            month: 'short', day: 'numeric', year: 'numeric',
+          })
+          result.push({
+            id: s.id,
+            title: s.diagnosis ? `Consultation — ${s.diagnosis}` : 'Consultation Summary',
+            category: 'summary',
+            date,
+            doctor: doctorName,
+            fileType: 'text',
+            detail: [
+              s.chief_complaint && `Complaint: ${s.chief_complaint}`,
+              s.diagnosis && `Diagnosis: ${s.diagnosis}`,
+              s.followup_recommendation && `Follow-up: ${s.followup_recommendation}`,
+            ].filter(Boolean).join('\n'),
+          })
+          if (s.prescription) {
+            result.push({
+              id: `${s.id}-rx`,
+              title: 'Prescription',
+              category: 'prescription',
+              date,
+              doctor: doctorName,
+              fileType: 'text',
+              detail: s.prescription,
+            })
+          }
+        }
+        setRecords(result)
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [user?.id])
+
+  const filtered = active === 'all' ? records : records.filter((r) => r.category === active)
 
   const handleUpload = () => {
-    Alert.alert(
-      'Upload Document',
-      'Add expo-document-picker to enable file uploads.',
-      [{ text: 'OK' }]
-    )
+    Alert.alert('Coming Soon', 'Document uploads will be available in a future update.', [{ text: 'OK' }])
   }
 
   const handleOpen = (record: MedicalRecord) => {
-    Alert.alert(record.title, `Doctor: ${record.doctor}\nDate: ${record.date}`, [
-      { text: 'Close' },
-    ])
+    Alert.alert(
+      record.title,
+      `Doctor: ${record.doctor}\nDate: ${record.date}${record.detail ? `\n\n${record.detail}` : ''}`,
+      [{ text: 'Close' }]
+    )
   }
 
   return (
@@ -168,11 +191,13 @@ export default function MedicalRecordsScreen() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {filtered.length === 0 ? (
+        {loading ? (
+          <ActivityIndicator color={colors.careBlue} style={{ marginTop: 60 }} />
+        ) : filtered.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Ionicons name="folder-open-outline" size={52} color={colors.steelGrey} />
-            <Text style={styles.emptyTitle}>No records found</Text>
-            <Text style={styles.emptySub}>Upload your first document using the button above.</Text>
+            <Text style={styles.emptyTitle}>No records yet</Text>
+            <Text style={styles.emptySub}>Your consultation summaries and prescriptions will appear here after your first consultation.</Text>
           </View>
         ) : (
           filtered.map((record) => (

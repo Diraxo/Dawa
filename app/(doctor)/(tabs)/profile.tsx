@@ -2,8 +2,8 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { useState } from 'react'
 import {
-  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -13,10 +13,13 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { CareHubAlert } from '@/components/ui/CareHubAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useDoctorStore } from '@/store/doctorStore'
+import { supabaseEmailAuth } from '@/lib/supabase'
+import { useAuthStore } from '@/store/authStore'
 
 // ─── Menu row component ───────────────────────────────────────────────────────
 
@@ -57,29 +60,54 @@ export default function DoctorProfileScreen() {
   const { signOut } = useAuth()
   const router = useRouter()
   const { regSpecialty, regHospitalName } = useDoctorStore()
+  const { clearAuth, disconnectStream } = useAuthStore()
 
   const fullName = user?.fullName ?? `Dr. ${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()
   const initial = (user?.firstName?.[0] ?? fullName[0] ?? 'D').toUpperCase()
   const specialty = regSpecialty || 'General Practice'
   const hospital = regHospitalName || 'Hospital'
 
-  const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Logout',
-        style: 'destructive',
-        onPress: async () => {
-          await signOut()
-          router.replace('/(auth)/sign-in')
-        },
-      },
-    ])
-  }
+  const [showLogoutAlert, setShowLogoutAlert] = useState(false)
+  const [showComingSoonAlert, setShowComingSoonAlert] = useState(false)
 
-  const showComingSoon = () => Alert.alert('Coming Soon', 'This feature will be available soon.')
+  const handleLogout = () => setShowLogoutAlert(true)
+
+  const showComingSoon = () => setShowComingSoonAlert(true)
 
   return (
+    <>
+      <CareHubAlert
+        visible={showLogoutAlert}
+        variant="logout"
+        title="Log Out"
+        message="Are you sure you want to log out of your CareHub account?"
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowLogoutAlert(false) },
+          {
+            text: 'Log Out',
+            style: 'danger',
+            onPress: async () => {
+              setShowLogoutAlert(false)
+              await disconnectStream()
+              await supabaseEmailAuth.auth.signOut()
+              clearAuth()
+              await signOut()
+              router.replace('/(auth)/sign-in')
+            },
+          },
+        ]}
+        onClose={() => setShowLogoutAlert(false)}
+      />
+      <CareHubAlert
+        visible={showComingSoonAlert}
+        variant="info"
+        title="Coming Soon"
+        message="This feature is coming soon. We're working hard to bring it to you!"
+        buttons={[
+          { text: 'Got it', style: 'primary', onPress: () => setShowComingSoonAlert(false) },
+        ]}
+        onClose={() => setShowComingSoonAlert(false)}
+      />
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
         {/* ── Profile Header ── */}
@@ -188,6 +216,7 @@ export default function DoctorProfileScreen() {
         <View style={{ height: 32 }} />
       </ScrollView>
     </SafeAreaView>
+    </>
   )
 }
 

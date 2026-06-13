@@ -33,6 +33,8 @@ yarn-error.*
 # local env files — .env contains real Supabase keys, never commit
 .env
 .env*.local
+.env.production
+.env.production.local
 
 # Firebase service account credentials — never commit these
 *firebase-adminsdk*.json

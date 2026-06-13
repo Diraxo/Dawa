@@ -2,7 +2,7 @@ import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
   Image,
@@ -18,7 +18,7 @@ import { IncomingRequestModal } from '@/components/doctor/IncomingRequestModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { type IncomingRequest, useDoctorStore } from '@/store/doctorStore'
 
 const CONSULTATION_ICONS = { chat: '💬', phone: '📞', video: '🎥' }
@@ -26,8 +26,6 @@ const CONSULTATION_ICONS = { chat: '💬', phone: '📞', video: '🎥' }
 interface ScheduleItem {
   id: string; patientName: string; time: string; type: 'chat' | 'phone' | 'video'
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getGreeting() {
   const h = new Date().getHours()
@@ -37,8 +35,6 @@ function getGreeting() {
 function getFormattedDate() {
   return new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
 }
-
-// ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function DoctorHomeScreen() {
   const router = useRouter()
@@ -50,78 +46,133 @@ export default function DoctorHomeScreen() {
 
   const [schedule, setSchedule] = useState<ScheduleItem[]>([])
   const [stats, setStats] = useState({ consultations: 0, earnings: 0, rating: 0 })
+  const [doctorProfileId, setDoctorProfileId] = useState<string | null>(null)
+  const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
+  // ── Load doctor profile ID + today's data ─────────────────────────────────
   useEffect(() => {
-    getToken().then(token => {
+    getToken().then(async token => {
       if (!token) return
       const client = getAuthClient(token)
       const today = new Date(); today.setHours(0, 0, 0, 0)
       const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1)
 
-      // Today's schedule
-      client
-        .from('consultations')
-        .select(`id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)`)
-        .gte('scheduled_at', today.toISOString())
-        .lt('scheduled_at', tomorrow.toISOString())
-        .in('status', ['pending', 'active'])
-        .order('scheduled_at', { ascending: true })
-        .then(({ data }) => {
-          if (data) {
-            setSchedule(data.map((r: any) => ({
-              id: r.id,
-              patientName: r.patient?.full_name ?? 'Patient',
-              time: new Date(r.scheduled_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-              type: r.type ?? 'chat',
-            })))
-          }
-        })
-
-      // Stats: today's completed consultations count + doctor rating
-      Promise.all([
+      const [profileRes, schedRes, statsRes] = await Promise.all([
+        // Doctor profile (id needed for Realtime filter)
+        client.from('doctor_profiles').select('id, rating_average').single(),
+        // Today's schedule
+        client
+          .from('consultations')
+          .select(`id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)`)
+          .gte('scheduled_at', today.toISOString())
+          .lt('scheduled_at', tomorrow.toISOString())
+          .in('status', ['pending', 'active'])
+          .order('scheduled_at', { ascending: true }),
+        // Today's completed stats
         client.from('consultations')
           .select('id, patient_amount', { count: 'exact' })
           .eq('status', 'completed')
           .gte('ended_at', today.toISOString()),
-        client.from('doctor_profiles')
-          .select('rating_average')
-          .single(),
-      ]).then(([consultRes, profileRes]) => {
-        const count = consultRes.count ?? 0
-        const earned = (consultRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.patient_amount) || 0), 0)
-        const rating = Number((profileRes.data as any)?.rating_average ?? 0)
+      ])
+
+      if (profileRes.data) {
+        setDoctorProfileId((profileRes.data as any).id)
+        const rating = Number((profileRes.data as any).rating_average ?? 0)
+        const count = statsRes.count ?? 0
+        const earned = (statsRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.patient_amount) || 0), 0)
         setStats({ consultations: count, earnings: earned, rating })
-      })
+      }
+
+      if (schedRes.data) {
+        setSchedule(schedRes.data.map((r: any) => ({
+          id: r.id,
+          patientName: (r.patient as any)?.full_name ?? 'Patient',
+          time: new Date(r.scheduled_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          type: r.type ?? 'chat',
+        })))
+      }
     })
   }, [])
 
-  const [showMockRequest, setShowMockRequest] = useState(false)
-  const mockRequest: IncomingRequest = {
-    id: 'mock-1',
-    patientName: 'Abebe Girma',
-    patientAge: 34,
-    consultationType: 'chat',
-    price: 150,
-    currency: 'ETB',
+  // ── Realtime: listen for new pending consultations ─────────────────────────
+  useEffect(() => {
+    if (!doctorProfileId) return
+
+    const channel = supabase
+      .channel(`doctor-requests-${doctorProfileId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'consultations',
+          filter: `doctor_id=eq.${doctorProfileId}`,
+        },
+        async (payload) => {
+          const row = payload.new as any
+          if (row.status !== 'pending') return
+
+          // Fetch patient name
+          const { data: patientData } = await supabase
+            .from('users')
+            .select('full_name')
+            .eq('id', row.patient_id)
+            .single()
+
+          const incoming: IncomingRequest = {
+            id: row.id,
+            patientName: (patientData as any)?.full_name ?? 'Patient',
+            patientAge: 0,
+            consultationType: row.type ?? 'chat',
+            price: Number(row.patient_amount) ?? 0,
+            currency: 'ETB',
+          }
+          setIncomingRequest(incoming)
+        }
+      )
+      .subscribe()
+
+    realtimeChannelRef.current = channel
+    return () => { supabase.removeChannel(channel) }
+  }, [doctorProfileId])
+
+  // ── Toggle online / offline — syncs to Supabase ───────────────────────────
+  const updateOnlineStatus = async (online: boolean) => {
+    setIsOnline(online)
+    const token = await getToken()
+    if (token && doctorProfileId) {
+      await getAuthClient(token)
+        .from('doctor_profiles')
+        .update({ is_online: online })
+        .eq('id', doctorProfileId)
+    }
   }
 
   const handleGoOnline = () => {
     if (isOnline) {
       Alert.alert('Go Offline?', 'Patients will not be able to send you consultation requests.', [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Go Offline', onPress: () => setIsOnline(false) },
+        { text: 'Go Offline', onPress: () => updateOnlineStatus(false) },
       ])
     } else {
-      setIsOnline(true)
+      updateOnlineStatus(true)
     }
   }
 
-  const handleAccept = () => {
-    const req = activeRequest
+  const handleAccept = async () => {
+    const req = incomingRequest
     setIncomingRequest(null)
-    setShowMockRequest(false)
     if (!req) return
-    const params = { patientName: req.patientName, consultationId: req.id }
+
+    const token = await getToken()
+    if (token) {
+      await getAuthClient(token)
+        .from('consultations')
+        .update({ status: 'active', started_at: new Date().toISOString() })
+        .eq('id', req.id)
+    }
+
+    const params = { consultationId: req.id, patientName: req.patientName }
     if (req.consultationType === 'phone') {
       router.push({ pathname: '/(doctor)/phone-consultation', params })
     } else if (req.consultationType === 'video') {
@@ -131,25 +182,32 @@ export default function DoctorHomeScreen() {
     }
   }
 
-  const handleDecline = (_reason: string) => {
+  const handleDecline = async (reason: string) => {
+    const req = incomingRequest
     setIncomingRequest(null)
-    setShowMockRequest(false)
-  }
+    if (!req) return
 
-  const activeRequest = incomingRequest ?? (showMockRequest ? mockRequest : null)
+    const token = await getToken()
+    if (token) {
+      await getAuthClient(token)
+        .from('consultations')
+        .update({ status: 'cancelled' })
+        .eq('id', req.id)
+    }
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       {/* Incoming request modal */}
-      {activeRequest && (
+      {incomingRequest && (
         <IncomingRequestModal
-          visible={!!activeRequest}
-          patientName={activeRequest.patientName}
-          patientAge={activeRequest.patientAge}
-          consultationType={activeRequest.consultationType}
-          price={activeRequest.price}
-          currency={activeRequest.currency}
-          consultationId={activeRequest.id}
+          visible={!!incomingRequest}
+          patientName={incomingRequest.patientName}
+          patientAge={incomingRequest.patientAge}
+          consultationType={incomingRequest.consultationType}
+          price={incomingRequest.price}
+          currency={incomingRequest.currency}
+          consultationId={incomingRequest.id}
           onAccept={handleAccept}
           onDecline={handleDecline}
         />
@@ -165,7 +223,7 @@ export default function DoctorHomeScreen() {
           <View style={styles.headerRight}>
             <Pressable style={styles.bellBtn} hitSlop={8}>
               <Ionicons name="notifications-outline" size={24} color={colors.mistWhite} />
-              <View style={styles.bellBadge} />
+              {incomingRequest && <View style={styles.bellBadge} />}
             </Pressable>
             <Pressable
               onPress={() => router.push('/(doctor)/(tabs)/profile')}
@@ -199,7 +257,7 @@ export default function DoctorHomeScreen() {
                 </>
               ) : (
                 <>
-                  <View style={[styles.pulseDotWrap]}>
+                  <View style={styles.pulseDotWrap}>
                     <View style={[styles.pulseDot, styles.pulseDotOffline]} />
                   </View>
                   <View>
@@ -286,8 +344,6 @@ export default function DoctorHomeScreen() {
   )
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.cloudGrey },
   scrollContent: { paddingBottom: 24 },
@@ -305,7 +361,6 @@ const styles = StyleSheet.create({
   avatarFallback: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center' },
   avatarInitial: { fontFamily: fonts.bold, fontSize: 18, color: colors.mistWhite },
 
-  // Online card
   onlineCard: {
     backgroundColor: colors.mistWhite, borderRadius: 20, padding: 18,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -330,7 +385,6 @@ const styles = StyleSheet.create({
   sectionTitle: { fontFamily: fonts.semiBold, fontSize: 17, color: colors.inkBlack, marginBottom: 12 },
   mt20: { marginTop: 20 },
 
-  // Stats
   statsRow: { flexDirection: 'row', gap: 10 },
   statCard: {
     flex: 1, backgroundColor: colors.mistWhite, borderRadius: 16, padding: 14,
@@ -340,7 +394,6 @@ const styles = StyleSheet.create({
   statValue: { fontFamily: fonts.bold, fontSize: 16 },
   statLabel: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', textAlign: 'center' },
 
-  // Schedule
   scheduleItem: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: colors.mistWhite, borderRadius: 14, padding: 14, marginBottom: 10,
@@ -356,7 +409,6 @@ const styles = StyleSheet.create({
   emptyWrap: { alignItems: 'center', paddingVertical: 24, gap: 8 },
   emptyText: { fontFamily: fonts.regular, fontSize: 14, color: '#9CA3AF' },
 
-  // Quick actions
   quickRow: { flexDirection: 'row', gap: 10 },
   quickCard: {
     flex: 1, backgroundColor: colors.mistWhite, borderRadius: 16, padding: 14, alignItems: 'center', gap: 8,
@@ -364,4 +416,3 @@ const styles = StyleSheet.create({
   },
   quickLabel: { fontFamily: fonts.medium, fontSize: 12, color: colors.inkBlack, textAlign: 'center' },
 })
-

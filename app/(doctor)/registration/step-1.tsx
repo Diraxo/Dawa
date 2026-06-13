@@ -1,8 +1,9 @@
+import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Alert,
   Image,
@@ -19,15 +20,32 @@ import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabaseEmailAuth } from '@/lib/supabase'
 import { type Gender, useDoctorStore } from '@/store/doctorStore'
 
 const GENDERS: Gender[] = ['Male', 'Female', 'Other']
 
 export default function RegistrationStep1() {
   const router = useRouter()
+  const { user } = useUser()
   const { updateReg, regFullName, regPhone, regDateOfBirth, regGender, regProfilePhotoUri } = useDoctorStore()
 
   const [fullName, setFullName] = useState(regFullName)
+
+  // Pre-fill name if the store has no saved name yet.
+  // Clerk user (Google/Facebook OAuth) → use user.fullName
+  // Supabase email user → read from user_metadata.full_name set during sign-up
+  useEffect(() => {
+    if (fullName) return
+    if (user?.fullName) {
+      setFullName(user.fullName)
+      return
+    }
+    supabaseEmailAuth.auth.getUser().then(({ data: { user: supaUser } }) => {
+      const name = supaUser?.user_metadata?.full_name as string | undefined
+      if (name) setFullName(name)
+    })
+  }, [user?.fullName])
   const [phone, setPhone] = useState(regPhone)
   const [dob, setDob] = useState(regDateOfBirth)
   const [gender, setGender] = useState<Gender | null>(regGender)

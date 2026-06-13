@@ -1,0 +1,258 @@
+'use client'
+
+import { useState, useEffect, useCallback } from 'react'
+import { useAuth, useSignUp } from '@clerk/nextjs'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { Mail, Lock, User, Eye, EyeOff, MailOpen } from 'lucide-react'
+import { AuthCard } from '@/components/ui/AuthCard'
+import { supabaseEmailAuth } from '@/lib/supabase'
+
+function isValidEmail(v: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
+}
+
+export default function SignUpPage() {
+  const { isSignedIn } = useAuth()
+  const { isLoaded, signUp } = useSignUp()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (isSignedIn) router.replace('/dashboard')
+  }, [isSignedIn, router])
+
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+
+  const [nameError, setNameError] = useState('')
+  const [emailError, setEmailError] = useState('')
+  const [passwordError, setPasswordError] = useState('')
+  const [confirmError, setConfirmError] = useState('')
+  const [globalError, setGlobalError] = useState('')
+  const [signUpSuccess, setSignUpSuccess] = useState(false)
+
+  const [loading, setLoading] = useState(false)
+  const [googleLoading, setGoogleLoading] = useState(false)
+  const [facebookLoading, setFacebookLoading] = useState(false)
+
+  const isFormReady =
+    fullName.trim().length > 0 &&
+    isValidEmail(email) &&
+    password.length >= 8 &&
+    password === confirmPassword
+
+  function validate(): boolean {
+    let ok = true
+    setNameError(''); setEmailError(''); setPasswordError(''); setConfirmError(''); setGlobalError('')
+    if (!fullName.trim()) { setNameError('Please enter your full name'); ok = false }
+    if (!email.trim()) { setEmailError('Please enter your email'); ok = false }
+    else if (!isValidEmail(email)) { setEmailError('Please enter a valid email address'); ok = false }
+    if (!password) { setPasswordError('Please enter a password'); ok = false }
+    else if (password.length < 8) { setPasswordError('Password must be at least 8 characters'); ok = false }
+    if (!confirmPassword) { setConfirmError('Please confirm your password'); ok = false }
+    else if (password !== confirmPassword) { setConfirmError('Passwords must match'); ok = false }
+    return ok
+  }
+
+  // ── Email+password sign-up via Supabase Auth ───────────────────────────────
+  async function handleContinue(e: React.FormEvent) {
+    e.preventDefault()
+    if (!validate()) return
+    setLoading(true)
+    try {
+      const { data: { session }, error } = await supabaseEmailAuth.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: { data: { full_name: fullName.trim() } },
+      })
+
+      if (error) {
+        const msg = error.message?.toLowerCase() ?? ''
+        if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('user already')) {
+          setEmailError('This email is already registered. Please sign in instead.')
+        } else if (msg.includes('password')) {
+          setPasswordError(error.message)
+        } else {
+          setGlobalError(error.message ?? 'Something went wrong. Please try again.')
+        }
+        return
+      }
+
+      if (session) {
+        // Email confirmation disabled — session is active immediately
+        router.replace('/role')
+      } else {
+        // Email confirmation required — show confirmation screen
+        setSignUpSuccess(true)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ── Google OAuth (Clerk) ───────────────────────────────────────────────────
+  const handleGoogle = useCallback(async () => {
+    if (!isLoaded || googleLoading) return
+    setGoogleLoading(true)
+    try {
+      await signUp!.authenticateWithRedirect({
+        strategy: 'oauth_google',
+        redirectUrl: '/sso-callback',
+        redirectUrlComplete: '/dashboard',
+      })
+    } finally {
+      setGoogleLoading(false)
+    }
+  }, [isLoaded, googleLoading, signUp])
+
+  // ── Facebook OAuth (Clerk) ─────────────────────────────────────────────────
+  const handleFacebook = useCallback(async () => {
+    if (!isLoaded || facebookLoading) return
+    setFacebookLoading(true)
+    try {
+      await signUp!.authenticateWithRedirect({
+        strategy: 'oauth_facebook',
+        redirectUrl: '/sso-callback',
+        redirectUrlComplete: '/dashboard',
+      })
+    } finally {
+      setFacebookLoading(false)
+    }
+  }, [isLoaded, facebookLoading, signUp])
+
+  // ── Email confirmation success state ─────────────────────────────────────
+  if (signUpSuccess) {
+    return (
+      <AuthCard title="Check your email" subtitle="">
+        <div className="flex flex-col items-center gap-5 py-4">
+          <MailOpen size={64} className="text-teal-green" />
+          <p className="text-ink-black/70 text-sm text-center leading-relaxed">
+            We sent a confirmation link to<br />
+            <strong className="text-ink-black">{email.trim().toLowerCase()}</strong>
+          </p>
+          <p className="text-ink-black/50 text-xs text-center leading-relaxed">
+            Click the link in the email to activate your account, then come back to sign in.
+          </p>
+          <Link href="/sign-in" className="btn-primary w-full text-center">
+            Go to Sign In →
+          </Link>
+        </div>
+      </AuthCard>
+    )
+  }
+
+  return (
+    <AuthCard title="Sign Up" subtitle="Create account and access all health services">
+      <form onSubmit={handleContinue} className="flex flex-col gap-4">
+        {/* Full Name */}
+        <div>
+          <div className="relative">
+            <User size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <input
+              type="text"
+              value={fullName}
+              onChange={e => { setFullName(e.target.value); setNameError('') }}
+              placeholder="Full name"
+              className={`w-full h-[52px] pl-11 pr-4 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${nameError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+            />
+          </div>
+          {nameError && <p className="text-danger text-xs mt-1.5 px-1">{nameError}</p>}
+        </div>
+
+        {/* Email */}
+        <div>
+          <div className="relative">
+            <Mail size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <input
+              type="email"
+              value={email}
+              onChange={e => { setEmail(e.target.value); setEmailError('') }}
+              placeholder="Your email"
+              className={`w-full h-[52px] pl-11 pr-4 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${emailError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+            />
+          </div>
+          {emailError && <p className="text-danger text-xs mt-1.5 px-1">{emailError}</p>}
+        </div>
+
+        {/* Password */}
+        <div>
+          <div className="relative">
+            <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <input
+              type={showPassword ? 'text' : 'password'}
+              value={password}
+              onChange={e => { setPassword(e.target.value); setPasswordError('') }}
+              placeholder="Password (min 8 characters)"
+              className={`w-full h-[52px] pl-11 pr-12 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${passwordError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+            />
+            <button type="button" onClick={() => setShowPassword(p => !p)} className="absolute right-4 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70 transition-colors">
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
+          {passwordError && <p className="text-danger text-xs mt-1.5 px-1">{passwordError}</p>}
+        </div>
+
+        {/* Confirm Password */}
+        <div>
+          <div className="relative">
+            <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <input
+              type={showConfirm ? 'text' : 'password'}
+              value={confirmPassword}
+              onChange={e => { setConfirmPassword(e.target.value); setConfirmError('') }}
+              placeholder="Confirm password"
+              className={`w-full h-[52px] pl-11 pr-12 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${confirmError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+            />
+            <button type="button" onClick={() => setShowConfirm(p => !p)} className="absolute right-4 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70 transition-colors">
+              {showConfirm ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
+          {confirmError && <p className="text-danger text-xs mt-1.5 px-1">{confirmError}</p>}
+        </div>
+
+        {globalError && <p className="text-danger text-xs font-medium px-1">{globalError}</p>}
+
+        <button
+          type="submit"
+          disabled={!isFormReady || loading}
+          className="btn-primary w-full disabled:opacity-50"
+        >
+          {loading ? 'Creating account…' : 'Continue →'}
+        </button>
+      </form>
+
+      <div className="flex items-center gap-3 my-5">
+        <div className="flex-1 h-px bg-steel-grey" />
+        <span className="text-ink-black/40 text-xs font-medium">OR</span>
+        <div className="flex-1 h-px bg-steel-grey" />
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <button onClick={handleGoogle} disabled={googleLoading} className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-50">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+            <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
+            <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
+            <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+          </svg>
+          {googleLoading ? 'Redirecting…' : 'Continue with Google'}
+        </button>
+        <button onClick={handleFacebook} disabled={facebookLoading} className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-50">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M18 9a9 9 0 10-10.406 8.891V11.6H5.309V9h2.285V7.023c0-2.256 1.343-3.503 3.4-3.503.984 0 2.014.176 2.014.176V5.9h-1.135c-1.117 0-1.466.694-1.466 1.406V9h2.494l-.399 2.6h-2.095v6.291A9 9 0 0018 9z" fill="#1877F2"/>
+          </svg>
+          {facebookLoading ? 'Redirecting…' : 'Continue with Facebook'}
+        </button>
+      </div>
+
+      <p className="text-center text-sm text-ink-black/60 mt-6">
+        Have an account?{' '}
+        <Link href="/sign-in" className="text-teal-green font-semibold hover:underline">Login</Link>
+      </p>
+    </AuthCard>
+  )
+}

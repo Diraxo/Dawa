@@ -27,6 +27,7 @@ export default function VerifyScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { email } = useLocalSearchParams<{ email: string }>()
+
   const { isLoaded, signUp, setActive } = useSignUp()
 
   const [code, setCode] = useState<string[]>(Array(CODE_LENGTH).fill(''))
@@ -34,7 +35,7 @@ export default function VerifyScreen() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  // ── Countdown timer ───────────────────────────────────────────────────────────
+  // ── Countdown timer ───────────────────────────────────────────────────────
   useEffect(() => {
     if (timer <= 0) return
     const id = setInterval(() => setTimer((t) => t - 1), 1000)
@@ -44,9 +45,9 @@ export default function VerifyScreen() {
   const fmt = (s: number) =>
     `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
 
-  // ── Verify against Clerk ──────────────────────────────────────────────────────
+  // ── Verify Clerk sign-up OTP ──────────────────────────────────────────────
   const verifyCode = async (codeStr: string) => {
-    if (!isLoaded || !signUp || loading) return
+    if (loading || !isLoaded || !signUp) return
     setLoading(true)
     setError('')
     try {
@@ -63,7 +64,6 @@ export default function VerifyScreen() {
       const errMsg: string =
         err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? 'Something went wrong.'
       const lower = errCode.toLowerCase() + errMsg.toLowerCase()
-
       setError(
         lower.includes('incorrect') || lower.includes('invalid') || lower.includes('wrong')
           ? 'Incorrect code. Please check and try again.'
@@ -77,16 +77,12 @@ export default function VerifyScreen() {
     }
   }
 
-  // ── Auto-verify when all digits entered ───────────────────────────────────────
   const handleCodeChange = (newCode: string[]) => {
     setCode(newCode)
     setError('')
-    if (newCode.every((d) => d !== '')) {
-      verifyCode(newCode.join(''))
-    }
+    if (newCode.every((d) => d !== '')) verifyCode(newCode.join(''))
   }
 
-  // ── Resend code ───────────────────────────────────────────────────────────────
   const handleResend = async () => {
     if (!isLoaded || !signUp) return
     setError('')
@@ -101,7 +97,6 @@ export default function VerifyScreen() {
 
   const isComplete = code.every((d) => d !== '')
 
-  // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <KeyboardAvoidingView
       style={styles.flex}
@@ -116,7 +111,6 @@ export default function VerifyScreen() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Outer wrapper: top content + pinned button ── */}
         <View style={styles.inner}>
           <View>
             {/* ── TOP NAV ── */}
@@ -124,10 +118,10 @@ export default function VerifyScreen() {
               <Pressable onPress={() => router.back()} hitSlop={8} style={styles.backBtn}>
                 <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
               </Pressable>
-              <Pressable style={styles.langBtn}>
+              <View style={styles.langBtn}>
                 <Text style={styles.langText}>English</Text>
                 <Ionicons name="chevron-down" size={14} color={colors.inkBlack} />
-              </Pressable>
+              </View>
             </View>
 
             {/* ── HEADER ── */}
@@ -154,24 +148,14 @@ export default function VerifyScreen() {
             {/* ── ERROR CARD ── */}
             {!!error && (
               <View style={styles.errorCard}>
-                <Ionicons
-                  name="close-circle-outline"
-                  size={20}
-                  color={colors.error}
-                  style={styles.cardIcon}
-                />
+                <Ionicons name="close-circle-outline" size={20} color={colors.error} style={styles.cardIcon} />
                 <Text style={styles.errorCardText}>{error}</Text>
               </View>
             )}
 
             {/* ── INFO CARD ── */}
             <View style={styles.infoCard}>
-              <Ionicons
-                name="information-circle-outline"
-                size={22}
-                color={colors.interactiveBlue}
-                style={styles.cardIcon}
-              />
+              <Ionicons name="information-circle-outline" size={22} color={colors.interactiveBlue} style={styles.cardIcon} />
               <Text style={styles.infoText}>
                 Check your spam folder if you didn&apos;t receive the email
               </Text>
@@ -190,11 +174,10 @@ export default function VerifyScreen() {
               end={{ x: 1, y: 0 }}
               style={styles.continueBtn}
             >
-              {loading ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <Text style={styles.continueText}>Continue →</Text>
-              )}
+              {loading
+                ? <ActivityIndicator color="#FFFFFF" />
+                : <Text style={styles.continueText}>Continue →</Text>
+              }
             </LinearGradient>
           </Pressable>
         </View>
@@ -203,142 +186,40 @@ export default function VerifyScreen() {
   )
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
-  flex: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  scroll: {
-    flexGrow: 1,
-    paddingHorizontal: 24,
-    backgroundColor: '#FFFFFF',
-  },
-  inner: {
-    flex: 1,
-    justifyContent: 'space-between',
-  },
+  flex: { flex: 1, backgroundColor: '#FFFFFF' },
+  scroll: { flexGrow: 1, paddingHorizontal: 24, backgroundColor: '#FFFFFF' },
+  inner: { flex: 1, justifyContent: 'space-between' },
 
-  // ── Top nav ──
-  topNav: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 10,
-  },
-  backBtn: {
-    padding: 4,
-  },
-  langBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-  },
-  langText: {
-    fontFamily: fonts.medium,
-    fontSize: 14,
-    color: colors.inkBlack,
-  },
+  topNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
+  backBtn: { padding: 4 },
+  langBtn: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  langText: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack },
 
-  // ── Header ──
-  headerBlock: {
-    alignItems: 'center',
-    marginTop: 24,
-    marginBottom: 36,
-  },
-  title: {
-    fontFamily: fonts.bold,
-    fontSize: 32,
-    color: colors.inkBlack,
-    lineHeight: 38,
-    marginBottom: 12,
-  },
-  subtitle: {
-    fontFamily: fonts.regular,
-    fontSize: 14,
-    color: '#6B7280',
-    lineHeight: 22,
-  },
-  emailText: {
-    fontFamily: fonts.bold,
-    fontSize: 14,
-    color: colors.inkBlack,
-    marginTop: 2,
-  },
+  headerBlock: { alignItems: 'center', marginTop: 24, marginBottom: 36 },
+  title: { fontFamily: fonts.bold, fontSize: 32, color: colors.inkBlack, lineHeight: 38, marginBottom: 12 },
+  subtitle: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280', lineHeight: 22 },
+  emailText: { fontFamily: fonts.bold, fontSize: 14, color: colors.inkBlack, marginTop: 2 },
 
-  // ── Timer / Resend ──
-  timerRow: {
-    alignItems: 'center',
-    marginTop: 20,
-    marginBottom: 24,
-  },
-  timerText: {
-    fontFamily: fonts.regular,
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  resendLink: {
-    fontFamily: fonts.semiBold,
-    fontSize: 14,
-    color: colors.tealGreen,
-  },
+  timerRow: { alignItems: 'center', marginTop: 20, marginBottom: 24 },
+  timerText: { fontFamily: fonts.regular, fontSize: 14, color: '#9CA3AF' },
+  resendLink: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.tealGreen },
 
-  // ── Error card ──
   errorCard: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: '#FFF5F5',
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 12,
-    gap: 10,
+    flexDirection: 'row', alignItems: 'flex-start', backgroundColor: '#FFF5F5',
+    borderRadius: 12, padding: 14, marginBottom: 12, gap: 10,
   },
-  errorCardText: {
-    flex: 1,
-    fontFamily: fonts.regular,
-    fontSize: 13,
-    color: colors.error,
-    lineHeight: 20,
-  },
+  errorCardText: { flex: 1, fontFamily: fonts.regular, fontSize: 13, color: colors.error, lineHeight: 20 },
 
-  // ── Info card ──
   infoCard: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: '#EFF6FF',
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
+    flexDirection: 'row', alignItems: 'flex-start', backgroundColor: '#EFF6FF',
+    borderRadius: 12, padding: 14, gap: 10,
   },
-  cardIcon: {
-    marginTop: 1,
-  },
-  infoText: {
-    flex: 1,
-    fontFamily: fonts.regular,
-    fontSize: 13,
-    color: '#374151',
-    lineHeight: 20,
-  },
+  cardIcon: { marginTop: 1 },
+  infoText: { flex: 1, fontFamily: fonts.regular, fontSize: 13, color: '#374151', lineHeight: 20 },
 
-  // ── Continue button ──
-  continueWrapper: {
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginTop: 32,
-  },
-  continueBtn: {
-    height: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  continueText: {
-    fontFamily: fonts.bold,
-    fontSize: 16,
-    color: '#FFFFFF',
-  },
-  dimmed: {
-    opacity: 0.5,
-  },
+  continueWrapper: { borderRadius: 16, overflow: 'hidden', marginTop: 32 },
+  continueBtn: { height: 52, alignItems: 'center', justifyContent: 'center' },
+  continueText: { fontFamily: fonts.bold, fontSize: 16, color: '#FFFFFF' },
+  dimmed: { opacity: 0.5 },
 })

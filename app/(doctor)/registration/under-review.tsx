@@ -1,3 +1,4 @@
+import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -20,6 +21,7 @@ import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 
 const STEPS = [
@@ -30,27 +32,40 @@ const STEPS = [
 
 export default function UnderReviewScreen() {
   const router = useRouter()
+  const { user } = useUser()
   const { clearReg } = useDoctorStore()
   const [checking, setChecking] = useState(false)
   const [showRejectionModal, setShowRejectionModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
 
   const handleCheckStatus = async () => {
+    if (checking) return
     setChecking(true)
-    // TODO: Replace with real Supabase query: doctor_profiles.status for current user
-    setTimeout(() => {
-      setChecking(false)
-      // Simulate pending — swap to 'approved' or 'rejected' when wired to Supabase
-      const mockStatus = 'pending' as string
-      if (mockStatus === 'approved') {
+    try {
+      const { data: profile, error } = await supabase
+        .from('doctor_profiles')
+        .select('status, rejection_reason, user:users!inner(clerk_id)')
+        .eq('users.clerk_id', user?.id ?? '')
+        .maybeSingle()
+
+      if (error) throw error
+
+      if (profile?.status === 'approved') {
+        clearReg()
         router.replace('/(doctor)/(tabs)/home')
-      } else if (mockStatus === 'rejected') {
-        setRejectionReason('License number could not be verified. Please reapply with a valid medical license.')
+      } else if (profile?.status === 'rejected') {
+        setRejectionReason(
+          profile.rejection_reason ?? 'Your application was not approved. Please reapply with valid documents.'
+        )
         setShowRejectionModal(true)
       } else {
         Alert.alert('Still Under Review', 'Your application is being reviewed. Check back in 24–48 hours.')
       }
-    }, 1200)
+    } catch {
+      Alert.alert('Connection Error', 'Could not check your application status. Please try again.')
+    } finally {
+      setChecking(false)
+    }
   }
 
   const handleReapply = () => {

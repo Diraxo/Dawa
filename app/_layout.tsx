@@ -1,4 +1,5 @@
 import '../global.css'
+import React from 'react'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import i18n, { LANGUAGE_STORAGE_KEY } from '@/lib/i18n'
 import {
@@ -17,8 +18,10 @@ import { OverlayProvider } from 'stream-chat-expo'
 
 import { useStreamConnection } from '@/hooks/useStreamConnection'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
+import { useVersionCheck } from '@/hooks/useVersionCheck'
 import { streamClient } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
+import ForceUpdateScreen from '@/components/shared/ForceUpdateScreen'
 
 
 const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY!
@@ -135,6 +138,23 @@ function AppInitializer() {
 
 // ─── Root layout ───────────────────────────────────────────────────────────────
 
+function VersionGate({ children }: { children: React.ReactNode }) {
+  const { status, updateMessage, storeUrl, latestVersion } = useVersionCheck()
+
+  if (status === 'update_required') {
+    return (
+      <ForceUpdateScreen
+        message={updateMessage}
+        storeUrl={storeUrl}
+        latestVersion={latestVersion}
+      />
+    )
+  }
+
+  // While loading, render nothing extra — the native splash is still visible
+  return <>{children}</>
+}
+
 export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({
     Montserrat_400Regular,
@@ -157,10 +177,12 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
         <ClerkLoaded>
-          <OverlayProvider>
-            <AppInitializer />
-            <Stack screenOptions={{ headerShown: false }} />
-          </OverlayProvider>
+          <VersionGate>
+            <OverlayProvider>
+              <AppInitializer />
+              <Stack screenOptions={{ headerShown: false }} />
+            </OverlayProvider>
+          </VersionGate>
         </ClerkLoaded>
       </ClerkProvider>
     </GestureHandlerRootView>

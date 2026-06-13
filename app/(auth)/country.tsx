@@ -1,3 +1,4 @@
+import { getClerkInstance } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -133,13 +134,11 @@ function CountryItem({ item, selected, isLast, onPress }: CountryItemProps) {
 
 async function saveCountryToSupabase(country: string) {
   try {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession()
-    if (!session?.user) return
-    await supabase.from('users').update({ country }).eq('id', session.user.id)
+    const clerkId = getClerkInstance().user?.id
+    if (!clerkId) return
+    await supabase.from('users').update({ country }).eq('clerk_id', clerkId)
   } catch {
-    // No session yet — will persist after auth
+    // Not signed in yet — will persist after auth
   }
 }
 

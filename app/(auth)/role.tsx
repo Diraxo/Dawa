@@ -6,7 +6,6 @@ import { StatusBar } from 'expo-status-bar'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  ActivityIndicator,
   Animated,
   Modal,
   Pressable,
@@ -17,9 +16,10 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
+import { LoadingOverlay } from '@/components/ui/LoadingOverlay'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { supabase } from '@/lib/supabase'
+import { supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 
@@ -40,9 +40,9 @@ type Role = 'patient' | 'doctor'
 
 function PatientIllustration() {
   return (
-    <View style={illustStyles.outerCircle}>
-      <View style={[illustStyles.circle, { backgroundColor: '#FFC5BA' }]}>
-        <Ionicons name="people" size={72} color="#B85C4E" />
+    <View style={illustStyles.wrapper}>
+      <View style={[illustStyles.circle, { backgroundColor: '#FFE8E4' }]}>
+        <Ionicons name="people" size={80} color="#C0392B" />
       </View>
     </View>
   )
@@ -50,11 +50,11 @@ function PatientIllustration() {
 
 function DoctorIllustration() {
   return (
-    <View style={illustStyles.outerCircle}>
-      <View style={[illustStyles.circle, { backgroundColor: '#89DDD3' }]}>
-        <Ionicons name="person" size={60} color="#006B63" />
+    <View style={illustStyles.wrapper}>
+      <View style={[illustStyles.circle, { backgroundColor: '#D4F4F1' }]}>
+        <Ionicons name="medical" size={72} color="#00796B" />
         <View style={illustStyles.badge}>
-          <Ionicons name="medical" size={16} color="#FFFFFF" />
+          <Ionicons name="pulse" size={14} color="#FFFFFF" />
         </View>
       </View>
     </View>
@@ -62,28 +62,30 @@ function DoctorIllustration() {
 }
 
 const illustStyles = StyleSheet.create({
-  outerCircle: {
+  wrapper: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 18,
+    marginBottom: 20,
   },
   circle: {
-    width: 130,
-    height: 130,
-    borderRadius: 65,
+    width: 150,
+    height: 150,
+    borderRadius: 75,
     alignItems: 'center',
     justifyContent: 'center',
   },
   badge: {
     position: 'absolute',
-    bottom: 6,
-    right: 6,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    bottom: 8,
+    right: 8,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: '#00897B',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
   },
 })
 
@@ -92,7 +94,7 @@ const illustStyles = StyleSheet.create({
 export default function RoleScreen() {
   const router = useRouter()
   const { top } = useSafeAreaInsets()
-  const { user } = useUser()
+  const { user, isLoaded: userLoaded } = useUser()
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage, selectedCountry } = useAppStore()
   const { setUserRole } = useAuthStore()
@@ -101,16 +103,28 @@ export default function RoleScreen() {
   const [loading, setLoading] = useState(false)
   const [langDropdown, setLangDropdown] = useState(false)
 
+  const [supaUser, setSupaUser] = useState<any>(null)
+  const [supaUserLoaded, setSupaUserLoaded] = useState(false)
+
   const currentLang =
     LANGUAGES.find((l) => l.id === (selectedLanguage ?? 'en')) ?? LANGUAGES[0]
 
-  // ── Scale animation refs ───────────────────────────────────────────────────
   const patientScale = useRef(new Animated.Value(1)).current
   const doctorScale = useRef(new Animated.Value(1)).current
 
-  // ── Re-entry: if user already has a saved role, redirect straight away ─────
   useEffect(() => {
-    if (!user?.id) return
+    supabaseEmailAuth.auth.getSession().then(({ data: { session } }) => {
+      setSupaUser(session?.user ?? null)
+      setSupaUserLoaded(true)
+    })
+    const { data: { subscription } } = supabaseEmailAuth.auth.onAuthStateChange((_, session) => {
+      setSupaUser(session?.user ?? null)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (!userLoaded || !user?.id) return
     ;(async () => {
       try {
         const { data } = await supabase
@@ -118,75 +132,94 @@ export default function RoleScreen() {
           .select('role')
           .eq('clerk_id', user.id)
           .single()
-        if (data?.role === 'patient') {
-          router.replace('/(patient)/(tabs)/home' as never)
-        } else if (data?.role === 'doctor') {
-          router.replace('/(doctor)/registration/step-1' as never)
-        }
-      } catch {
-        // no record yet — show the picker normally
-      }
+        if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+        else if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+      } catch {}
     })()
-  }, [user?.id])
+  }, [userLoaded, user?.id])
 
-  // ── Card selection with spring animation ──────────────────────────────────
-  const handleSelect = (role: Role) => {
-    setSelectedRole(role)
-    Animated.parallel([
-      Animated.spring(patientScale, {
-        toValue: role === 'patient' ? 1.04 : 1,
-        useNativeDriver: true,
-        tension: 80,
-        friction: 6,
-      }),
-      Animated.spring(doctorScale, {
-        toValue: role === 'doctor' ? 1.04 : 1,
-        useNativeDriver: true,
-        tension: 80,
-        friction: 6,
-      }),
-    ]).start()
+  useEffect(() => {
+    // Clerk user takes priority — don't let a stale Supabase email session redirect
+    if (userLoaded && !!user) return
+    if (!supaUserLoaded || !supaUser?.id) return
+    ;(async () => {
+      try {
+        const { data } = await supabase
+          .from('users')
+          .select('role')
+          .eq('clerk_id', supaUser.id)
+          .single()
+        if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+        else if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+      } catch {}
+    })()
+  }, [supaUserLoaded, supaUser?.id, userLoaded, user])
+
+  // ── Toggle + bounce animation ─────────────────────────────────────────────
+  const bounce = (anim: Animated.Value, select: boolean) => {
+    if (select) {
+      Animated.sequence([
+        Animated.spring(anim, { toValue: 1.09, useNativeDriver: true, tension: 400, friction: 4 }),
+        Animated.spring(anim, { toValue: 1.05, useNativeDriver: true, tension: 150, friction: 8 }),
+      ]).start()
+    } else {
+      Animated.spring(anim, { toValue: 1, useNativeDriver: true, tension: 150, friction: 8 }).start()
+    }
   }
 
-  // ── Continue: save to Supabase + Zustand, then navigate ───────────────────
+  const handleSelect = (role: Role) => {
+    const next = selectedRole === role ? null : role
+    setSelectedRole(next)
+    bounce(patientScale, next === 'patient')
+    bounce(doctorScale, next === 'doctor')
+  }
+
+  // ── Continue ──────────────────────────────────────────────────────────────
   const handleContinue = async () => {
-    if (!selectedRole || loading || !user) return
+    const isClerkUser = userLoaded && !!user
+    const isSupaUser = supaUserLoaded && !!supaUser
+    if (!selectedRole || loading || (!isClerkUser && !isSupaUser)) return
     setLoading(true)
     try {
-      await supabase.from('users').upsert(
-        {
-          clerk_id: user.id,
-          email: user.primaryEmailAddress?.emailAddress ?? '',
-          full_name: user.fullName ?? '',
-          role: selectedRole,
-          country: selectedCountry ?? '',
-          language: selectedLanguage ?? 'en',
-        },
-        { onConflict: 'clerk_id' }
-      )
+      const record = isClerkUser
+        ? {
+            clerk_id: user!.id,
+            email: user!.primaryEmailAddress?.emailAddress ?? '',
+            full_name: user!.fullName ?? '',
+            role: selectedRole,
+            country: selectedCountry ?? '',
+            language: selectedLanguage ?? 'en',
+          }
+        : {
+            clerk_id: supaUser!.id,
+            email: supaUser!.email ?? '',
+            full_name: (supaUser!.user_metadata?.full_name as string) ?? '',
+            role: selectedRole,
+            country: selectedCountry ?? '',
+            language: selectedLanguage ?? 'en',
+          }
+      await supabase.from('users').upsert(record, { onConflict: 'clerk_id' })
       setUserRole(selectedRole)
-      if (selectedRole === 'patient') {
-        router.replace('/(patient)/(tabs)/home' as never)
-      } else {
-        router.replace('/(doctor)/registration/step-1' as never)
-      }
+      if (selectedRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+      else router.replace('/(doctor)/registration/step-1' as never)
     } catch {
-      // navigate anyway — role is persisted in Zustand
       setUserRole(selectedRole)
-      if (selectedRole === 'patient') {
-        router.replace('/(patient)/(tabs)/home' as never)
-      } else {
-        router.replace('/(doctor)/registration/step-1' as never)
-      }
+      if (selectedRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+      else router.replace('/(doctor)/registration/step-1' as never)
     } finally {
       setLoading(false)
     }
   }
 
   // ── Card render helper ────────────────────────────────────────────────────
-  const renderCard = (role: Role, label: string, Illustration: () => ReactElement, scale: Animated.Value) => {
+  const renderCard = (
+    role: Role,
+    label: string,
+    Illustration: () => ReactElement,
+    scale: Animated.Value,
+  ) => {
     const isSelected = selectedRole === role
-    const labelStyle = role === 'doctor' ? styles.cardLabelDoctor : styles.cardLabelPatient
+    const labelColor = role === 'doctor' ? colors.tealGreen : colors.inkBlack
 
     return (
       <Animated.View style={[styles.cardAnimWrapper, { transform: [{ scale }] }]}>
@@ -200,13 +233,13 @@ export default function RoleScreen() {
             >
               <View style={styles.cardInner}>
                 <Illustration />
-                <Text style={labelStyle}>{label}</Text>
+                <Text style={[styles.cardLabel, { color: labelColor }]}>{label}</Text>
               </View>
             </LinearGradient>
           ) : (
             <View style={styles.cardUnselected}>
               <Illustration />
-              <Text style={labelStyle}>{label}</Text>
+              <Text style={[styles.cardLabel, { color: labelColor }]}>{label}</Text>
             </View>
           )}
         </Pressable>
@@ -216,100 +249,106 @@ export default function RoleScreen() {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar style="dark" />
+    <>
+      <LoadingOverlay
+        visible={loading}
+        message={
+          selectedRole === 'patient'
+            ? 'Setting up your patient profile...'
+            : 'Setting up your doctor account...'
+        }
+      />
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="dark" />
 
-      {/* ── LANGUAGE DROPDOWN MODAL ── */}
-      <Modal
-        visible={langDropdown}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setLangDropdown(false)}
-      >
-        <Pressable style={styles.modalOverlay} onPress={() => setLangDropdown(false)}>
-          <View style={[styles.langMenu, { top: top + 48 }]}>
-            {LANGUAGES.map((lang) => {
-              const isActive = (selectedLanguage ?? 'en') === lang.id
-              return (
-                <Pressable
-                  key={lang.id}
-                  style={[styles.langMenuItem, isActive && styles.langMenuItemActive]}
-                  onPress={() => {
-                    setSelectedLanguage(lang.id)
-                    setLangDropdown(false)
-                  }}
+        {/* ── LANGUAGE DROPDOWN MODAL ── */}
+        <Modal
+          visible={langDropdown}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLangDropdown(false)}
+        >
+          <Pressable style={styles.modalOverlay} onPress={() => setLangDropdown(false)}>
+            <View style={[styles.langMenu, { top: top + 48 }]}>
+              {LANGUAGES.map((lang) => {
+                const isActive = (selectedLanguage ?? 'en') === lang.id
+                return (
+                  <Pressable
+                    key={lang.id}
+                    style={[styles.langMenuItem, isActive && styles.langMenuItemActive]}
+                    onPress={() => {
+                      setSelectedLanguage(lang.id)
+                      setLangDropdown(false)
+                    }}
+                  >
+                    <Text style={[styles.langMenuItemText, isActive && styles.langMenuItemTextActive]}>
+                      {lang.nativeName}
+                    </Text>
+                    {lang.nativeName !== lang.englishName && (
+                      <Text style={styles.langMenuItemSub}>{lang.englishName}</Text>
+                    )}
+                    {isActive && (
+                      <Ionicons name="checkmark" size={16} color={colors.tealGreen} style={styles.langMenuCheck} />
+                    )}
+                  </Pressable>
+                )
+              })}
+            </View>
+          </Pressable>
+        </Modal>
+
+        <View style={styles.container}>
+          {/* ── TOP NAV ── */}
+          <View style={styles.topNav}>
+            <Pressable onPress={() => router.back()} hitSlop={8} style={styles.backBtn}>
+              <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
+            </Pressable>
+            <Pressable style={styles.langBtn} onPress={() => setLangDropdown(true)}>
+              <Text style={styles.langText}>{currentLang.nativeName}</Text>
+              <Ionicons name="chevron-down" size={14} color={colors.inkBlack} />
+            </Pressable>
+          </View>
+
+          {/* ── CONTENT ── */}
+          <View style={styles.content}>
+            <Text style={styles.title}>{t('whichOneAreYou')}</Text>
+            <Text style={styles.subtitle}>{t('whichSubtitle')}</Text>
+
+            {/* ── CARDS ── */}
+            <View style={styles.cardsRow}>
+              {renderCard('patient', t('patient'), PatientIllustration, patientScale)}
+              {renderCard('doctor', t('healthcareProfessional'), DoctorIllustration, doctorScale)}
+            </View>
+          </View>
+
+          {/* ── CONTINUE BUTTON ── */}
+          <View style={styles.bottomSection}>
+            <Pressable
+              onPress={handleContinue}
+              disabled={!selectedRole || loading || (!(userLoaded && user) && !(supaUserLoaded && supaUser))}
+              style={styles.continuePressable}
+            >
+              {selectedRole ? (
+                <LinearGradient
+                  colors={['#2962FF', '#00BFA5']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.continueBtn}
                 >
-                  <Text style={[styles.langMenuItemText, isActive && styles.langMenuItemTextActive]}>
-                    {lang.nativeName}
-                  </Text>
-                  {lang.nativeName !== lang.englishName && (
-                    <Text style={styles.langMenuItemSub}>{lang.englishName}</Text>
-                  )}
-                  {isActive && (
-                    <Ionicons name="checkmark" size={16} color={colors.tealGreen} style={styles.langMenuCheck} />
-                  )}
-                </Pressable>
-              )
-            })}
-          </View>
-        </Pressable>
-      </Modal>
-
-      <View style={styles.container}>
-        {/* ── TOP NAV ── */}
-        <View style={styles.topNav}>
-          <Pressable onPress={() => router.back()} hitSlop={8} style={styles.backBtn}>
-            <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
-          </Pressable>
-          <Pressable style={styles.langBtn} onPress={() => setLangDropdown(true)}>
-            <Text style={styles.langText}>{currentLang.nativeName}</Text>
-            <Ionicons name="chevron-down" size={14} color={colors.inkBlack} />
-          </Pressable>
-        </View>
-
-        {/* ── CONTENT ── */}
-        <View style={styles.content}>
-          <Text style={styles.title}>{t('whichOneAreYou')}</Text>
-          <Text style={styles.subtitle}>{t('whichSubtitle')}</Text>
-
-          {/* ── CARDS ── */}
-          <View style={styles.cardsRow}>
-            {renderCard('patient', t('patient'), PatientIllustration, patientScale)}
-            {renderCard('doctor', t('healthcareProfessional'), DoctorIllustration, doctorScale)}
-          </View>
-        </View>
-
-        {/* ── CONTINUE BUTTON ── */}
-        <View style={styles.bottomSection}>
-          <Pressable
-            onPress={handleContinue}
-            disabled={!selectedRole || loading}
-            style={styles.continuePressable}
-          >
-            {selectedRole ? (
-              <LinearGradient
-                colors={['#2962FF', '#00BFA5']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.continueBtn}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
                   <Text style={styles.continueText}>{t('continue')}</Text>
-                )}
-              </LinearGradient>
-            ) : (
-              <View style={[styles.continueBtn, styles.continueBtnDisabled]}>
-                <Text style={[styles.continueText, styles.continueTextDisabled]}>
-                  {t('continue')}
-                </Text>
-              </View>
-            )}
-          </Pressable>
+                </LinearGradient>
+              ) : (
+                <View style={[styles.continueBtn, styles.continueBtnDisabled]}>
+                  <Text style={[styles.continueText, styles.continueTextDisabled]}>
+                    {t('continue')}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          </View>
         </View>
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </>
   )
 }
 
@@ -434,41 +473,28 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  // ── Card: selected (gradient border) ──
+  // ── Card: selected (gradient border wraps entire card) ──
   gradientBorder: {
-    borderRadius: 18,
-    padding: 2.5,
-    // shadow
-    elevation: 4,
-    shadowColor: '#2962FF',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
+    borderRadius: 20,
+    padding: 3,
   },
   cardInner: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    paddingTop: 24,
-    paddingBottom: 20,
-    paddingHorizontal: 12,
+    borderRadius: 17,
+    paddingTop: 28,
+    paddingBottom: 24,
+    paddingHorizontal: 10,
     alignItems: 'center',
-    minHeight: 220,
-    justifyContent: 'center',
   },
 
   // ── Card: unselected ──
   cardUnselected: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    paddingTop: 24,
-    paddingBottom: 20,
-    paddingHorizontal: 12,
+    borderRadius: 20,
+    paddingTop: 28,
+    paddingBottom: 24,
+    paddingHorizontal: 10,
     alignItems: 'center',
-    minHeight: 220,
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-    // shadow
     elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -476,18 +502,10 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
   },
 
-  // ── Card labels ──
-  cardLabelPatient: {
+  // ── Card label ──
+  cardLabel: {
     fontFamily: fonts.bold,
     fontSize: 16,
-    color: colors.inkBlack,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  cardLabelDoctor: {
-    fontFamily: fonts.bold,
-    fontSize: 16,
-    color: colors.tealGreen,
     textAlign: 'center',
     lineHeight: 22,
   },

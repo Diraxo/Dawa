@@ -15,6 +15,7 @@ import {
   ClientRoleType,
   IRtcEngineEventHandler,
 } from 'react-native-agora'
+import * as ScreenCapture from 'expo-screen-capture'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -38,6 +39,9 @@ export default function PhoneConsultationScreen() {
   const router = useRouter()
   const { userId } = useAuthStore()
   const { getToken } = useAuth()
+
+  // Prevent screenshots and screen recording during calls
+  ScreenCapture.usePreventScreenCapture()
 
   const [seconds, setSeconds] = useState(0)
   const [muted, setMuted] = useState(false)

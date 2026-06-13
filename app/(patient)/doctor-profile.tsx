@@ -56,6 +56,7 @@ export default function DoctorProfileScreen() {
       supabase
         .from('reviews')
         .select('*, patient:patient_id(full_name)')
+        .eq('doctor_id', id)
         .order('created_at', { ascending: false })
         .limit(10),
     ]).then(([{ data: dp }, { data: rv }]) => {
@@ -75,12 +76,9 @@ export default function DoctorProfileScreen() {
           is_online: dp.is_online ?? false,
           profile_photo_url: (dp as any).users?.profile_photo_url ?? null,
         })
-        // Filter reviews for this doctor using their user_id
-        const userId = (dp as any).users?.id
-        if (rv && userId) {
+        if (rv) {
           setReviews(
             rv
-              .filter((r: any) => r.doctor_id === userId)
               .map((r: any) => ({
                 id: r.id,
                 patientName: r.patient?.full_name ?? 'Patient',

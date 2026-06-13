@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '@clerk/clerk-expo'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -13,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { getAuthClient, supabase } from '@/lib/supabase'
 
 const ICON_MAP: Record<string, { icon: string; label: string; color: string }> = {
   chat: { icon: 'chatbubble-ellipses', label: 'Chat', color: colors.tealGreen },
@@ -20,28 +22,94 @@ const ICON_MAP: Record<string, { icon: string; label: string; color: string }> =
   video: { icon: 'videocam', label: 'Video Call', color: '#7C3AED' },
 }
 
+const ROUTE_MAP: Record<string, string> = {
+  chat: '/(patient)/chat-consultation',
+  phone: '/(patient)/phone-consultation',
+  video: '/(patient)/video-consultation',
+}
+
 export default function WaitingRoomScreen() {
   const router = useRouter()
-  const { doctorId, doctorName, consultationType } = useLocalSearchParams<{
+  const { getToken } = useAuth()
+  const {
+    consultationId,
+    doctorId,
+    doctorName,
+    consultationType,
+  } = useLocalSearchParams<{
+    consultationId: string
     doctorId: string
     doctorName: string
     consultationType: string
   }>()
 
   const typeInfo = ICON_MAP[consultationType ?? 'chat'] ?? ICON_MAP.chat
-
-  // 30-second countdown
   const [secondsLeft, setSecondsLeft] = useState(30)
+  const navigated = useRef(false)
+
+  // ── Realtime subscription for consultation status changes ─────────────────
+  useEffect(() => {
+    if (!consultationId) return
+
+    const channel = supabase
+      .channel(`waiting-${consultationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'consultations',
+          filter: `id=eq.${consultationId}`,
+        },
+        (payload) => {
+          const newStatus: string = (payload.new as any)?.status ?? ''
+          if (navigated.current) return
+
+          if (newStatus === 'active') {
+            navigated.current = true
+            router.replace({
+              pathname: ROUTE_MAP[consultationType ?? 'chat'] as any,
+              params: { consultationId, doctorId, doctorName: doctorName ?? 'Doctor' },
+            })
+          } else if (newStatus === 'cancelled') {
+            navigated.current = true
+            Alert.alert(
+              'Request Declined',
+              'The doctor has declined your request. Please try another doctor.',
+              [{ text: 'OK', onPress: () => router.back() }]
+            )
+          }
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [consultationId])
+
+  // ── 30-second countdown; auto-cancel on timeout ───────────────────────────
   useEffect(() => {
     const timer = setInterval(() => {
       setSecondsLeft(s => {
         if (s <= 1) {
           clearInterval(timer)
-          Alert.alert(
-            'No Response',
-            'The doctor did not respond in time. Please try again or choose another doctor.',
-            [{ text: 'OK', onPress: () => router.back() }]
-          )
+          if (!navigated.current) {
+            navigated.current = true
+            // Mark the consultation as cancelled on timeout
+            getToken().then(token => {
+              if (token && consultationId) {
+                getAuthClient(token)
+                  .from('consultations')
+                  .update({ status: 'cancelled' })
+                  .eq('id', consultationId)
+                  .then(() => {})
+              }
+            })
+            Alert.alert(
+              'No Response',
+              'The doctor did not respond in time. Please try again or choose another doctor.',
+              [{ text: 'OK', onPress: () => router.back() }]
+            )
+          }
           return 0
         }
         return s - 1
@@ -50,7 +118,7 @@ export default function WaitingRoomScreen() {
     return () => clearInterval(timer)
   }, [])
 
-  // Pulsing ring animation
+  // ── Pulsing ring animation ────────────────────────────────────────────────
   const pulse1 = useRef(new Animated.Value(1)).current
   const pulse2 = useRef(new Animated.Value(1)).current
   const opacity1 = useRef(new Animated.Value(0.6)).current
@@ -71,32 +139,33 @@ export default function WaitingRoomScreen() {
           ]),
         ])
       )
-
     const a1 = animRing(pulse1, opacity1, 0)
     const a2 = animRing(pulse2, opacity2, 600)
-    a1.start()
-    a2.start()
+    a1.start(); a2.start()
     return () => { a1.stop(); a2.stop() }
   }, [])
 
   const handleCancel = () => {
     Alert.alert('Cancel Request', 'Are you sure you want to cancel the consultation request?', [
       { text: 'No', style: 'cancel' },
-      { text: 'Yes, Cancel', style: 'destructive', onPress: () => router.back() },
+      {
+        text: 'Yes, Cancel',
+        style: 'destructive',
+        onPress: async () => {
+          if (!navigated.current) {
+            navigated.current = true
+            const token = await getToken()
+            if (token && consultationId) {
+              await getAuthClient(token)
+                .from('consultations')
+                .update({ status: 'cancelled' })
+                .eq('id', consultationId)
+            }
+          }
+          router.back()
+        },
+      },
     ])
-  }
-
-  // Simulate doctor accepting (for testing purposes — tap the photo)
-  const handleAccept = () => {
-    const route = consultationType === 'chat'
-      ? '/(patient)/chat-consultation'
-      : consultationType === 'phone'
-        ? '/(patient)/phone-consultation'
-        : '/(patient)/video-consultation'
-    router.replace({
-      pathname: route as any,
-      params: { doctorId, doctorName: doctorName ?? 'Doctor' },
-    })
   }
 
   return (
@@ -111,13 +180,13 @@ export default function WaitingRoomScreen() {
 
       {/* Main content */}
       <View style={styles.center}>
-        {/* Pulsing photo */}
+        {/* Pulsing icon */}
         <View style={styles.pulseWrap}>
           <Animated.View style={[styles.ring, styles.ring1, { transform: [{ scale: pulse1 }], opacity: opacity1 }]} />
           <Animated.View style={[styles.ring, styles.ring2, { transform: [{ scale: pulse2 }], opacity: opacity2 }]} />
-          <Pressable onPress={handleAccept} style={styles.photoCircle}>
+          <View style={styles.photoCircle}>
             <Ionicons name="person" size={52} color={colors.steelGrey} />
-          </Pressable>
+          </View>
         </View>
 
         <Text style={styles.waitingTitle}>Waiting for</Text>
@@ -131,7 +200,7 @@ export default function WaitingRoomScreen() {
           </Text>
         </View>
 
-        {/* Status dots */}
+        {/* Status */}
         <View style={styles.statusRow}>
           <View style={styles.statusDot} />
           <View style={[styles.statusDot, styles.statusDotMid]} />
@@ -166,13 +235,8 @@ const styles = StyleSheet.create({
 
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
 
-  // Pulsing photo
   pulseWrap: { alignItems: 'center', justifyContent: 'center', marginBottom: 28, width: 160, height: 160 },
-  ring: {
-    position: 'absolute',
-    borderRadius: 80,
-    borderWidth: 2,
-  },
+  ring: { position: 'absolute', borderRadius: 80, borderWidth: 2 },
   ring1: { width: 140, height: 140, borderColor: colors.tealGreen },
   ring2: { width: 140, height: 140, borderColor: colors.careBlue },
   photoCircle: {
@@ -183,25 +247,16 @@ const styles = StyleSheet.create({
   },
 
   waitingTitle: { fontFamily: fonts.regular, fontSize: 16, color: 'rgba(255,255,255,0.7)', marginBottom: 4 },
-  doctorName: { fontFamily: fonts.bold, fontSize: 24, color: colors.mistWhite, textAlign: 'center', marginBottom: 4 },
-  specialty: { fontFamily: fonts.regular, fontSize: 14, color: colors.tealGreen, marginBottom: 24 },
+  doctorName: { fontFamily: fonts.bold, fontSize: 24, color: colors.mistWhite, textAlign: 'center', marginBottom: 24 },
 
   timerWrap: { alignItems: 'center', marginBottom: 28 },
   timerLabel: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.5)', marginBottom: 4 },
   timerValue: { fontFamily: fonts.bold, fontSize: 36, color: colors.mistWhite },
   timerUrgent: { color: colors.error },
 
-  bioCard: {
-    backgroundColor: 'rgba(255,255,255,0.07)', borderRadius: 16,
-    padding: 16, width: '100%', marginBottom: 28,
-  },
-  bioLabel: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.tealGreen, marginBottom: 6 },
-  bioText: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.75)', lineHeight: 20 },
-
   statusRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.3)' },
   statusDotMid: { backgroundColor: colors.tealGreen },
-
   statusText: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.5)' },
 
   footer: { paddingHorizontal: 20, paddingBottom: 24 },
