@@ -1,65 +1,69 @@
 {
   "expo": {
-    "name": "carehub",
+    "name": "Dawa",
     "slug": "carehub",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "carehub",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#070E27"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.carehub.app"
     },
     "android": {
-      "package": "com.carehub",
-      "allowBackup": false,
-      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#070E27"
       },
+      "package": "com.carehub.app",
+      "versionCode": 1,
+      "allowBackup": false,
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
+        "android.permission.VIBRATE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.BLUETOOTH"
-      ]
+      ],
+      "googleServicesFile": "$GOOGLE_SERVICES_JSON"
     },
     "web": {
-      "output": "static",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
+      "expo-font",
       [
         "expo-image-picker",
         {
-          "photosPermission": "CareHub needs access to your photos to share images in consultations and update your profile.",
-          "cameraPermission": "CareHub needs camera access to take photos during consultations and update your profile."
+          "photosPermission": "Dawa needs photo access to upload profile photos and medical documents.",
+          "cameraPermission": "Dawa needs camera access for video consultations and profile photos."
         }
       ],
       [
-        "expo-splash-screen",
+        "expo-document-picker",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#000000"
-          }
+          "iCloudContainerEnvironment": "Production"
         }
       ],
       [
         "expo-av",
         {
-          "microphonePermission": "CareHub needs microphone access for voice messages and calls."
+          "microphonePermission": "Dawa needs microphone access for voice messages and calls."
         }
       ],
       [
