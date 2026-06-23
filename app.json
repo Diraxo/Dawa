@@ -4,12 +4,12 @@
     "slug": "carehub",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/white logo.jpg",
     "scheme": "carehub",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash.png",
+      "image": "./assets/images/white logo.jpg",
       "resizeMode": "contain",
       "backgroundColor": "#070E27"
     },
@@ -19,7 +19,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "foregroundImage": "./assets/images/white logo.jpg",
         "backgroundColor": "#070E27"
       },
       "package": "com.carehub.app",
