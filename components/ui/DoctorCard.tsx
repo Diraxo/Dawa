@@ -5,6 +5,7 @@ import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 
 export type Doctor = {
   id: string
@@ -20,6 +21,7 @@ export type Doctor = {
   video_price: number
   is_online: boolean
   profile_photo_url?: string | null
+  availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
 }
 
 type Props = {
@@ -173,11 +175,7 @@ const L = StyleSheet.create({
     borderRadius: 16,
     padding: 16,
     marginBottom: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   topRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 14 },
   photoWrap: { position: 'relative', flexShrink: 0 },
@@ -229,8 +227,7 @@ const G = StyleSheet.create({
   card: {
     backgroundColor: colors.mistWhite,
     borderRadius: 16, padding: 14, width: 172, marginRight: 14,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07, shadowRadius: 8, elevation: 2,
+    ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   photoWrap: { alignSelf: 'center', marginBottom: 12, position: 'relative' },

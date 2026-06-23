@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
+import { getStreamClient } from '@/lib/stream'
 
 interface Prescription {
   medicine: string
@@ -63,6 +64,7 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
       prescription: prescriptionText,
       followup_recommendation: followUp.trim() || null,
       referral_needed: referralNeeded,
+      referral_specialty: referralNeeded && referralSpecialty.trim() ? referralSpecialty.trim() : null,
     })
 
     await client.from('consultations').update({
@@ -70,6 +72,22 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
       ended_at: new Date().toISOString(),
       duration_minutes: elapsedSeconds ? Math.ceil(elapsedSeconds / 60) : null,
     }).eq('id', consultationId)
+
+    try {
+      const stream = getStreamClient()
+      const ch = stream.channel('messaging', consultationId)
+      await ch.updatePartial({ set: { consultationStatus: 'completed' } as object })
+    } catch {}
+
+    // Notify patient that the summary is ready
+    try {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      await fetch(`${supabaseUrl}/functions/v1/handle-consultation-notification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ event: 'summary_ready', consultation_id: consultationId }),
+      })
+    } catch {}
 
     setSubmitting(false)
     onDone()

@@ -8,7 +8,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -19,7 +18,9 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { DoctorCard, Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
+import { useTranslation } from 'react-i18next'
 
 const PRICE_FILTERS = [
   { label: 'Any Price', max: Infinity },
@@ -49,36 +50,63 @@ function mapDoctor(d: any): Doctor {
     video_price: Number(d.video_price) ?? 0,
     is_online: d.is_online ?? false,
     profile_photo_url: d.users?.profile_photo_url ?? null,
+    availability: d.availability ?? null,
   }
 }
 
 export default function DoctorsScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
   const [allDoctors, setAllDoctors] = useState<Doctor[]>([])
-  const [specialties, setSpecialties] = useState<string[]>(['All Specialties'])
+  const [specialties, setSpecialties] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState('')
-  const [specialty, setSpecialty] = useState('All Specialties')
+  const [specialty, setSpecialty] = useState('')
   const [specialtyOpen, setSpecialtyOpen] = useState(false)
-  const [availableNow, setAvailableNow] = useState(false)
   const [priceIdx, setPriceIdx] = useState(0)
   const [ratingIdx, setRatingIdx] = useState(0)
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
 
   useEffect(() => {
-    supabase
-      .from('doctor_profiles')
-      .select('*, users!inner(full_name, profile_photo_url)')
-      .eq('status', 'approved')
-      .order('rating_average', { ascending: false })
-      .then(({ data }) => {
-        if (!data) return
-        const mapped = data.map(mapDoctor)
-        setAllDoctors(mapped)
-        const specs = ['All Specialties', ...Array.from(new Set(mapped.map(d => d.specialty)))]
-        setSpecialties(specs)
-      })
+    Promise.all([
+      supabase
+        .from('doctor_profiles')
+        .select('*, users!inner(full_name, profile_photo_url)')
+        .eq('status', 'approved')
+        .order('rating_average', { ascending: false }),
+      supabase.from('specialties').select('name').order('name'),
+      supabase.from('doctor_profiles').select('specialty').eq('status', 'approved').not('specialty', 'is', null),
+    ]).then(([doctorsRes, adminSpecsRes, usedSpecsRes]) => {
+      if (doctorsRes.data) setAllDoctors(doctorsRes.data.map(mapDoctor))
+
+      // Only show specialty chips that exist in the admin table AND have ≥1 approved doctor
+      const adminSet = new Set((adminSpecsRes.data ?? []).map((s: any) => s.name as string))
+      const withDoctors = [...new Set(
+        (usedSpecsRes.data ?? []).map((d: any) => d.specialty as string).filter(Boolean)
+      )].filter(s => adminSet.has(s)).sort() as string[]
+      if (withDoctors.length) setSpecialties(withDoctors)
+    })
+  }, [])
+
+  // Realtime: doctor online/offline status → instantly re-sort list
+  useEffect(() => {
+    const channel = supabase
+      .channel('patient-doctors-list-status')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
+        (payload) => {
+          const updated = payload.new as any
+          if (updated.status !== 'approved') return
+          setAllDoctors(prev =>
+            prev.map(d => d.id === updated.id ? { ...d, is_online: updated.is_online } : d)
+          )
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
   const filteredDoctors = useMemo(() => {
@@ -92,11 +120,8 @@ export default function DoctorsScreen() {
         d.subtitle?.toLowerCase().includes(q)
       )
     }
-    if (specialty !== 'All Specialties') {
+    if (specialty) {
       list = list.filter(d => d.specialty === specialty)
-    }
-    if (availableNow) {
-      list = list.filter(d => d.is_online)
     }
     const minRating = RATING_FILTERS[ratingIdx].min
     if (minRating > 0) {
@@ -110,10 +135,13 @@ export default function DoctorsScreen() {
         d.video_price <= maxPrice
       )
     }
-    // Always sort by best rating
-    list.sort((a, b) => b.rating_average - a.rating_average)
+    // Online doctors always first, then by best rating
+    list.sort((a, b) => {
+      if (b.is_online !== a.is_online) return b.is_online ? 1 : -1
+      return b.rating_average - a.rating_average
+    })
     return list
-  }, [searchQuery, specialty, availableNow, priceIdx, ratingIdx])
+  }, [searchQuery, specialty, priceIdx, ratingIdx])
 
   const handleViewProfile = (id: string) => {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
@@ -122,9 +150,9 @@ export default function DoctorsScreen() {
   const ListHeader = (
     <View style={styles.headerContainer}>
       {/* Title */}
-      <Text style={styles.title}>Find a Doctor</Text>
+      <Text style={styles.title}>{t('findADoctor')}</Text>
       <Text style={styles.subtitle}>
-        {filteredDoctors.length} doctor{filteredDoctors.length !== 1 ? 's' : ''} available
+        {filteredDoctors.length} {filteredDoctors.length === 1 ? 'doctor found' : 'doctors found'}
       </Text>
 
       {/* Search bar */}
@@ -132,7 +160,7 @@ export default function DoctorsScreen() {
         <Ionicons name="search-outline" size={18} color="#9CA3AF" />
         <TextInput
           style={styles.searchInput}
-          placeholder="Search doctors, specialties..."
+          placeholder={t('searchDoctors')}
           placeholderTextColor="#9CA3AF"
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -149,28 +177,12 @@ export default function DoctorsScreen() {
         style={({ pressed }) => [styles.specialtyBtn, pressed && { opacity: 0.8 }]}
         onPress={() => setSpecialtyOpen(true)}
       >
-        <Ionicons name="medical-outline" size={16} color={specialty === 'All Specialties' ? '#6B7280' : colors.tealGreen} />
-        <Text style={[styles.specialtyBtnText, specialty !== 'All Specialties' && styles.specialtyBtnActive]}>
-          {specialty}
+        <Ionicons name="medical-outline" size={16} color={specialty === '' ? '#6B7280' : colors.tealGreen} />
+        <Text style={[styles.specialtyBtnText, specialty !== '' && styles.specialtyBtnActive]}>
+          {specialty || t('allSpecialties')}
         </Text>
         <Ionicons name="chevron-down" size={16} color="#9CA3AF" />
       </Pressable>
-
-      {/* Filter row */}
-      <View style={styles.filterRow}>
-        {/* Available Now */}
-        <View style={styles.availableRow}>
-          <View style={[styles.onlineDot, !availableNow && styles.onlineDotOff]} />
-          <Text style={styles.filterLabel}>Available Now</Text>
-          <Switch
-            value={availableNow}
-            onValueChange={setAvailableNow}
-            trackColor={{ false: colors.steelGrey, true: colors.tealGreen }}
-            thumbColor={colors.mistWhite}
-            style={styles.switch}
-          />
-        </View>
-      </View>
 
       {/* Rating chips */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
@@ -205,7 +217,7 @@ export default function DoctorsScreen() {
       {/* Sort indicator */}
       <View style={styles.sortRow}>
         <Ionicons name="trophy" size={14} color={colors.warning} />
-        <Text style={styles.sortText}>Sorted by Best Rating</Text>
+        <Text style={styles.sortText}>{t('sortedByBestRating')}</Text>
       </View>
     </View>
   )
@@ -228,8 +240,8 @@ export default function DoctorsScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Ionicons name="search-outline" size={52} color={colors.steelGrey} />
-            <Text style={styles.emptyTitle}>No doctors found</Text>
-            <Text style={styles.emptySub}>Try adjusting your filters or search query</Text>
+            <Text style={styles.emptyTitle}>{t('noDoctorsFound')}</Text>
+            <Text style={styles.emptySub}>{t('tryAdjustingFilters')}</Text>
           </View>
         }
         contentContainerStyle={styles.listContent}
@@ -245,8 +257,19 @@ export default function DoctorsScreen() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setSpecialtyOpen(false)} />
         <View style={styles.specialtySheet}>
-          <Text style={styles.sheetTitle}>Select Specialty</Text>
+          <Text style={styles.sheetTitle}>{t('selectSpecialty')}</Text>
           <ScrollView showsVerticalScrollIndicator={false}>
+            <Pressable
+              style={[styles.specialtyOption, specialty === '' && styles.specialtyOptionSelected]}
+              onPress={() => { setSpecialty(''); setSpecialtyOpen(false) }}
+            >
+              <Text style={[styles.specialtyOptionText, specialty === '' && styles.specialtyOptionTextSelected]}>
+                {t('allSpecialties')}
+              </Text>
+              {specialty === '' && (
+                <Ionicons name="checkmark" size={18} color={colors.tealGreen} />
+              )}
+            </Pressable>
             {specialties.map(s => (
               <Pressable
                 key={s}
@@ -288,8 +311,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.mistWhite, borderRadius: 14,
     paddingHorizontal: 14, paddingVertical: 12, marginBottom: 12,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05, shadowRadius: 4, elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.05, 1),
   },
   searchInput: {
     flex: 1, fontFamily: fonts.regular, fontSize: 14,
@@ -305,14 +327,6 @@ const styles = StyleSheet.create({
   },
   specialtyBtnText: { flex: 1, fontFamily: fonts.medium, fontSize: 14, color: '#6B7280' },
   specialtyBtnActive: { color: colors.tealGreen },
-
-  // Filters
-  filterRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  availableRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  onlineDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
-  onlineDotOff: { backgroundColor: colors.steelGrey },
-  filterLabel: { fontFamily: fonts.medium, fontSize: 13, color: colors.inkBlack },
-  switch: { marginLeft: 4 },
 
   // Chips
   chipScroll: { marginBottom: 12 },

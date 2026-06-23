@@ -3,13 +3,15 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   FlatList,
+  Keyboard,
   ListRenderItemInfo,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -19,6 +21,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
+import { useTranslation } from 'react-i18next'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -145,22 +148,50 @@ async function saveCountryToSupabase(country: string) {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function CountryScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { setSelectedCountry: persistCountry } = useAppStore()
 
+  const searchRef = useRef<TextInput>(null)
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [enabledCodes, setEnabledCodes] = useState<string[] | null>(null)
+
+  // Fetch enabled countries from admin settings
+  useEffect(() => {
+    supabase
+      .from('platform_settings')
+      .select('value')
+      .eq('key', 'countries')
+      .maybeSingle()
+      .then(({ data }) => {
+        if (Array.isArray(data?.value)) setEnabledCodes(data.value as string[])
+      })
+  }, [])
+
+  const visibleCountries = enabledCodes
+    ? COUNTRIES.filter((c) => enabledCodes.includes(c.id))
+    : COUNTRIES
+
+  const filteredCountries = searchQuery.trim()
+    ? visibleCountries.filter((c) =>
+        c.name.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : visibleCountries
 
   // Tap again to deselect
   const handleSelect = (name: string) => {
+    Keyboard.dismiss()
     setSelectedCountry((prev) => (prev === name ? null : name))
   }
 
-  const handleContinue = () => {
+  const handleContinue = (dest?: string) => {
+    Keyboard.dismiss()
     if (!selectedCountry) return
     persistCountry(selectedCountry)
     saveCountryToSupabase(selectedCountry)
-    router.push('/(auth)/language')
+    router.push((dest ?? '/(auth)/language') as never)
   }
 
   const isActive = selectedCountry !== null
@@ -169,7 +200,7 @@ export default function CountryScreen() {
     <CountryItem
       item={item}
       selected={selectedCountry === item.name}
-      isLast={index === COUNTRIES.length - 1}
+      isLast={index === filteredCountries.length - 1}
       onPress={() => handleSelect(item.name)}
     />
   )
@@ -186,38 +217,60 @@ export default function CountryScreen() {
         style={[styles.header, { paddingTop: top + 10 }]}
       >
         <View style={styles.headerContent}>
-          <CareHubLogo size={64} />
-          <Text style={styles.brandName}>CAREHUB</Text>
-          <Text style={styles.tagline}>TRUSTED CARE. ANYWHERE. ALWAYS.</Text>
+          <CareHubLogo size={64} variant="dark" />
+          <Text style={styles.brandName}>DAWA</Text>
+          <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>
         {/* Carved wave — white pill that overlaps from bottom */}
         <View style={styles.headerWave} />
       </LinearGradient>
 
       {/* ── TITLE + SUBTITLE ── */}
-      <View style={styles.titleSection}>
-        <Text style={styles.title}>Pick your country</Text>
-        <Text style={styles.subtitle}>
-          We will use it to provide you services and recommendations.
-        </Text>
-        <View style={styles.scrollHint}>
-          <Ionicons name="swap-vertical" size={13} color={colors.steelGrey} />
-          <Text style={styles.scrollHintText}>Scroll to find your country</Text>
+      <Pressable style={styles.titleSection} onPress={() => searchRef.current?.blur()}>
+        <Text style={styles.title}>{t('pickCountry')}</Text>
+        <Text style={styles.subtitle}>{t('pickCountrySubtitle')}</Text>
+        {/* Search box */}
+        <View style={styles.searchContainer}>
+          <Ionicons name="search" size={18} color="#9CA3AF" />
+          <TextInput
+            ref={searchRef}
+            style={styles.searchInput}
+            placeholder={t('searchCountry')}
+            placeholderTextColor="#9CA3AF"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCorrect={false}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          {searchQuery.length > 0 && (
+            <Pressable onPress={() => setSearchQuery('')} hitSlop={8}>
+              <Ionicons name="close-circle" size={18} color="#9CA3AF" />
+            </Pressable>
+          )}
         </View>
-      </View>
+      </Pressable>
 
       {/* ── COUNTRY LIST ── */}
       <View style={styles.listContainer}>
         <FlatList
           style={styles.list}
           contentContainerStyle={styles.listContent}
-          data={COUNTRIES}
+          data={filteredCountries}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="search-outline" size={36} color={colors.steelGrey} />
+              <Text style={styles.emptyText}>{t('noCountriesFound')} "{searchQuery}"</Text>
+            </View>
+          }
         />
         {/* Gradient fade indicates more content below */}
-        <View style={styles.scrollFade} pointerEvents="none">
+        <View style={[styles.scrollFade, { pointerEvents: 'none' }]}>
           <LinearGradient
             colors={['rgba(255,255,255,0)', 'rgba(255,255,255,1)']}
             style={StyleSheet.absoluteFill}
@@ -225,29 +278,33 @@ export default function CountryScreen() {
         </View>
       </View>
 
-      {/* ── CONTINUE BUTTON ── */}
+      {/* ── FOOTER: Login + Sign Up buttons ── */}
       <View style={[styles.footer, { paddingBottom: Math.max(bottom, 20) }]}>
+        {/* Login — outline */}
         <Pressable
-          onPress={handleContinue}
+          onPress={() => isActive && handleContinue('/(auth)/sign-in')}
+          style={[styles.loginWrapper, !isActive && styles.disabledOpacity]}
           disabled={!isActive}
-          style={styles.continueWrapper}
         >
-          {isActive ? (
-            <LinearGradient
-              colors={['#2962FF', '#00BFA5']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.continueButton}
-            >
-              <Text style={styles.continueText}>Continue →</Text>
-            </LinearGradient>
-          ) : (
-            <View style={[styles.continueButton, styles.continueDisabled]}>
-              <Text style={[styles.continueText, styles.continueTextDisabled]}>
-                Continue →
-              </Text>
-            </View>
-          )}
+          <View style={styles.loginButton}>
+            <Text style={styles.loginText}>{t('login')}</Text>
+          </View>
+        </Pressable>
+
+        {/* Sign Up — gradient */}
+        <Pressable
+          onPress={() => isActive && handleContinue('/(auth)/sign-up')}
+          style={[styles.signUpWrapper, !isActive && styles.disabledOpacity]}
+          disabled={!isActive}
+        >
+          <LinearGradient
+            colors={['#2962FF', '#00BFA5']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.signUpButton}
+          >
+            <Text style={styles.signUpText}>{t('signUp')}</Text>
+          </LinearGradient>
         </Pressable>
       </View>
     </View>
@@ -311,17 +368,35 @@ const styles = StyleSheet.create({
     marginTop: 6,
     lineHeight: 22,
   },
-  scrollHint: {
+  searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 8,
-    gap: 5,
+    backgroundColor: colors.cloudGrey,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.steelGrey,
+    paddingHorizontal: 12,
+    height: 46,
+    marginTop: 12,
+    gap: 8,
   },
-  scrollHintText: {
+  searchInput: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.inkBlack,
+    padding: 0,
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingTop: 48,
+    gap: 12,
+  },
+  emptyText: {
     fontFamily: fonts.medium,
-    fontSize: 11,
+    fontSize: 14,
     color: colors.steelGrey,
-    letterSpacing: 0.3,
+    textAlign: 'center',
   },
   // ── List ──
   listContainer: {
@@ -401,28 +476,47 @@ const styles = StyleSheet.create({
   // ── Footer ──
   footer: {
     backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
+    gap: 12,
     paddingHorizontal: 20,
     paddingTop: 8,
   },
-  continueWrapper: {
+  disabledOpacity: {
+    opacity: 0.5,
+  },
+  loginWrapper: {
+    flex: 1,
     borderRadius: 16,
     overflow: 'hidden',
   },
-  continueButton: {
+  loginButton: {
+    height: 52,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: colors.steelGrey,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loginText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 16,
+    color: colors.inkBlack,
+  },
+  signUpWrapper: {
+    flex: 1,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  signUpButton: {
     height: 52,
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  continueDisabled: {
-    backgroundColor: '#E5E7EB',
-  },
-  continueText: {
+  signUpText: {
     fontFamily: fonts.bold,
     fontSize: 16,
     color: '#FFFFFF',
-  },
-  continueTextDisabled: {
-    color: '#9CA3AF',
   },
 })

@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
 interface Stats {
@@ -12,6 +13,12 @@ interface Stats {
   activeNow: number
   newDoctorsThisMonth: number
   newPatientsThisWeek: number
+}
+
+interface ServiceStatus {
+  label: string
+  status: string
+  ok: boolean
 }
 
 export default function AdminHomePage() {
@@ -26,6 +33,8 @@ export default function AdminHomePage() {
     newPatientsThisWeek: 0,
   })
   const [loading, setLoading] = useState(true)
+  const [services, setServices] = useState<ServiceStatus[]>([])
+  const [healthLoading, setHealthLoading] = useState(true)
 
   useEffect(() => {
     async function load() {
@@ -66,6 +75,11 @@ export default function AdminHomePage() {
       setLoading(false)
     }
     load()
+
+    fetch('/api/admin/health')
+      .then(r => r.json())
+      .then(d => { if (d.services) setServices(d.services) })
+      .finally(() => setHealthLoading(false))
   }, [])
 
   const statCards = [
@@ -76,6 +90,7 @@ export default function AdminHomePage() {
       color: 'from-care-blue to-int-blue',
       change: loading ? '—' : `+${stats.newDoctorsThisMonth} this month`,
       alert: false,
+      href: '/admin/doctors',
     },
     {
       label: 'Pending Approvals',
@@ -84,6 +99,7 @@ export default function AdminHomePage() {
       color: 'from-warning to-orange-400',
       change: stats.pendingApprovals > 0 ? 'Needs review' : 'All clear',
       alert: stats.pendingApprovals > 0,
+      href: '/admin/approvals',
     },
     {
       label: 'Total Patients',
@@ -92,6 +108,7 @@ export default function AdminHomePage() {
       color: 'from-teal-green to-emerald-400',
       change: loading ? '—' : `+${stats.newPatientsThisWeek} this week`,
       alert: false,
+      href: '/admin/patients',
     },
     {
       label: 'Total Consultations',
@@ -100,6 +117,7 @@ export default function AdminHomePage() {
       color: 'from-int-blue to-teal-green',
       change: loading ? '—' : `${stats.completedToday} completed today`,
       alert: false,
+      href: '/admin/consultations',
     },
     {
       label: 'Active Right Now',
@@ -108,6 +126,7 @@ export default function AdminHomePage() {
       color: 'from-success to-teal-green',
       change: 'Live consultations',
       alert: false,
+      href: '/admin/consultations',
     },
   ]
 
@@ -121,9 +140,10 @@ export default function AdminHomePage() {
       {/* Stats grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-8">
         {statCards.map(card => (
-          <div
+          <Link
             key={card.label}
-            className={`card p-5 border ${card.alert ? 'border-warning/40 bg-warning/5' : 'border-transparent'}`}
+            href={card.href}
+            className={`card p-5 border transition-all hover:shadow-lg hover:-translate-y-0.5 cursor-pointer ${card.alert ? 'border-warning/40 bg-warning/5' : 'border-transparent'}`}
           >
             <div className={`w-10 h-10 rounded-2xl bg-gradient-to-br ${card.color} flex items-center justify-center text-lg mb-3`}>
               {card.icon}
@@ -135,7 +155,7 @@ export default function AdminHomePage() {
             <div className={`text-[11px] mt-1.5 font-medium ${card.alert ? 'text-warning' : 'text-teal-green'}`}>
               {card.change}
             </div>
-          </div>
+          </Link>
         ))}
       </div>
 
@@ -152,7 +172,7 @@ export default function AdminHomePage() {
               { label: 'Payments & Withdrawals', href: '/admin/payments', icon: '💰', urgent: false, badge: 0 },
               { label: 'Platform Settings', href: '/admin/settings', icon: '⚙️', urgent: false, badge: 0 },
             ].map(a => (
-              <a
+              <Link
                 key={a.href}
                 href={a.href}
                 className={`flex items-center gap-3 p-3 rounded-xl hover:bg-cloud-grey transition-colors ${a.urgent ? 'bg-warning/8 hover:bg-warning/12' : ''}`}
@@ -167,30 +187,42 @@ export default function AdminHomePage() {
                   </span>
                 )}
                 {!a.urgent && <span className="ml-auto text-ink-black/30">→</span>}
-              </a>
+              </Link>
             ))}
           </div>
         </div>
 
         <div className="card p-6">
-          <h2 className="font-montserrat font-bold text-lg text-ink-black mb-4">Platform Status</h2>
-          <div className="flex flex-col gap-3">
-            {[
-              { label: 'Database (Supabase)', status: 'Operational' },
-              { label: 'Authentication (Clerk)', status: 'Operational' },
-              { label: 'Video Calls (Agora)', status: 'Operational' },
-              { label: 'Chat (Stream)', status: 'Operational' },
-              { label: 'Push Notifications (FCM)', status: 'Operational' },
-            ].map(s => (
-              <div key={s.label} className="flex items-center justify-between py-1.5 border-b border-steel-grey last:border-0">
-                <span className="text-sm text-ink-black/70">{s.label}</span>
-                <div className="flex items-center gap-1.5">
-                  <div className="w-2 h-2 rounded-full bg-success" />
-                  <span className="text-xs text-success font-semibold">{s.status}</span>
-                </div>
-              </div>
-            ))}
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-montserrat font-bold text-lg text-ink-black">Platform Status</h2>
+            {!healthLoading && (
+              <span className="text-[10px] font-bold text-ink-black/30 uppercase tracking-wider">Live</span>
+            )}
           </div>
+          {healthLoading ? (
+            <div className="flex flex-col gap-3">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center justify-between py-1.5 border-b border-steel-grey last:border-0 animate-pulse">
+                  <div className="h-3 bg-steel-grey rounded w-40" />
+                  <div className="h-3 bg-steel-grey rounded w-16" />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {services.map(s => (
+                <div key={s.label} className="flex items-center justify-between py-1.5 border-b border-steel-grey last:border-0">
+                  <span className="text-sm text-ink-black/70">{s.label}</span>
+                  <div className="flex items-center gap-1.5">
+                    <div className={`w-2 h-2 rounded-full ${s.ok ? 'bg-success' : 'bg-warning'}`} />
+                    <span className={`text-xs font-semibold ${s.ok ? 'text-success' : 'text-warning'}`}>
+                      {s.status}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

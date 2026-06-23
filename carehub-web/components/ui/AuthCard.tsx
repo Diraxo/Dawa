@@ -14,9 +14,9 @@ export function AuthCard({ children, title, subtitle }: AuthCardProps) {
       <div className="w-full max-w-md">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2.5 justify-center mb-8">
-          <LogoMark size={40} />
+          <LogoMark size={56} variant="dark" />
           <span className="font-montserrat font-bold text-2xl text-ink-black">
-            CARE<span className="text-teal-green">HUB</span>
+            DA<span className="text-teal-green">WA</span>
           </span>
         </Link>
 

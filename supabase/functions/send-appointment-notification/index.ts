@@ -95,7 +95,15 @@ Deno.serve(async (req: Request) => {
       title,
       body: patientBody,
       type: kind === 'reminder' ? 'appointment_reminder' : 'appointment_start',
-      data_json: { consultationId: appointment_id, consultationType: consult.type },
+      data_json: kind === 'start'
+        ? {
+            screen: 'consultation',
+            consultationId: appointment_id,
+            consultationType: consult.type,
+            doctorName: doctorUser.full_name ?? '',
+            doctorId:   doctorUser.id        ?? '',
+          }
+        : { screen: 'appointments', consultationId: appointment_id, consultationType: consult.type },
     })
   }
   if (doctorUser.id) {
@@ -104,7 +112,7 @@ Deno.serve(async (req: Request) => {
       title,
       body: doctorBody,
       type: kind === 'reminder' ? 'appointment_reminder' : 'appointment_start',
-      data_json: { consultationId: appointment_id, consultationType: consult.type },
+      data_json: { screen: 'consultations', consultationId: appointment_id, consultationType: consult.type },
     })
   }
   if (notificationRows.length > 0) {
@@ -119,7 +127,17 @@ Deno.serve(async (req: Request) => {
       channelId: 'appointments',
       title,
       body: patientBody,
-      data: { screen: 'appointments', consultationId: appointment_id },
+      // For 'start' notifications navigate directly to the consultation screen;
+      // for reminders open the appointments list so the patient can review the booking.
+      data: kind === 'start'
+        ? {
+            screen: 'consultation',
+            consultationId: appointment_id,
+            consultationType: consult.type,
+            doctorName: doctorUser.full_name ?? '',
+            doctorId:   doctorUser.id        ?? '',
+          }
+        : { screen: 'appointments', consultationId: appointment_id },
       sound: 'default',
       priority: 'high',
       badge: 1,
@@ -131,7 +149,7 @@ Deno.serve(async (req: Request) => {
       channelId: 'appointments',
       title,
       body: doctorBody,
-      data: { screen: 'appointments', consultationId: appointment_id },
+      data: { screen: 'consultations', consultationId: appointment_id },
       sound: 'default',
       priority: 'high',
       badge: 1,

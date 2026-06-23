@@ -1,9 +1,10 @@
 import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
+import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Animated,
@@ -19,20 +20,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LoadingOverlay } from '@/components/ui/LoadingOverlay'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { images } from '@/constants/images'
+import { LANGUAGES } from '@/constants/languages'
+import { shadow } from '@/lib/shadow'
 import { supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
+import { useDoctorStore } from '@/store/doctorStore'
 
-// ─── Languages ────────────────────────────────────────────────────────────────
-
-const LANGUAGES = [
-  { id: 'en', nativeName: 'English', englishName: 'English' },
-  { id: 'so', nativeName: 'Soomaali', englishName: 'Somali' },
-  { id: 'am', nativeName: 'አማርኛ', englishName: 'Amharic' },
-  { id: 'om', nativeName: 'Afaan Oromoo', englishName: 'Oromo' },
-  { id: 'ti', nativeName: 'ትግርኛ', englishName: 'Tigrinya' },
-  { id: 'ar', nativeName: 'العربية', englishName: 'Arabic' },
-]
 
 type Role = 'patient' | 'doctor'
 
@@ -40,52 +35,41 @@ type Role = 'patient' | 'doctor'
 
 function PatientIllustration() {
   return (
-    <View style={illustStyles.wrapper}>
-      <View style={[illustStyles.circle, { backgroundColor: '#FFE8E4' }]}>
-        <Ionicons name="people" size={80} color="#C0392B" />
-      </View>
+    <View style={illustStyles.circleWrap}>
+      <Image
+        source={images.patientCard}
+        style={illustStyles.circleImg}
+        contentFit="cover"
+      />
     </View>
   )
 }
 
 function DoctorIllustration() {
   return (
-    <View style={illustStyles.wrapper}>
-      <View style={[illustStyles.circle, { backgroundColor: '#D4F4F1' }]}>
-        <Ionicons name="medical" size={72} color="#00796B" />
-        <View style={illustStyles.badge}>
-          <Ionicons name="pulse" size={14} color="#FFFFFF" />
-        </View>
-      </View>
+    <View style={illustStyles.circleWrap}>
+      <Image
+        source={images.doctorCard}
+        style={illustStyles.circleImg}
+        contentFit="cover"
+      />
     </View>
   )
 }
 
 const illustStyles = StyleSheet.create({
-  wrapper: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
+  circleWrap: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    overflow: 'hidden',
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 14,
   },
-  circle: {
-    width: 150,
-    height: 150,
-    borderRadius: 75,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badge: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#00897B',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
+  circleImg: {
+    width: 140,
+    height: 140,
   },
 })
 
@@ -98,6 +82,7 @@ export default function RoleScreen() {
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage, selectedCountry } = useAppStore()
   const { setUserRole } = useAuthStore()
+  const { clearReg } = useDoctorStore()
 
   const [selectedRole, setSelectedRole] = useState<Role | null>(null)
   const [loading, setLoading] = useState(false)
@@ -105,6 +90,7 @@ export default function RoleScreen() {
 
   const [supaUser, setSupaUser] = useState<any>(null)
   const [supaUserLoaded, setSupaUserLoaded] = useState(false)
+  const [globalError, setGlobalError] = useState('')
 
   const currentLang =
     LANGUAGES.find((l) => l.id === (selectedLanguage ?? 'en')) ?? LANGUAGES[0]
@@ -180,12 +166,14 @@ export default function RoleScreen() {
     const isSupaUser = supaUserLoaded && !!supaUser
     if (!selectedRole || loading || (!isClerkUser && !isSupaUser)) return
     setLoading(true)
+    setGlobalError('')
     try {
       const record = isClerkUser
         ? {
             clerk_id: user!.id,
             email: user!.primaryEmailAddress?.emailAddress ?? '',
             full_name: user!.fullName ?? '',
+            profile_photo_url: user!.imageUrl ?? null,
             role: selectedRole,
             country: selectedCountry ?? '',
             language: selectedLanguage ?? 'en',
@@ -194,58 +182,30 @@ export default function RoleScreen() {
             clerk_id: supaUser!.id,
             email: supaUser!.email ?? '',
             full_name: (supaUser!.user_metadata?.full_name as string) ?? '',
+            profile_photo_url: (supaUser!.user_metadata?.avatar_url as string) ?? null,
             role: selectedRole,
             country: selectedCountry ?? '',
             language: selectedLanguage ?? 'en',
           }
-      await supabase.from('users').upsert(record, { onConflict: 'clerk_id' })
+      const { error: upsertError } = await supabase.from('users').upsert(record, { onConflict: 'clerk_id' })
+      if (upsertError) {
+        setGlobalError('Failed to save your profile. Please check your connection and try again.')
+        return
+      }
       setUserRole(selectedRole)
-      if (selectedRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(doctor)/registration/step-1' as never)
+      if (selectedRole === 'patient') {
+        router.replace('/(patient)/(tabs)/home' as never)
+      } else {
+        clearReg()
+        router.replace('/(doctor)/registration/step-1' as never)
+      }
     } catch {
-      setUserRole(selectedRole)
-      if (selectedRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(doctor)/registration/step-1' as never)
+      setGlobalError('Something went wrong. Please try again.')
     } finally {
       setLoading(false)
     }
   }
 
-  // ── Card render helper ────────────────────────────────────────────────────
-  const renderCard = (
-    role: Role,
-    label: string,
-    Illustration: () => ReactElement,
-    scale: Animated.Value,
-  ) => {
-    const isSelected = selectedRole === role
-    const labelColor = role === 'doctor' ? colors.tealGreen : colors.inkBlack
-
-    return (
-      <Animated.View style={[styles.cardAnimWrapper, { transform: [{ scale }] }]}>
-        <Pressable onPress={() => handleSelect(role)} style={styles.cardPressable}>
-          {isSelected ? (
-            <LinearGradient
-              colors={['#2962FF', '#00BFA5']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.gradientBorder}
-            >
-              <View style={styles.cardInner}>
-                <Illustration />
-                <Text style={[styles.cardLabel, { color: labelColor }]}>{label}</Text>
-              </View>
-            </LinearGradient>
-          ) : (
-            <View style={styles.cardUnselected}>
-              <Illustration />
-              <Text style={[styles.cardLabel, { color: labelColor }]}>{label}</Text>
-            </View>
-          )}
-        </Pressable>
-      </Animated.View>
-    )
-  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -300,7 +260,7 @@ export default function RoleScreen() {
         <View style={styles.container}>
           {/* ── TOP NAV ── */}
           <View style={styles.topNav}>
-            <Pressable onPress={() => router.back()} hitSlop={8} style={styles.backBtn}>
+            <Pressable onPress={() => router.canGoBack() ? router.back() : router.replace('/(auth)/sign-in' as never)} hitSlop={8} style={styles.backBtn}>
               <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
             </Pressable>
             <Pressable style={styles.langBtn} onPress={() => setLangDropdown(true)}>
@@ -316,13 +276,61 @@ export default function RoleScreen() {
 
             {/* ── CARDS ── */}
             <View style={styles.cardsRow}>
-              {renderCard('patient', t('patient'), PatientIllustration, patientScale)}
-              {renderCard('doctor', t('healthcareProfessional'), DoctorIllustration, doctorScale)}
+              {/* Patient Card */}
+              <Animated.View style={[styles.cardAnimWrapper, { transform: [{ scale: patientScale }] }]}>
+                <Pressable onPress={() => handleSelect('patient')} style={styles.cardPressable}>
+                  {selectedRole === 'patient' ? (
+                    <LinearGradient
+                      colors={['#2962FF', '#00BFA5']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.gradientBorder}
+                    >
+                      <View style={styles.cardInner}>
+                        <PatientIllustration />
+                        <Text style={[styles.cardLabel, { color: colors.inkBlack }]}>Patient</Text>
+                      </View>
+                    </LinearGradient>
+                  ) : (
+                    <View style={styles.cardUnselected}>
+                      <PatientIllustration />
+                      <Text style={[styles.cardLabel, { color: colors.inkBlack }]}>Patient</Text>
+                    </View>
+                  )}
+                </Pressable>
+              </Animated.View>
+
+              {/* Doctor Card */}
+              <Animated.View style={[styles.cardAnimWrapper, { transform: [{ scale: doctorScale }] }]}>
+                <Pressable onPress={() => handleSelect('doctor')} style={styles.cardPressable}>
+                  {selectedRole === 'doctor' ? (
+                    <LinearGradient
+                      colors={['#2962FF', '#00BFA5']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.gradientBorder}
+                    >
+                      <View style={styles.cardInner}>
+                        <DoctorIllustration />
+                        <Text style={[styles.cardLabel, { color: colors.tealGreen }]}>{t('healthcareProfessional')}</Text>
+                      </View>
+                    </LinearGradient>
+                  ) : (
+                    <View style={styles.cardUnselected}>
+                      <DoctorIllustration />
+                      <Text style={[styles.cardLabel, { color: colors.tealGreen }]}>Doctor</Text>
+                    </View>
+                  )}
+                </Pressable>
+              </Animated.View>
             </View>
           </View>
 
           {/* ── CONTINUE BUTTON ── */}
           <View style={styles.bottomSection}>
+            {!!globalError && (
+              <Text style={styles.globalError}>{globalError}</Text>
+            )}
             <Pressable
               onPress={handleContinue}
               disabled={!selectedRole || loading || (!(userLoaded && user) && !(supaUserLoaded && supaUser))}
@@ -399,11 +407,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 6,
     minWidth: 180,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
+    ...shadow('#000', 0, 4, 12, 0.15, 8),
     borderWidth: 1,
     borderColor: colors.steelGrey,
   },
@@ -470,10 +474,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   cardPressable: {
-    flex: 1,
+    width: '100%',
   },
 
-  // ── Card: selected (gradient border wraps entire card) ──
+  // ── Card: selected — gradient wraps all 4 sides ──
   gradientBorder: {
     borderRadius: 20,
     padding: 3,
@@ -481,31 +485,24 @@ const styles = StyleSheet.create({
   cardInner: {
     backgroundColor: '#FFFFFF',
     borderRadius: 17,
-    paddingTop: 28,
-    paddingBottom: 24,
-    paddingHorizontal: 10,
     alignItems: 'center',
+    paddingBottom: 18,
+    overflow: 'hidden',
   },
 
   // ── Card: unselected ──
   cardUnselected: {
     backgroundColor: '#FFFFFF',
     borderRadius: 20,
-    paddingTop: 28,
-    paddingBottom: 24,
-    paddingHorizontal: 10,
     alignItems: 'center',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
+    paddingBottom: 18,
+    ...shadow('#000', 0, 2, 8, 0.08, 4),
   },
 
   // ── Card label ──
   cardLabel: {
     fontFamily: fonts.bold,
-    fontSize: 16,
+    fontSize: 15,
     textAlign: 'center',
     lineHeight: 22,
   },
@@ -514,6 +511,14 @@ const styles = StyleSheet.create({
   bottomSection: {
     paddingBottom: 24,
     paddingTop: 16,
+  },
+  globalError: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: colors.error,
+    textAlign: 'center',
+    marginBottom: 12,
+    lineHeight: 18,
   },
   continuePressable: {
     borderRadius: 16,

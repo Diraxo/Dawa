@@ -1,5 +1,7 @@
-import { useUser } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
+import * as DocumentPicker from 'expo-document-picker'
+import * as FileSystem from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
@@ -13,15 +15,17 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { supabase } from '@/lib/supabase'
+import { shadow } from '@/lib/shadow'
+import { getAuthClient, supabase } from '@/lib/supabase'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type RecordCategory = 'all' | 'prescription' | 'summary'
+type RecordCategory = 'all' | 'prescription' | 'summary' | 'document'
 
 interface MedicalRecord {
   id: string
@@ -31,13 +35,8 @@ interface MedicalRecord {
   doctor: string
   fileType: 'pdf' | 'image' | 'text'
   detail: string
+  storagePath?: string
 }
-
-const CATEGORIES: { key: RecordCategory; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'summary', label: 'Summary' },
-  { key: 'prescription', label: 'Prescription' },
-]
 
 const FILE_ICONS: Record<string, React.ComponentProps<typeof Ionicons>['name']> = {
   pdf: 'document-text',
@@ -49,29 +48,45 @@ const CATEGORY_COLORS: Record<RecordCategory, string> = {
   all: colors.tealGreen,
   prescription: colors.tealGreen,
   summary: '#7C3AED',
+  document: colors.careBlue,
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function MedicalRecordsScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
   const { user } = useUser()
+  const { getToken } = useAuth()
   const [active, setActive] = useState<RecordCategory>('all')
+
+  const CATEGORIES: { key: RecordCategory; label: string }[] = [
+    { key: 'all',          label: t('allRecords') },
+    { key: 'summary',      label: t('summaryRecords') },
+    { key: 'prescription', label: t('prescriptionRecords') },
+    { key: 'document',     label: t('myDocuments') },
+  ]
   const [records, setRecords] = useState<MedicalRecord[]>([])
   const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user?.id) return
     ;(async () => {
       try {
-        const { data: userData } = await supabase
+        const token = await getToken()
+        const client = token ? getAuthClient(token) : supabase
+
+        const { data: userData } = await client
           .from('users')
           .select('id')
           .eq('clerk_id', user.id)
           .maybeSingle()
         if (!userData) return
+        setSupabaseUserId((userData as any).id)
 
-        const { data: summaries } = await supabase
+        const { data: summaries } = await client
           .from('consultation_summaries')
           .select(`
             id, diagnosis, prescription, chief_complaint, followup_recommendation, created_at,
@@ -80,7 +95,7 @@ export default function MedicalRecordsScreen() {
               doctor:doctor_profiles!doctor_id(user:users(full_name))
             )
           `)
-          .eq('consultation.patient_id', userData.id)
+          .eq('consultation.patient_id', (userData as any).id)
           .order('created_at', { ascending: false })
 
         const result: MedicalRecord[] = []
@@ -114,24 +129,92 @@ export default function MedicalRecordsScreen() {
             })
           }
         }
+
+        // Load uploaded documents from storage
+        if (token) {
+          const authClient = getAuthClient(token)
+          const { data: files } = await authClient.storage
+            .from('patient-documents')
+            .list((userData as any).id, { sortBy: { column: 'created_at', order: 'desc' } })
+          for (const file of (files ?? [])) {
+            const isPdf = file.name.toLowerCase().endsWith('.pdf')
+            const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(file.name)
+            result.push({
+              id: `doc-${file.id}`,
+              title: file.name,
+              category: 'document',
+              date: new Date(file.created_at ?? Date.now()).toLocaleDateString('en-US', {
+                month: 'short', day: 'numeric', year: 'numeric',
+              }),
+              doctor: t('uploadedByYou'),
+              fileType: isPdf ? 'pdf' : isImage ? 'image' : 'text',
+              detail: '',
+              storagePath: `${(userData as any).id}/${file.name}`,
+            })
+          }
+        }
+
         setRecords(result)
       } finally {
         setLoading(false)
       }
     })()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
 
   const filtered = active === 'all' ? records : records.filter((r) => r.category === active)
 
-  const handleUpload = () => {
-    Alert.alert('Coming Soon', 'Document uploads will be available in a future update.', [{ text: 'OK' }])
+  const handleUpload = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'image/*'],
+        copyToCacheDirectory: true,
+      })
+      if (result.canceled || !result.assets?.length) return
+      const file = result.assets[0]
+
+      if (!supabaseUserId) { Alert.alert(t('error'), t('userNotFound')); return }
+      const token = await getToken()
+      if (!token) { Alert.alert(t('error'), t('authFailed')); return }
+
+      setUploading(true)
+      const fileBytes = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 })
+      const arrayBuffer = Uint8Array.from(atob(fileBytes), c => c.charCodeAt(0))
+      const path = `${supabaseUserId}/${Date.now()}_${file.name}`
+
+      const { error: uploadError } = await getAuthClient(token)
+        .storage
+        .from('patient-documents')
+        .upload(path, arrayBuffer, { contentType: file.mimeType ?? 'application/octet-stream', upsert: false })
+
+      if (uploadError) throw uploadError
+
+      const isPdf = file.name.toLowerCase().endsWith('.pdf')
+      const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(file.name)
+      const newRecord: MedicalRecord = {
+        id: `doc-${path}`,
+        title: file.name,
+        category: 'document',
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        doctor: t('uploadedByYou'),
+        fileType: isPdf ? 'pdf' : isImage ? 'image' : 'text',
+        detail: '',
+        storagePath: path,
+      }
+      setRecords(prev => [newRecord, ...prev])
+      Alert.alert(t('uploaded'), `${file.name} ${t('uploadedSuccessfully')}`)
+    } catch (err: any) {
+      Alert.alert(t('uploadFailed'), err?.message ?? t('tryAgain'))
+    } finally {
+      setUploading(false)
+    }
   }
 
   const handleOpen = (record: MedicalRecord) => {
     Alert.alert(
       record.title,
-      `Doctor: ${record.doctor}\nDate: ${record.date}${record.detail ? `\n\n${record.detail}` : ''}`,
-      [{ text: 'Close' }]
+      `${t('doctorLabel')}: ${record.doctor}\n${t('dateLabel')}: ${record.date}${record.detail ? `\n\n${record.detail}` : ''}`,
+      [{ text: t('close') }]
     )
   }
 
@@ -146,7 +229,7 @@ export default function MedicalRecordsScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Medical Records</Text>
+        <Text style={styles.headerTitle}>{t('medicalRecords')}</Text>
         <Pressable
           onPress={handleUpload}
           style={({ pressed }) => [styles.uploadIconBtn, pressed && { opacity: 0.7 }]}
@@ -196,8 +279,8 @@ export default function MedicalRecordsScreen() {
         ) : filtered.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Ionicons name="folder-open-outline" size={52} color={colors.steelGrey} />
-            <Text style={styles.emptyTitle}>No records yet</Text>
-            <Text style={styles.emptySub}>Your consultation summaries and prescriptions will appear here after your first consultation.</Text>
+            <Text style={styles.emptyTitle}>{t('noRecordsYet')}</Text>
+            <Text style={styles.emptySub}>{t('noRecordsDesc')}</Text>
           </View>
         ) : (
           filtered.map((record) => (
@@ -246,6 +329,7 @@ export default function MedicalRecordsScreen() {
         <Pressable
           style={({ pressed }) => [styles.uploadCard, pressed && { opacity: 0.88 }]}
           onPress={handleUpload}
+          disabled={uploading}
         >
           <LinearGradient
             colors={gradients.interactive}
@@ -253,8 +337,13 @@ export default function MedicalRecordsScreen() {
             end={{ x: 1, y: 0 }}
             style={styles.uploadGrad}
           >
-            <Ionicons name="add-circle-outline" size={22} color={colors.mistWhite} />
-            <Text style={styles.uploadText}>Upload New Document</Text>
+            {uploading
+              ? <ActivityIndicator color={colors.mistWhite} size="small" />
+              : <Ionicons name="cloud-upload-outline" size={22} color={colors.mistWhite} />
+            }
+            <Text style={styles.uploadText}>
+              {uploading ? t('uploading') : t('uploadNewDocument')}
+            </Text>
           </LinearGradient>
         </Pressable>
 
@@ -323,11 +412,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 5, 0.05, 2),
   },
   recordIconWrap: {
     width: 52,

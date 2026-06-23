@@ -1,9 +1,9 @@
-import { useAuth } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import { useScrollToTop } from '@react-navigation/native'
+import { useFocusEffect, useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import {
   FlatList,
   Pressable,
@@ -16,7 +16,9 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
+import { useTranslation } from 'react-i18next'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,16 +36,17 @@ interface Appointment {
   scheduledAt: string
   dateLabel: string
   timeLabel: string
+  status: 'pending' | 'active' | 'completed' | 'cancelled'
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function dateLbl(iso: string): string {
+function dateLbl(iso: string, todayLabel: string, tomorrowLabel: string): string {
   const d = new Date(iso)
   const tod = new Date()
   const tom = new Date(tod); tom.setDate(tod.getDate() + 1)
-  if (d.toDateString() === tod.toDateString()) return 'Today'
-  if (d.toDateString() === tom.toDateString()) return 'Tomorrow'
+  if (d.toDateString() === tod.toDateString()) return todayLabel
+  if (d.toDateString() === tom.toDateString()) return tomorrowLabel
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
@@ -51,7 +54,15 @@ function timeLbl(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 }
 
-function mapAppointment(row: any): Appointment {
+// On-demand bookings set scheduled_at = new Date() which has non-zero seconds.
+// Scheduled slot times are always parsed as HH:MM:00 (zero seconds).
+function isOnDemandRow(row: any): boolean {
+  if (!row.scheduled_at) return true
+  const s = new Date(row.scheduled_at)
+  return s.getSeconds() !== 0 || s.getMilliseconds() !== 0
+}
+
+function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Appointment {
   const dp = row.doctor_profiles as any
   const iso = row.scheduled_at ?? row.created_at ?? new Date().toISOString()
   return {
@@ -63,29 +74,18 @@ function mapAppointment(row: any): Appointment {
     doctorIsOnline: dp?.is_online ?? false,
     type: (row.type ?? 'chat') as ConsultationType,
     scheduledAt: iso,
-    dateLabel: dateLbl(iso),
+    dateLabel: dateLbl(iso, todayLabel, tomorrowLabel),
     timeLabel: timeLbl(iso),
+    status: (row.status ?? 'pending') as Appointment['status'],
   }
 }
 
 // ─── Config maps ──────────────────────────────────────────────────────────────
 
-const TYPE_CONFIG: Record<ConsultationType, { label: string; icon: string; joinLabel: string }> = {
-  chat: {
-    label: 'Chat',
-    icon: 'chatbubble-ellipses',
-    joinLabel: 'Join Consultation (Chat)',
-  },
-  phone: {
-    label: 'Phone Call',
-    icon: 'call',
-    joinLabel: 'Join Phone Call',
-  },
-  video: {
-    label: 'Video Call',
-    icon: 'videocam',
-    joinLabel: 'Join Video Call',
-  },
+const TYPE_ICONS: Record<ConsultationType, string> = {
+  chat: 'chatbubble-ellipses',
+  phone: 'call',
+  video: 'videocam',
 }
 
 // Deterministic avatar color from name initial
@@ -159,7 +159,11 @@ function UpcomingCard({
   item: Appointment
   onJoin: (item: Appointment) => void
 }) {
-  const cfg = TYPE_CONFIG[item.type]
+  const { t } = useTranslation()
+  const icon = TYPE_ICONS[item.type]
+  const typeLabel = item.type === 'chat' ? t('chat') : item.type === 'phone' ? t('phoneCall') : t('videoCall')
+  const joinLabel = item.type === 'chat' ? t('joinChatConsultation') : item.type === 'phone' ? t('joinPhoneCall') : t('joinVideoCall')
+  const canJoin = item.status === 'active'
   return (
     <View style={cardStyles.card}>
       {/* Top row: avatar + info + date */}
@@ -176,27 +180,34 @@ function UpcomingCard({
           <Text style={cardStyles.dateLabel}>{item.dateLabel}</Text>
           <Text style={cardStyles.timeLabel}>{item.timeLabel}</Text>
           <View style={cardStyles.typeBadge}>
-            <Ionicons name={cfg.icon as any} size={12} color="#6B7280" />
-            <Text style={cardStyles.typeText}>{cfg.label}</Text>
+            <Ionicons name={icon as any} size={12} color="#6B7280" />
+            <Text style={cardStyles.typeText}>{typeLabel}</Text>
           </View>
         </View>
       </View>
 
-      {/* Join button */}
-      <Pressable
-        style={({ pressed }) => [cardStyles.btnWrap, pressed && { opacity: 0.88 }]}
-        onPress={() => onJoin(item)}
-      >
-        <LinearGradient
-          colors={gradients.interactive}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={cardStyles.joinBtn}
+      {/* Join button (active) or awaiting confirmation (pending) */}
+      {canJoin ? (
+        <Pressable
+          style={({ pressed }) => [cardStyles.btnWrap, pressed && { opacity: 0.88 }]}
+          onPress={() => onJoin(item)}
         >
-          <Ionicons name={cfg.icon as any} size={17} color={colors.mistWhite} style={cardStyles.btnIcon} />
-          <Text style={cardStyles.joinBtnText}>{cfg.joinLabel}</Text>
-        </LinearGradient>
-      </Pressable>
+          <LinearGradient
+            colors={gradients.interactive}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={cardStyles.joinBtn}
+          >
+            <Ionicons name={icon as any} size={17} color={colors.mistWhite} style={cardStyles.btnIcon} />
+            <Text style={cardStyles.joinBtnText}>{joinLabel}</Text>
+          </LinearGradient>
+        </Pressable>
+      ) : (
+        <View style={cardStyles.pendingRow}>
+          <Ionicons name="time-outline" size={15} color="#6B7280" />
+          <Text style={cardStyles.pendingText}>Awaiting doctor's confirmation</Text>
+        </View>
+      )}
     </View>
   )
 }
@@ -212,7 +223,9 @@ function PastCard({
   onViewSummary: (item: Appointment) => void
   onBookAgain: (item: Appointment) => void
 }) {
-  const cfg = TYPE_CONFIG[item.type]
+  const { t } = useTranslation()
+  const icon = TYPE_ICONS[item.type]
+  const typeLabel = item.type === 'chat' ? t('chat') : item.type === 'phone' ? t('phoneCall') : t('videoCall')
   return (
     <View style={[cardStyles.card, cardStyles.cardPast]}>
       {/* Top row */}
@@ -229,8 +242,8 @@ function PastCard({
           <Text style={cardStyles.dateLabel}>{item.dateLabel}</Text>
           <Text style={cardStyles.timeLabelPast}>{item.timeLabel}</Text>
           <View style={cardStyles.typeBadge}>
-            <Ionicons name={cfg.icon as any} size={12} color="#9CA3AF" />
-            <Text style={[cardStyles.typeText, cardStyles.typeTextPast]}>{cfg.label}</Text>
+            <Ionicons name={icon as any} size={12} color="#9CA3AF" />
+            <Text style={[cardStyles.typeText, cardStyles.typeTextPast]}>{typeLabel}</Text>
           </View>
         </View>
       </View>
@@ -242,7 +255,7 @@ function PastCard({
           onPress={() => onViewSummary(item)}
         >
           <Ionicons name="document-text-outline" size={15} color={colors.careBlue} />
-          <Text style={cardStyles.summaryBtnText}>View Summary</Text>
+          <Text style={cardStyles.summaryBtnText}>{t('viewSummary')}</Text>
         </Pressable>
 
         <Pressable
@@ -256,7 +269,7 @@ function PastCard({
             style={cardStyles.bookAgainBtn}
           >
             <Ionicons name="refresh" size={15} color={colors.mistWhite} />
-            <Text style={cardStyles.bookAgainText}>Book Again</Text>
+            <Text style={cardStyles.bookAgainText}>{t('bookAgain')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -270,11 +283,7 @@ const cardStyles = StyleSheet.create({
     borderRadius: 16,
     padding: 16,
     marginBottom: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   cardPast: {
     opacity: 0.95,
@@ -405,11 +414,29 @@ const cardStyles = StyleSheet.create({
     fontSize: 13,
     color: colors.mistWhite,
   },
+
+  pendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: colors.steelGrey,
+    backgroundColor: colors.cloudGrey,
+  },
+  pendingText: {
+    fontFamily: fonts.medium,
+    fontSize: 14,
+    color: '#6B7280',
+  },
 })
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
 
 function EmptyState({ tab }: { tab: AppointmentTab }) {
+  const { t } = useTranslation()
   return (
     <View style={emptyStyles.container}>
       <View style={emptyStyles.iconWrap}>
@@ -420,12 +447,10 @@ function EmptyState({ tab }: { tab: AppointmentTab }) {
         />
       </View>
       <Text style={emptyStyles.title}>
-        {tab === 'upcoming' ? 'No upcoming appointments' : 'No past appointments'}
+        {tab === 'upcoming' ? t('noUpcomingAppt') : t('noPastAppt')}
       </Text>
       <Text style={emptyStyles.sub}>
-        {tab === 'upcoming'
-          ? 'Book a consultation with a doctor to get started.'
-          : 'Your completed consultations will appear here.'}
+        {tab === 'upcoming' ? t('bookDoctorToStart') : t('completedConsultationsHere')}
       </Text>
     </View>
   )
@@ -465,32 +490,66 @@ const emptyStyles = StyleSheet.create({
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function AppointmentsScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
-  const { getToken } = useAuth()
+  const { getToken, userId: clerkUserId } = useAuth()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
   const [activeTab, setActiveTab] = useState<AppointmentTab>('upcoming')
   const [upcoming, setUpcoming] = useState<Appointment[]>([])
   const [past, setPast] = useState<Appointment[]>([])
 
-  useEffect(() => {
-    getToken().then(token => {
-      if (!token) return
-      const client = getAuthClient(token)
-      client
-        .from('consultations')
-        .select(`
-          id, type, status, scheduled_at, created_at,
-          doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(full_name))
-        `)
-        .order('scheduled_at', { ascending: false })
-        .then(({ data }) => {
-          if (!data) return
-          setUpcoming(data.filter(r => ['pending', 'active'].includes(r.status)).map(mapAppointment))
-          setPast(data.filter(r => ['completed', 'cancelled'].includes(r.status)).map(mapAppointment))
-        })
-    })
-  }, [])
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false
+      getToken().then(async token => {
+        if (!token || cancelled) return
+        const client = getAuthClient(token)
+        const { data: me } = await client.from('users').select('id').eq('clerk_id', clerkUserId).maybeSingle()
+        if (!me || cancelled) return
+        client
+          .from('consultations')
+          .select(`
+            id, type, status, payment_status, scheduled_at, created_at,
+            doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(full_name))
+          `)
+          .eq('patient_id', me.id)
+          .order('scheduled_at', { ascending: false })
+          .then(({ data }) => {
+            if (!data || cancelled) return
+            const now = new Date()
+            const todayLabel = t('today')
+            const tomorrowLabel = t('tomorrow')
+            const mapAppt = (row: any) => mapAppointment(row, todayLabel, tomorrowLabel)
+
+            // Upcoming: active OR paid-pending scheduled (future only)
+            setUpcoming(
+              data.filter(r => {
+                if (r.status === 'active') return true
+                if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
+                  return new Date(r.scheduled_at) > now
+                }
+                return false
+              }).map(mapAppt)
+            )
+
+            // Past: completed, or cancelled ONLY if payment was already confirmed
+            // (payment-failure cancellations have payment_status='pending' — hide them)
+            setPast(
+              data.filter(r => {
+                if (r.status === 'completed') return true
+                if (r.status === 'cancelled' && r.payment_status === 'paid') return true
+                if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
+                  return new Date(r.scheduled_at) <= now
+                }
+                return false
+              }).map(mapAppt)
+            )
+          })
+      })
+      return () => { cancelled = true }
+    }, [t])
+  )
 
   const list = activeTab === 'upcoming' ? upcoming : past
 
@@ -507,7 +566,7 @@ export default function AppointmentsScreen() {
         doctorName: item.doctorName,
         consultationType: item.type,
         scheduledAt: item.scheduledAt,
-        consultationId: item.id,
+        channelId: item.id,
       },
     })
   }
@@ -516,6 +575,7 @@ export default function AppointmentsScreen() {
     router.push({
       pathname: '/(patient)/consultation-summary',
       params: {
+        consultationId: item.id,
         doctorId: item.doctorId,
         doctorName: item.doctorName,
         consultationType: item.type,
@@ -534,7 +594,7 @@ export default function AppointmentsScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       {/* ── Header ── */}
       <View style={styles.header}>
-        <Text style={styles.screenTitle}>Appointments</Text>
+        <Text style={styles.screenTitle}>{t('appointments')}</Text>
       </View>
 
       {/* ── Segmented control ── */}
@@ -551,11 +611,11 @@ export default function AppointmentsScreen() {
                 end={{ x: 1, y: 0 }}
                 style={styles.segmentActive}
               >
-                <Text style={styles.segmentTextActive}>Upcoming</Text>
+                <Text style={styles.segmentTextActive}>{t('upcoming')}</Text>
               </LinearGradient>
             ) : (
               <View style={styles.segmentInactive}>
-                <Text style={styles.segmentTextInactive}>Upcoming</Text>
+                <Text style={styles.segmentTextInactive}>{t('upcoming')}</Text>
               </View>
             )}
           </Pressable>
@@ -571,11 +631,11 @@ export default function AppointmentsScreen() {
                 end={{ x: 1, y: 0 }}
                 style={styles.segmentActive}
               >
-                <Text style={styles.segmentTextActive}>Past</Text>
+                <Text style={styles.segmentTextActive}>{t('past')}</Text>
               </LinearGradient>
             ) : (
               <View style={styles.segmentInactive}>
-                <Text style={styles.segmentTextInactive}>Past</Text>
+                <Text style={styles.segmentTextInactive}>{t('past')}</Text>
               </View>
             )}
           </Pressable>
@@ -634,11 +694,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderRadius: 30,
     padding: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.06, 1),
   },
   segmentItem: {
     flex: 1,

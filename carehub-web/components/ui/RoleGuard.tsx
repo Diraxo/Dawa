@@ -67,11 +67,13 @@ export default function RoleGuard({ allow, children }: { allow: Role; children: 
         const onReview = pathname.startsWith('/doctor/under-review')
         if (!profile) {
           if (!onRegister) { router.replace('/doctor/register'); return }
-        } else if (profile.status !== 'approved') {
-          if (!onReview && !onRegister) { router.replace('/doctor/under-review'); return }
-        } else if (onRegister || onReview) {
-          router.replace('/doctor')
-          return
+        } else {
+          // Already registered — bounce away from the registration form
+          if (onRegister) { router.replace('/doctor'); return }
+          // Under-review: only bounce once approved (pending/rejected may stay to check status or reapply)
+          if (onReview && profile.status === 'approved') { router.replace('/doctor'); return }
+          // All other paths: let through regardless of approval status.
+          // Home and profile pages show a banner when status !== 'approved'.
         }
       }
 
@@ -87,7 +89,7 @@ export default function RoleGuard({ allow, children }: { allow: Role; children: 
     return (
       <div className="min-h-screen flex items-center justify-center bg-cloud-grey">
         <div className="flex flex-col items-center gap-3">
-          <LogoMark size={56} />
+          <LogoMark size={56} variant="dark" />
           <p className="text-ink-black/50 text-sm font-medium font-montserrat">Loading…</p>
         </div>
       </div>

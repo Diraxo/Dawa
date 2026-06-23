@@ -5,11 +5,11 @@ import { Platform } from 'react-native'
 import { useUser } from '@clerk/clerk-expo'
 
 import { supabase } from '@/lib/supabase'
+import { logger } from '@/lib/logger'
 
 // Show notification alert/sound even when the app is in the foreground
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
     shouldShowBanner: true,
@@ -30,6 +30,18 @@ async function _register(clerkUserId: string) {
   try {
     // Android requires explicit notification channels
     if (Platform.OS === 'android') {
+      // Highest-priority channel for incoming patient requests — must show on lock screen
+      await Notifications.setNotificationChannelAsync('incoming_requests', {
+        name: 'Incoming Patient Requests',
+        description: 'Alerts when a patient is waiting for your response',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 500, 300, 500, 300, 500],
+        lightColor: '#00BFA5',
+        sound: 'default',
+        enableVibrate: true,
+        lockScreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        showBadge: true,
+      })
       await Notifications.setNotificationChannelAsync('appointments', {
         name: 'Appointments',
         description: 'Notifies you when a consultation is about to start',
@@ -60,7 +72,7 @@ async function _register(clerkUserId: string) {
     }
 
     if (finalStatus !== 'granted') {
-      console.warn('[PushNotifications] Permission denied by user')
+      logger.warn('[PushNotifications] Permission denied by user')
       return
     }
 
@@ -82,9 +94,9 @@ async function _register(clerkUserId: string) {
       .eq('clerk_id', clerkUserId)
 
     if (error) {
-      console.warn('[PushNotifications] Failed to save token to Supabase:', error.message)
+      logger.warn('[PushNotifications] Failed to save token to Supabase:', error.message)
     }
   } catch (err) {
-    console.warn('[PushNotifications] Registration failed:', err)
+    logger.warn('[PushNotifications] Registration failed:', err)
   }
 }

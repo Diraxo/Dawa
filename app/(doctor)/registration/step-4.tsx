@@ -1,6 +1,6 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import { File } from 'expo-file-system'
+import { File as ExpoFile } from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useState } from 'react'
@@ -16,12 +16,14 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 
@@ -32,6 +34,28 @@ const CONTENT_TYPES: Record<string, string> = {
   png: 'image/png',
 }
 
+function getExt(uri: string, fileName: string | null): string {
+  if (uri.startsWith('data:')) {
+    const mime = uri.match(/^data:([^;]+)/)?.[1] ?? ''
+    const mimeMap: Record<string, string> = {
+      'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'application/pdf': 'pdf',
+    }
+    return mimeMap[mime] ?? 'bin'
+  }
+  return (fileName ?? uri).split('.').pop()?.toLowerCase() ?? 'pdf'
+}
+
+async function getFileBuffer(uri: string): Promise<ArrayBuffer> {
+  // data: URIs (from web FileReader) and web in general — use fetch
+  if (Platform.OS === 'web' || uri.startsWith('data:')) {
+    const resp = await fetch(uri)
+    return resp.arrayBuffer()
+  }
+  // Native — use expo-file-system
+  const bytes = await new ExpoFile(uri).bytes()
+  return bytes.buffer as ArrayBuffer
+}
+
 async function uploadDocument(
   client: ReturnType<typeof getAuthClient>,
   clerkId: string,
@@ -39,12 +63,12 @@ async function uploadDocument(
   fileName: string | null,
   label: string
 ): Promise<string> {
-  const ext = (fileName ?? uri).split('.').pop()?.toLowerCase() ?? 'pdf'
+  const ext = getExt(uri, fileName)
   const path = `${clerkId}/${label}-${Date.now()}.${ext}`
-  const bytes = await new File(uri).bytes()
+  const buffer = await getFileBuffer(uri)
   const { error } = await client.storage
     .from('doctor-documents')
-    .upload(path, bytes.buffer as ArrayBuffer, {
+    .upload(path, buffer, {
       contentType: CONTENT_TYPES[ext] ?? 'application/octet-stream',
       upsert: true,
     })
@@ -93,7 +117,9 @@ export default function RegistrationStep4() {
   const store = useDoctorStore()
   const { getToken } = useAuth()
   const { user } = useUser()
+  const { t } = useTranslation()
 
+  const { setDoctorStatus } = useDoctorStore()
   const [chatPrice, setChatPrice] = useState(store.regChatPrice)
   const [phonePrice, setPhonePrice] = useState(store.regPhonePrice)
   const [videoPrice, setVideoPrice] = useState(store.regVideoPrice)
@@ -106,12 +132,14 @@ export default function RegistrationStep4() {
     setSubmitting(true)
     store.updateReg({ regChatPrice: chatPrice, regPhonePrice: phonePrice, regVideoPrice: videoPrice })
 
+    // Track uploaded paths so we can clean them up if the DB write fails
+    const uploadedDocs: { bucket: string; path: string }[] = []
+
     try {
       const token = await getToken()
       if (!token) throw new Error('Not authenticated. Please sign in again.')
       const client = getAuthClient(token)
 
-      // Ensure the users row exists and carries the registration info
       const { data: userData, error: userErr } = await client
         .from('users')
         .upsert(
@@ -128,17 +156,65 @@ export default function RegistrationStep4() {
         .single()
       if (userErr || !userData) throw new Error('Could not save your account. Please try again.')
 
-      // Upload documents to the private doctor-documents bucket
-      let licensePath: string | null = null
-      let idPath: string | null = null
-      if (store.regLicenseDocUri) {
-        licensePath = await uploadDocument(client, user.id, store.regLicenseDocUri, store.regLicenseDocName, 'license')
-      }
-      if (store.regNationalIdUri) {
-        idPath = await uploadDocument(client, user.id, store.regNationalIdUri, store.regNationalIdName, 'national-id')
+      // Upload profile photo from step 1 if available
+      if (store.regProfilePhotoUri) {
+        try {
+          const photoBuffer = await getFileBuffer(store.regProfilePhotoUri)
+          let photoExt = 'jpg'
+          if (store.regProfilePhotoUri.startsWith('data:')) {
+            photoExt = store.regProfilePhotoUri.match(/^data:image\/([^;]+)/)?.[1] ?? 'jpg'
+          } else {
+            photoExt = store.regProfilePhotoUri.split('.').pop()?.toLowerCase() ?? 'jpg'
+          }
+          // Path must be clerk_id/filename so the RLS foldername policy passes
+          const photoPath = `${user.id}/profile.${photoExt}`
+          const { error: photoErr } = await client.storage
+            .from('avatars')
+            .upload(photoPath, photoBuffer, {
+              contentType: `image/${photoExt === 'jpg' ? 'jpeg' : photoExt}`,
+              upsert: true,
+            })
+          if (!photoErr) {
+            uploadedDocs.push({ bucket: 'avatars', path: photoPath })
+            const { data: photoUrlData } = client.storage.from('avatars').getPublicUrl(photoPath)
+            await client.from('users')
+              .update({ profile_photo_url: photoUrlData.publicUrl })
+              .eq('clerk_id', user.id)
+          }
+        } catch {
+          // Photo upload failed — proceed without blocking registration
+        }
       }
 
-      // Create (or refresh) the doctor profile, pending admin approval
+      // Upload multiple license docs → store as JSON array
+      const licensePaths: string[] = []
+      for (let i = 0; i < store.regLicenseDocUris.length; i++) {
+        const path = await uploadDocument(client, user.id, store.regLicenseDocUris[i], store.regLicenseDocNames[i] ?? null, `license-${i}`)
+        licensePaths.push(path)
+        uploadedDocs.push({ bucket: 'doctor-documents', path })
+      }
+      const licenseDocUrl = licensePaths.length > 0 ? JSON.stringify(licensePaths) : null
+
+      // Upload ID document (national ID or passport) — optional
+      let idDocUrl: string | null = null
+      if (store.regIdDocType === 'national_id') {
+        const frontPath = store.regNationalIdFrontUri
+          ? await uploadDocument(client, user.id, store.regNationalIdFrontUri, store.regNationalIdFrontName, 'national-id-front')
+          : null
+        if (frontPath) uploadedDocs.push({ bucket: 'doctor-documents', path: frontPath })
+        const backPath = store.regNationalIdBackUri
+          ? await uploadDocument(client, user.id, store.regNationalIdBackUri, store.regNationalIdBackName, 'national-id-back')
+          : null
+        if (backPath) uploadedDocs.push({ bucket: 'doctor-documents', path: backPath })
+        if (frontPath || backPath) {
+          idDocUrl = JSON.stringify({ type: 'national_id', front: frontPath, back: backPath })
+        }
+      } else if (store.regIdDocType === 'passport' && store.regNationalIdFrontUri) {
+        const passportPath = await uploadDocument(client, user.id, store.regNationalIdFrontUri, store.regNationalIdFrontName, 'passport')
+        uploadedDocs.push({ bucket: 'doctor-documents', path: passportPath })
+        idDocUrl = JSON.stringify({ type: 'passport', file: passportPath })
+      }
+
       const { error: profileErr } = await client.from('doctor_profiles').upsert(
         {
           user_id: userData.id,
@@ -147,20 +223,29 @@ export default function RegistrationStep4() {
           years_experience: store.regYearsOfExperience,
           hospital_name: store.regHospitalName,
           bio: store.regBio,
-          license_doc_url: licensePath,
-          id_doc_url: idPath,
+          license_doc_url: licenseDocUrl,
+          id_doc_url: idDocUrl,
           chat_price: parseInt(chatPrice, 10) || 0,
           phone_price: parseInt(phonePrice, 10) || 0,
           video_price: parseInt(videoPrice, 10) || 0,
           status: 'pending',
+          date_of_birth: store.regDateOfBirth || null,
+          gender: store.regGender || null,
         },
         { onConflict: 'user_id' }
       )
-      if (profileErr) throw new Error(`Could not submit your application: ${profileErr.message}`)
+      if (profileErr) {
+        // Roll back uploads so storage stays clean
+        await Promise.allSettled(
+          uploadedDocs.map(({ bucket, path }) => client.storage.from(bucket).remove([path]))
+        )
+        throw new Error(`Could not submit your application: ${profileErr.message}`)
+      }
 
+      setDoctorStatus('pending')
       router.replace('/(doctor)/registration/under-review')
     } catch (err) {
-      Alert.alert('Submission Failed', err instanceof Error ? err.message : 'Something went wrong. Please try again.')
+      Alert.alert(t('submissionFailed'), err instanceof Error ? err.message : t('somethingWentWrong'))
     } finally {
       setSubmitting(false)
     }
@@ -178,7 +263,7 @@ export default function RegistrationStep4() {
             <Text style={styles.stepLabel}>Step 4 of 4</Text>
           </View>
 
-          <Text style={styles.title}>Set Consultation Prices</Text>
+          <Text style={styles.title}>{t('setConsultationPrices')}</Text>
 
           {/* Progress bar - 100% */}
           <View style={styles.progressTrack}>
@@ -188,45 +273,25 @@ export default function RegistrationStep4() {
           {/* Revenue split note */}
           <View style={styles.revenueNote}>
             <Ionicons name="wallet-outline" size={18} color={colors.tealGreen} />
-            <Text style={styles.revenueText}>
-              You keep <Text style={styles.revenueBold}>80%</Text> of every consultation. CareHub takes a <Text style={styles.revenueBold}>20%</Text> platform fee.
-            </Text>
+            <Text style={styles.revenueText}>{t('revenueNoteText')}</Text>
           </View>
 
           {/* Price Cards */}
-          <PriceCard
-            icon="💬"
-            title="Chat Consultation"
-            description="Patients send text messages and photos"
-            value={chatPrice}
-            onChange={setChatPrice}
-          />
-          <PriceCard
-            icon="📞"
-            title="Phone Call"
-            description="Audio-only call, works on slow internet"
-            value={phonePrice}
-            onChange={setPhonePrice}
-          />
-          <PriceCard
-            icon="🎥"
-            title="Video Call"
-            description="Face-to-face consultation"
-            value={videoPrice}
-            onChange={setVideoPrice}
-          />
+          <PriceCard icon="💬" title={t('chatConsultation')} description={t('chatConsultationDesc2')} value={chatPrice} onChange={setChatPrice} />
+          <PriceCard icon="📞" title={t('phoneCall')} description={t('phoneCallDesc')} value={phonePrice} onChange={setPhonePrice} />
+          <PriceCard icon="🎥" title={t('videoCall')} description={t('videoCallDesc')} value={videoPrice} onChange={setVideoPrice} />
 
-          <Text style={styles.priceNote}>You can change your prices anytime from your profile settings</Text>
+          <Text style={styles.priceNote}>{t('pricesChangeNote')}</Text>
 
           {/* Earnings Preview */}
           {isValid && (
             <View style={styles.earningsCard}>
-              <Text style={styles.earningsTitle}>Your Earnings Preview</Text>
-              <Text style={styles.earningsSub}>After 20% platform fee</Text>
+              <Text style={styles.earningsTitle}>{t('earningsPreview')}</Text>
+              <Text style={styles.earningsSub}>{t('afterPlatformFee')}</Text>
               {[
-                { label: 'Chat', value: chatPrice, icon: '💬' },
-                { label: 'Phone Call', value: phonePrice, icon: '📞' },
-                { label: 'Video Call', value: videoPrice, icon: '🎥' },
+                { label: t('chatConsultation'), value: chatPrice, icon: '💬' },
+                { label: t('phoneCall'), value: phonePrice, icon: '📞' },
+                { label: t('videoCall'), value: videoPrice, icon: '🎥' },
               ].map(({ label, value, icon }) => {
                 const net = value ? Math.floor(Number(value) * 0.8) : 0
                 return (
@@ -234,7 +299,7 @@ export default function RegistrationStep4() {
                     <Text style={styles.earningsIcon}>{icon}</Text>
                     <Text style={styles.earningsLabel}>{label}</Text>
                     <Text style={styles.earningsAmount}>ETB {net.toLocaleString()}</Text>
-                    <Text style={styles.earningsNote}>per session</Text>
+                    <Text style={styles.earningsNote}>{t('perSession')}</Text>
                   </View>
                 )
               })}
@@ -247,11 +312,11 @@ export default function RegistrationStep4() {
         <View style={styles.footer}>
           <View style={styles.footerRow}>
             <View style={styles.backBtnWrap}>
-              <OutlineButton label="← Back" onPress={() => router.back()} />
+              <OutlineButton label={t('back')} onPress={() => router.back()} />
             </View>
             <View style={styles.submitBtnWrap}>
               <GradientButton
-                label={submitting ? 'Submitting...' : 'Submit Application'}
+                label={submitting ? `${t('submitForReview')}...` : t('submitApplication')}
                 onPress={handleSubmit}
                 disabled={!isValid || submitting}
               />
@@ -287,8 +352,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite, borderRadius: 16,
     borderWidth: 1.5, borderColor: colors.steelGrey,
     padding: 16, marginBottom: 14, gap: 12,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   priceCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
   priceIconWrap: {

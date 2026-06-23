@@ -116,7 +116,7 @@ export default function DoctorConsultationsPage() {
                 {/* View summary for completed */}
                 {c.status === 'completed' && (
                   <Link
-                    href={`/patient/summary/${c.id}`}
+                    href={`/doctor/consultation/chat/${c.id}`}
                     className="btn-outline h-8 px-4 text-xs rounded-xl"
                   >
                     Summary

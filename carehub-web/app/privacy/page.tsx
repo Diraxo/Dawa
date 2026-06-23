@@ -3,12 +3,12 @@ import Footer from '@/components/landing/Footer'
 import Navbar from '@/components/landing/Navbar'
 
 export const metadata: Metadata = {
-  title: 'Privacy Policy — CareHub',
+  title: 'Privacy Policy — Dawa',
   description:
-    'Learn how CareHub collects, uses, and protects your personal information and health data.',
+    'Learn how Dawa collects, uses, and protects your personal information and health data.',
 }
 
-const LAST_UPDATED = 'June 2025'
+const LAST_UPDATED = 'June 2026'
 
 type Block =
   | { type: 'text'; text: string }
@@ -28,7 +28,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub ("we", "our", "us") is committed to protecting your personal information and health data. This Privacy Policy explains how we collect, use, store, and protect your information when you use the CareHub mobile application and website.',
+        text: 'Dawa ("we", "our", "us") is committed to protecting your personal information and health data. This Privacy Policy explains how we collect, use, store, and protect your information when you use the Dawa mobile application and website.',
       },
     ],
   },
@@ -100,7 +100,7 @@ const SECTIONS: Section[] = [
           'Health data is stored on secure Supabase servers',
           'Doctor documents are stored in encrypted file storage',
           'We never sell your personal or health data to third parties',
-          'Access to your data is restricted to authorized CareHub staff only',
+          'Access to your data is restricted to authorized Dawa staff only',
           'Consultation chats are private between patient and doctor only',
         ],
       },
@@ -140,7 +140,7 @@ const SECTIONS: Section[] = [
           'Opt out of non-essential communications',
         ],
       },
-      { type: 'text', text: 'To exercise these rights, contact us at: privacy@carehub.com' },
+      { type: 'text', text: 'To exercise these rights, contact us at: privacy@dawa.app' },
     ],
   },
   {
@@ -164,7 +164,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
+        text: 'Dawa is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
       },
     ],
   },
@@ -194,7 +194,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub Support Team\nEmail: privacy@carehub.com\nWebsite: www.carehub.com/privacy',
+        text: 'Dawa Support Team\nEmail: privacy@dawa.app\nWebsite: www.dawa.app/privacy',
       },
     ],
   },
@@ -273,7 +273,7 @@ export default function PrivacyPage() {
           <hr className="border-steel-grey" />
           <div className="mt-8 mb-4">
             <a
-              href="mailto:privacy@carehub.com"
+              href="mailto:privacy@dawa.app"
               className="inline-flex items-center gap-3 bg-teal-green/5 border border-teal-green/20 rounded-xl px-5 py-4 hover:bg-teal-green/10 transition-colors group"
             >
               <svg
@@ -293,7 +293,7 @@ export default function PrivacyPage() {
               <span className="text-[14px] text-ink-black">
                 Contact us:{' '}
                 <span className="font-semibold text-teal-green group-hover:underline">
-                  privacy@carehub.com
+                  privacy@dawa.app
                 </span>
               </span>
             </a>

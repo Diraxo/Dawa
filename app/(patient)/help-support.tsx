@@ -15,17 +15,19 @@ import {
   Platform,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
   UIManager.setLayoutAnimationEnabledExperimental?.(true)
 }
 
-// ─── Data ─────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface FaqItem {
   q: string
@@ -37,96 +39,6 @@ interface Section {
   title: string
   items: FaqItem[]
 }
-
-const FAQ_SECTIONS: Section[] = [
-  {
-    id: 'general',
-    title: 'Getting Started',
-    items: [
-      {
-        q: 'What is CareHub?',
-        a: 'CareHub is a doctor consultation platform that connects patients with verified healthcare professionals via chat, phone call, or video call — anytime, anywhere.',
-      },
-      {
-        q: 'How do I book a consultation?',
-        a: 'Go to the Doctors tab, choose a specialist, select a consultation type (chat, phone, or video), and tap Book. The doctor has 30 seconds to accept your request.',
-      },
-      {
-        q: 'Is CareHub free to use?',
-        a: 'Creating an account is free. Each consultation has a fee set by the doctor. Payment integration is coming soon.',
-      },
-    ],
-  },
-  {
-    id: 'consultations',
-    title: 'Consultations',
-    items: [
-      {
-        q: 'What happens if the doctor does not respond?',
-        a: 'If the doctor does not accept within 30 seconds, your request is automatically cancelled and you are notified. You can then book another available doctor.',
-      },
-      {
-        q: 'How do I get a consultation summary?',
-        a: 'After the consultation ends, the doctor fills in a summary including diagnosis, prescription notes, and follow-up recommendations. You receive a push notification when it is ready.',
-      },
-      {
-        q: 'Can I see my past consultations?',
-        a: 'Yes. All past consultations, summaries, and chat history are available in the Appointments tab.',
-      },
-      {
-        q: 'Are my consultations private?',
-        a: 'Yes. All conversations are end-to-end encrypted. Only you and your doctor can access the consultation content.',
-      },
-    ],
-  },
-  {
-    id: 'doctors',
-    title: 'Doctors & Verification',
-    items: [
-      {
-        q: 'Are doctors on CareHub verified?',
-        a: 'Yes. Every doctor submits their medical license, specialty credentials, and government-issued ID. Our admin team reviews and approves each application before they can practice on the platform.',
-      },
-      {
-        q: 'How do I find the right doctor?',
-        a: 'Use the Doctors tab to search by specialty, view ratings and reviews, and check availability in real time.',
-      },
-    ],
-  },
-  {
-    id: 'account',
-    title: 'Account & Privacy',
-    items: [
-      {
-        q: 'How do I change my password?',
-        a: 'Password management is handled through your email provider. On the login screen, tap "Forgot password" to reset it.',
-      },
-      {
-        q: 'How is my personal data stored?',
-        a: 'Your data is stored securely on Supabase infrastructure with Row Level Security enforced on all tables. We never share your data with third parties without your consent.',
-      },
-      {
-        q: 'How do I delete my account?',
-        a: 'Go to Profile → Delete Account. This permanently removes all your data from our systems. This action cannot be undone.',
-      },
-    ],
-  },
-]
-
-const CONTACT_OPTIONS = [
-  {
-    icon: 'mail-outline',
-    label: 'Email Support',
-    value: 'support@carehub.app',
-    action: () => Linking.openURL('mailto:support@carehub.app'),
-  },
-  {
-    icon: 'logo-whatsapp',
-    label: 'WhatsApp',
-    value: '+251 900 000 000',
-    action: () => Alert.alert('WhatsApp', 'WhatsApp support coming soon.'),
-  },
-]
 
 // ─── FaqAccordionItem ─────────────────────────────────────────────────────────
 
@@ -161,8 +73,63 @@ function FaqAccordionItem({ item, isOpen, onToggle }: {
 
 export default function HelpSupportScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [activeSection, setActiveSection] = useState<string>('general')
+
+  const FAQ_SECTIONS: Section[] = [
+    {
+      id: 'general',
+      title: t('faqGettingStarted'),
+      items: [
+        { q: t('faqQ_whatIsDawa'),  a: t('faqA_whatIsDawa') },
+        { q: t('faqQ_howToBook'),   a: t('faqA_howToBook') },
+        { q: t('faqQ_isFree'),      a: t('faqA_isFree') },
+      ],
+    },
+    {
+      id: 'consultations',
+      title: t('faqConsultations'),
+      items: [
+        { q: t('faqQ_doctorNoResponse'), a: t('faqA_doctorNoResponse') },
+        { q: t('faqQ_getSummary'),       a: t('faqA_getSummary') },
+        { q: t('faqQ_pastConsultations'),a: t('faqA_pastConsultations') },
+        { q: t('faqQ_arePrivate'),       a: t('faqA_arePrivate') },
+      ],
+    },
+    {
+      id: 'doctors',
+      title: t('faqDoctorsVerification'),
+      items: [
+        { q: t('faqQ_areVerified'), a: t('faqA_areVerified') },
+        { q: t('faqQ_findDoctor'),  a: t('faqA_findDoctor') },
+      ],
+    },
+    {
+      id: 'account',
+      title: t('faqAccountPrivacy'),
+      items: [
+        { q: t('faqQ_changePassword'), a: t('faqA_changePassword') },
+        { q: t('faqQ_dataStorage'),    a: t('faqA_dataStorage') },
+        { q: t('faqQ_deleteAccount'),  a: t('faqA_deleteAccount') },
+      ],
+    },
+  ]
+
+  const CONTACT_OPTIONS = [
+    {
+      icon: 'mail-outline',
+      label: t('emailSupport'),
+      value: 'support@dawa.app',
+      action: () => Linking.openURL('mailto:support@dawa.app'),
+    },
+    {
+      icon: 'logo-whatsapp',
+      label: 'WhatsApp',
+      value: '+251 900 000 000',
+      action: () => Linking.openURL('https://wa.me/251900000000'),
+    },
+  ]
 
   const toggle = (key: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
@@ -181,7 +148,7 @@ export default function HelpSupportScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Help & Support</Text>
+        <Text style={styles.headerTitle}>{t('helpSupport')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -199,8 +166,8 @@ export default function HelpSupportScreen() {
         >
           <Ionicons name="help-buoy" size={36} color={colors.mistWhite} />
           <View>
-            <Text style={styles.heroTitle}>How can we help?</Text>
-            <Text style={styles.heroSub}>Find answers or contact support below</Text>
+            <Text style={styles.heroTitle}>{t('howCanWeHelp')}</Text>
+            <Text style={styles.heroSub}>{t('findAnswersBelow')}</Text>
           </View>
         </LinearGradient>
 
@@ -255,7 +222,7 @@ export default function HelpSupportScreen() {
         </View>
 
         {/* Contact Support */}
-        <Text style={styles.sectionLabel}>Contact Us</Text>
+        <Text style={styles.sectionLabel}>{t('contactUs')}</Text>
         {CONTACT_OPTIONS.map((opt) => (
           <Pressable
             key={opt.label}
@@ -277,13 +244,13 @@ export default function HelpSupportScreen() {
           </Pressable>
         ))}
 
-        {/* Privacy Policy */}
-        <Text style={styles.sectionLabel}>Legal</Text>
+        {/* Legal */}
+        <Text style={styles.sectionLabel}>{t('legal')}</Text>
         <View style={styles.card}>
           {[
-            { label: 'Privacy Policy', onPress: () => router.push('/(patient)/privacy-policy' as any) },
-            { label: 'Terms of Service', onPress: () => router.push('/(patient)/privacy-policy' as any) },
-            { label: 'Legal Disclaimer', onPress: () => router.push('/(patient)/privacy-policy' as any) },
+            { label: t('privacyPolicy'),  onPress: () => router.push('/(patient)/privacy-policy' as any) },
+            { label: t('termsOfService'), onPress: () => router.push('/(public)/terms' as any) },
+            { label: t('legalDisclaimer'),onPress: () => router.push('/(public)/terms' as any) },
           ].map((item, idx, arr) => (
             <View key={item.label}>
               <Pressable
@@ -328,11 +295,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     marginBottom: 20,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 4,
+    ...shadow(colors.careBlue, 0, 3, 10, 0.2, 4),
   },
   heroTitle: { fontFamily: fonts.bold, fontSize: 18, color: colors.mistWhite, marginBottom: 2 },
   heroSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.85)' },
@@ -361,11 +324,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 5, 0.05, 2),
   },
   faqQ: {
     flexDirection: 'row',
@@ -413,11 +372,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
     marginBottom: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   contactIcon: {
     width: 44,

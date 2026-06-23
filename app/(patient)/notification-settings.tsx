@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '@clerk/clerk-expo'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Pressable,
   ScrollView,
@@ -10,113 +11,130 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
+import { getAuthClient } from '@/lib/supabase'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+type PrefKey =
+  | 'consultation_request'
+  | 'messages'
+  | 'appointment_reminder'
+  | 'consultation_summary'
+  | 'promotions'
+  | 'health_tips'
+  | 'account'
 
-interface NotificationSetting {
-  id: string
-  icon: string
-  iconColor: string
-  title: string
-  subtitle: string
-  value: boolean
+const DEFAULTS: Record<PrefKey, boolean> = {
+  consultation_request: true,
+  messages: true,
+  appointment_reminder: true,
+  consultation_summary: true,
+  promotions: false,
+  health_tips: false,
+  account: true,
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function NotificationSettingsScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
+  const { getToken } = useAuth()
+  const userIdRef = useRef<string | null>(null)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const [settings, setSettings] = useState<NotificationSetting[]>([
-    {
-      id: 'consultation_request',
-      icon: 'medkit-outline',
-      iconColor: colors.tealGreen,
-      title: 'Consultation Requests',
-      subtitle: 'When a doctor accepts or declines',
-      value: true,
-    },
-    {
-      id: 'messages',
-      icon: 'chatbubble-outline',
-      iconColor: colors.interactiveBlue,
-      title: 'New Messages',
-      subtitle: 'In-app chat notifications',
-      value: true,
-    },
-    {
-      id: 'appointment_reminder',
-      icon: 'calendar-outline',
-      iconColor: colors.careBlue,
-      title: 'Appointment Reminders',
-      subtitle: '24 hours and 1 hour before',
-      value: true,
-    },
-    {
-      id: 'consultation_summary',
-      icon: 'document-text-outline',
-      iconColor: '#7C3AED',
-      title: 'Consultation Summary',
-      subtitle: 'When your doctor adds notes',
-      value: true,
-    },
-    {
-      id: 'promotions',
-      icon: 'gift-outline',
-      iconColor: colors.warning,
-      title: 'Promotions & Offers',
-      subtitle: 'Discounts and special offers',
-      value: false,
-    },
-    {
-      id: 'health_tips',
-      icon: 'heart-outline',
-      iconColor: colors.error,
-      title: 'Health Tips',
-      subtitle: 'Weekly wellness content',
-      value: false,
-    },
-    {
-      id: 'account',
-      icon: 'shield-checkmark-outline',
-      iconColor: colors.success,
-      title: 'Account & Security',
-      subtitle: 'Login alerts and policy updates',
-      value: true,
-    },
-  ])
+  const [toggles, setToggles] = useState<Record<PrefKey, boolean>>(DEFAULTS)
+  const [loaded, setLoaded] = useState(false)
 
-  const toggle = (id: string) => {
-    setSettings((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, value: !s.value } : s))
-    )
-    // Production: persist to Supabase notifications table
-    // await supabase.from('notification_preferences').upsert({ user_id, [id]: newValue })
+  // Load from Supabase on mount
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const token = await getToken()
+      if (!token || cancelled) return
+      const client = getAuthClient(token)
+
+      const { data: me } = await client
+        .from('users')
+        .select('id')
+        .maybeSingle()
+      if (!me || cancelled) return
+      userIdRef.current = (me as any).id
+
+      const { data } = await client
+        .from('notification_preferences')
+        .select('consultation_request, messages, appointment_reminder, consultation_summary, promotions, health_tips, account')
+        .eq('user_id', (me as any).id)
+        .maybeSingle()
+
+      if (data && !cancelled) {
+        setToggles({
+          consultation_request: (data as any).consultation_request ?? DEFAULTS.consultation_request,
+          messages: (data as any).messages ?? DEFAULTS.messages,
+          appointment_reminder: (data as any).appointment_reminder ?? DEFAULTS.appointment_reminder,
+          consultation_summary: (data as any).consultation_summary ?? DEFAULTS.consultation_summary,
+          promotions: (data as any).promotions ?? DEFAULTS.promotions,
+          health_tips: (data as any).health_tips ?? DEFAULTS.health_tips,
+          account: (data as any).account ?? DEFAULTS.account,
+        })
+      }
+      if (!cancelled) setLoaded(true)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Debounced save to Supabase
+  const savePrefs = (next: Record<PrefKey, boolean>) => {
+    if (!userIdRef.current) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(async () => {
+      const token = await getToken()
+      if (!token) return
+      const client = getAuthClient(token)
+      await client
+        .from('notification_preferences')
+        .upsert({ user_id: userIdRef.current!, ...next }, { onConflict: 'user_id' })
+    }, 600)
   }
 
-  const allEnabled = settings.every((s) => s.value)
-  const toggleAll = () => {
-    const next = !allEnabled
-    setSettings((prev) => prev.map((s) => ({ ...s, value: next })))
-  }
+  const settingsMeta: { id: PrefKey; icon: string; iconColor: string; title: string; subtitle: string }[] = [
+    { id: 'consultation_request', icon: 'medkit-outline',           iconColor: colors.tealGreen,       title: t('consultationRequests'),    subtitle: t('consultationRequestsSub') },
+    { id: 'messages',             icon: 'chatbubble-outline',        iconColor: colors.interactiveBlue, title: t('newMessages'),             subtitle: t('newMessagesSub') },
+    { id: 'appointment_reminder', icon: 'calendar-outline',          iconColor: colors.careBlue,        title: t('appointmentReminders'),    subtitle: t('appointmentRemindersSub') },
+    { id: 'consultation_summary', icon: 'document-text-outline',     iconColor: '#7C3AED',              title: t('consultationSummaryNotif'),subtitle: t('consultationSummaryNotifSub') },
+    { id: 'promotions',           icon: 'gift-outline',              iconColor: colors.warning,         title: t('promotionsOffers'),        subtitle: t('promotionsOffersSub') },
+    { id: 'health_tips',          icon: 'heart-outline',             iconColor: colors.error,           title: t('healthTips'),              subtitle: t('healthTipsSub') },
+    { id: 'account',              icon: 'shield-checkmark-outline',  iconColor: colors.success,         title: t('accountSecurity'),         subtitle: t('accountSecuritySub') },
+  ]
+
+  const settings = settingsMeta.map((m) => ({ ...m, value: toggles[m.id] ?? false }))
 
   const sections = [
-    {
-      label: 'Consultations',
-      ids: ['consultation_request', 'messages', 'appointment_reminder', 'consultation_summary'],
-    },
-    {
-      label: 'Content & Marketing',
-      ids: ['promotions', 'health_tips'],
-    },
-    {
-      label: 'Security',
-      ids: ['account'],
-    },
+    { label: t('consultationsSection'), ids: ['consultation_request', 'messages', 'appointment_reminder', 'consultation_summary'] },
+    { label: t('contentMarketing'),     ids: ['promotions', 'health_tips'] },
+    { label: t('security'),             ids: ['account'] },
   ]
+
+  const toggle = (id: string) => {
+    setToggles((prev) => {
+      const next = { ...prev, [id]: !prev[id] } as Record<PrefKey, boolean>
+      savePrefs(next)
+      return next
+    })
+  }
+
+  const allEnabled = Object.values(toggles).every(Boolean)
+  const toggleAll = () => {
+    const enabled = !allEnabled
+    setToggles((prev) => {
+      const next = Object.fromEntries(Object.keys(prev).map((k) => [k, enabled])) as Record<PrefKey, boolean>
+      savePrefs(next)
+      return next
+    })
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -128,7 +146,7 @@ export default function NotificationSettingsScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Notifications</Text>
+        <Text style={styles.headerTitle}>{t('notifications')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -142,8 +160,8 @@ export default function NotificationSettingsScreen() {
           <View style={styles.masterLeft}>
             <Ionicons name="notifications" size={22} color={colors.tealGreen} />
             <View>
-              <Text style={styles.masterTitle}>All Notifications</Text>
-              <Text style={styles.masterSub}>{allEnabled ? 'All enabled' : 'Some disabled'}</Text>
+              <Text style={styles.masterTitle}>{t('allNotifications')}</Text>
+              <Text style={styles.masterSub}>{allEnabled ? t('allEnabled') : t('someDisabled')}</Text>
             </View>
           </View>
           <Switch
@@ -192,9 +210,7 @@ export default function NotificationSettingsScreen() {
           )
         })}
 
-        <Text style={styles.note}>
-          Push notification permissions are managed in your device settings.
-        </Text>
+        <Text style={styles.note}>{t('notifDeviceSettingsNote')}</Text>
 
         <View style={{ height: 32 }} />
       </ScrollView>
@@ -227,11 +243,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 6, 0.06, 2),
   },
   masterLeft: { flexDirection: 'row', alignItems: 'center', gap: 14, flex: 1 },
   masterTitle: { fontFamily: fonts.bold, fontSize: 15, color: colors.inkBlack },
@@ -251,11 +263,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderRadius: 16,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 5, 0.05, 2),
   },
   row: {
     flexDirection: 'row',

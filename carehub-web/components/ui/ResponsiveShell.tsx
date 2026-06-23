@@ -47,9 +47,9 @@ export default function ResponsiveShell({
           >
             <Menu size={22} />
           </button>
-          <LogoMark size={28} />
+          <LogoMark size={28} variant="dark" />
           <span className="font-montserrat font-bold text-base text-ink-black">
-            CARE<span className="text-teal-green">HUB</span>
+            DA<span className="text-teal-green">WA</span>
           </span>
         </header>
 

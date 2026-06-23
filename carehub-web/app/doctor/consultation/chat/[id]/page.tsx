@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useAuth, useUser } from '@clerk/nextjs'
+import { logger } from '@/lib/logger'
 import { supabase } from '@/lib/supabase'
 import { getStreamClient, fetchStreamToken } from '@/lib/stream'
 import { EndConsultationModal } from '@/components/doctor/EndConsultationModal'
@@ -111,7 +112,7 @@ export default function DoctorChatConsultationPage() {
           setMessages(prev => [...prev, toMsg(event.message as any)])
         })
       } catch (err) {
-        console.error('[Stream] Doctor chat init error:', err)
+        logger.error('[Stream] Doctor chat init error:', err)
         if (mounted) setLoading(false)
       }
     }

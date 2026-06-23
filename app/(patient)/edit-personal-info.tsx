@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons'
-import { useUser } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import * as ImagePicker from 'expo-image-picker'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -23,13 +23,15 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { MIN_AGE_PATIENT, meetsAgeRequirement } from '@/lib/ageValidation'
-import { supabase } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
+import { useTranslation } from 'react-i18next'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GENDERS = ['Male', 'Female', 'Prefer not to say']
+const GENDER_KEYS = ['Male', 'Female', 'Prefer not to say'] as const
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -93,9 +95,9 @@ function WheelColumn({
           </View>
         ))}
       </ScrollView>
-      <View style={[wheelStyles.fade, wheelStyles.fadeTop]} pointerEvents="none" />
-      <View style={[wheelStyles.fade, wheelStyles.fadeBottom]} pointerEvents="none" />
-      <View style={wheelStyles.highlight} pointerEvents="none" />
+      <View style={[wheelStyles.fade, wheelStyles.fadeTop, { pointerEvents: 'none' }]} />
+      <View style={[wheelStyles.fade, wheelStyles.fadeBottom, { pointerEvents: 'none' }]} />
+      <View style={[wheelStyles.highlight, { pointerEvents: 'none' }]} />
     </View>
   )
 }
@@ -166,6 +168,7 @@ function DatePickerModal({
   onConfirm: (v: DateValue) => void
   onCancel: () => void
 }) {
+  const { t } = useTranslation()
   const [day, setDay] = useState(value.day)
   const [month, setMonth] = useState(value.month)
   const [year, setYear] = useState(value.year)
@@ -181,16 +184,16 @@ function DatePickerModal({
       <View style={dpStyles.overlay}>
         <View style={dpStyles.sheet}>
           <View style={dpStyles.header}>
-            <Text style={dpStyles.title}>Date of Birth</Text>
+            <Text style={dpStyles.title}>{t('dateOfBirth')}</Text>
             <Pressable onPress={onCancel} hitSlop={10}>
               <Ionicons name="close" size={22} color={colors.inkBlack} />
             </Pressable>
           </View>
 
           <View style={dpStyles.labels}>
-            <Text style={[dpStyles.colLabel, { width: 64 }]}>Day</Text>
-            <Text style={[dpStyles.colLabel, { flex: 1 }]}>Month</Text>
-            <Text style={[dpStyles.colLabel, { width: 72 }]}>Year</Text>
+            <Text style={[dpStyles.colLabel, { width: 64 }]}>{t('day')}</Text>
+            <Text style={[dpStyles.colLabel, { flex: 1 }]}>{t('month')}</Text>
+            <Text style={[dpStyles.colLabel, { width: 72 }]}>{t('year')}</Text>
           </View>
 
           <View style={dpStyles.wheels}>
@@ -209,7 +212,7 @@ function DatePickerModal({
               end={{ x: 1, y: 0 }}
               style={dpStyles.confirmGrad}
             >
-              <Text style={dpStyles.confirmText}>Done</Text>
+              <Text style={dpStyles.confirmText}>{t('done')}</Text>
             </LinearGradient>
           </Pressable>
         </View>
@@ -279,6 +282,12 @@ const dpStyles = StyleSheet.create({
 
 // ─── GenderPickerModal ────────────────────────────────────────────────────────
 
+const GENDER_LABEL_MAP: Record<string, 'male' | 'female' | 'preferNotToSay'> = {
+  'Male': 'male',
+  'Female': 'female',
+  'Prefer not to say': 'preferNotToSay',
+}
+
 function GenderPickerModal({
   visible,
   selected,
@@ -290,19 +299,20 @@ function GenderPickerModal({
   onSelect: (g: string) => void
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <Modal visible={visible} transparent animationType="fade">
       <Pressable style={gpStyles.overlay} onPress={onClose}>
         <View style={gpStyles.card}>
-          <Text style={gpStyles.title}>Select Gender</Text>
-          {GENDERS.map((g) => (
+          <Text style={gpStyles.title}>{t('selectGender')}</Text>
+          {GENDER_KEYS.map((g) => (
             <TouchableOpacity
               key={g}
               style={gpStyles.option}
               onPress={() => { onSelect(g); onClose() }}
             >
               <Text style={[gpStyles.optText, selected === g && gpStyles.optTextSel]}>
-                {g}
+                {t(GENDER_LABEL_MAP[g])}
               </Text>
               {selected === g && (
                 <Ionicons name="checkmark" size={18} color={colors.tealGreen} />
@@ -327,11 +337,7 @@ const gpStyles = StyleSheet.create({
     borderRadius: 20,
     paddingVertical: 12,
     paddingHorizontal: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 8,
+    ...shadow('#000', 0, 8, 20, 0.15, 8),
   },
   title: {
     fontFamily: fonts.bold,
@@ -369,27 +375,28 @@ function PhotoPickerModal({
   onGallery: () => void
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <Modal visible={visible} transparent animationType="slide">
       <Pressable style={ppStyles.overlay} onPress={onClose}>
         <View style={ppStyles.sheet}>
-          <Text style={ppStyles.title}>Change Profile Photo</Text>
+          <Text style={ppStyles.title}>{t('changeProfilePhoto')}</Text>
           <Pressable style={ppStyles.option} onPress={onCamera}>
             <View style={ppStyles.iconWrap}>
               <Ionicons name="camera-outline" size={22} color={colors.inkBlack} />
             </View>
-            <Text style={ppStyles.optionText}>Take Photo</Text>
+            <Text style={ppStyles.optionText}>{t('takePhoto')}</Text>
           </Pressable>
           <View style={ppStyles.divider} />
           <Pressable style={ppStyles.option} onPress={onGallery}>
             <View style={ppStyles.iconWrap}>
               <Ionicons name="images-outline" size={22} color={colors.inkBlack} />
             </View>
-            <Text style={ppStyles.optionText}>Choose from Gallery</Text>
+            <Text style={ppStyles.optionText}>{t('chooseFromGallery')}</Text>
           </Pressable>
           <View style={ppStyles.divider} />
           <Pressable style={[ppStyles.option, ppStyles.cancelOption]} onPress={onClose}>
-            <Text style={ppStyles.cancelText}>Cancel</Text>
+            <Text style={ppStyles.cancelText}>{t('cancel')}</Text>
           </Pressable>
         </View>
       </Pressable>
@@ -481,14 +488,13 @@ function FormField({
       <Text style={fieldStyles.label}>{label}</Text>
       <View style={[fieldStyles.inputRow, !editable && fieldStyles.inputRowDisabled]}>
         <TextInput
-          style={[fieldStyles.input, !editable && fieldStyles.inputDisabled]}
+          style={[fieldStyles.input, !editable && fieldStyles.inputDisabled, { pointerEvents: onPress ? 'none' : 'auto' }]}
           value={value}
           onChangeText={onChangeText}
           placeholder={placeholder}
           placeholderTextColor="#9CA3AF"
           editable={editable && !onPress}
           keyboardType={keyboardType}
-          pointerEvents={onPress ? 'none' : 'auto'}
         />
         {suffix}
       </View>
@@ -550,17 +556,18 @@ const fieldStyles = StyleSheet.create({
 
 export default function EditPersonalInfoScreen() {
   const { user } = useUser()
+  const { getToken } = useAuth()
   const router = useRouter()
+  const { t } = useTranslation()
   const { selectedCountry } = useAppStore()
 
   const [firstName, setFirstName] = useState(user?.firstName ?? '')
   const [lastName, setLastName] = useState(user?.lastName ?? '')
   const [phone, setPhone] = useState('')
-  const [emailInput, setEmailInput] = useState(user?.primaryEmailAddress?.emailAddress ?? '')
-  const [address, setAddress] = useState('')
   const [gender, setGender] = useState('')
   const [country, setCountry] = useState('')
   const [localImageUri, setLocalImageUri] = useState<string | null>(null)
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
 
   const defaultDob: DateValue = useMemo(() => ({ day: 1, month: 0, year: 10 }), [])
   const [dob, setDob] = useState<DateValue>(defaultDob)
@@ -578,32 +585,32 @@ export default function EditPersonalInfoScreen() {
   // Load existing profile from Supabase
   useEffect(() => {
     if (!user?.id) return
-    supabase
-      .from('users')
-      .select('phone, country, email')
-      .eq('clerk_id', user.id)
-      .single()
-      .then(({ data }) => {
-        if (data) {
-          setPhone(data.phone ?? '')
-          setCountry(data.country ?? selectedCountry ?? '')
-          if (data.email) setEmailInput(data.email)
-        } else {
-          setCountry(selectedCountry ?? '')
-        }
-      })
+    async function load() {
+      const token = await getToken()
+      if (!token) { setCountry(selectedCountry ?? ''); return }
+      const client = getAuthClient(token)
 
-    supabase
-      .from('patient_profiles')
-      .select('date_of_birth, gender, address')
-      .eq('user_id', user.id)
-      .single()
-      .then(({ data }) => {
-        if (data) {
-          setGender(data.gender ?? '')
-          setAddress(data.address ?? '')
-          if (data.date_of_birth) {
-            const d = new Date(data.date_of_birth)
+      const { data: ud } = await client
+        .from('users')
+        .select('id, phone, country')
+        .eq('clerk_id', user!.id)
+        .single()
+
+      if (ud) {
+        setSupabaseUserId((ud as any).id)
+        setPhone((ud as any).phone ?? '')
+        setCountry((ud as any).country ?? selectedCountry ?? '')
+
+        const { data: pp } = await client
+          .from('patient_profiles')
+          .select('date_of_birth, gender')
+          .eq('user_id', ud.id)
+          .single()
+
+        if (pp) {
+          setGender(pp.gender ?? '')
+          if (pp.date_of_birth) {
+            const d = new Date(pp.date_of_birth)
             setDob({
               day: d.getDate(),
               month: d.getMonth(),
@@ -611,7 +618,11 @@ export default function EditPersonalInfoScreen() {
             })
           }
         }
-      })
+      } else {
+        setCountry(selectedCountry ?? '')
+      }
+    }
+    load()
   }, [user?.id])
 
   // ── Image picker ─────────────────────────────────────────────────────────────
@@ -622,7 +633,7 @@ export default function EditPersonalInfoScreen() {
     if (source === 'camera') {
       const { status } = await ImagePicker.requestCameraPermissionsAsync()
       if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Camera access is needed to take a profile photo.')
+        Alert.alert(t('permissionRequired'), t('cameraPermissionMsg'))
         return
       }
       const result = await ImagePicker.launchCameraAsync({
@@ -637,7 +648,7 @@ export default function EditPersonalInfoScreen() {
     } else {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync()
       if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Photo library access is needed to choose a photo.')
+        Alert.alert(t('permissionRequired'), t('galleryPermissionMsg'))
         return
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -661,7 +672,7 @@ export default function EditPersonalInfoScreen() {
     if (dobLabel) {
       const birthDate = new Date(Number(YEARS[dob.year]), dob.month, dob.day)
       if (!meetsAgeRequirement(birthDate, 'patient')) {
-        setDobError(`You must be at least ${MIN_AGE_PATIENT} years old to use CareHub as a patient.`)
+        setDobError(t('ageTooYoung', { minAge: MIN_AGE_PATIENT }))
         return
       }
     }
@@ -669,6 +680,10 @@ export default function EditPersonalInfoScreen() {
 
     setSaving(true)
     try {
+      const token = await getToken()
+      if (!token) throw new Error('not authenticated')
+      const client = getAuthClient(token)
+
       // Update Clerk name
       await user.update({ firstName, lastName })
 
@@ -689,34 +704,37 @@ export default function EditPersonalInfoScreen() {
         }
       }
 
-      // Upsert users table
-      await supabase.from('users').upsert(
+      // Upsert users table, get back the Supabase UUID
+      const { data: upserted } = await client.from('users').upsert(
         {
           clerk_id: user.id,
-          email: emailInput.trim() || user.primaryEmailAddress?.emailAddress,
           full_name: `${firstName} ${lastName}`.trim(),
           phone,
           country,
           ...(profilePhotoUrl ? { profile_photo_url: profilePhotoUrl } : {}),
         },
         { onConflict: 'clerk_id' }
-      )
+      ).select('id').single()
+
+      const uid = supabaseUserId ?? upserted?.id
 
       // Build ISO date string
       const dobDate = dobLabel
         ? new Date(Number(YEARS[dob.year]), dob.month, dob.day).toISOString().split('T')[0]
         : null
 
-      // Upsert patient_profiles
-      await supabase.from('patient_profiles').upsert(
-        { user_id: user.id, gender, date_of_birth: dobDate, address },
-        { onConflict: 'user_id' }
-      )
+      // Upsert patient_profiles using Supabase UUID
+      if (uid) {
+        await client.from('patient_profiles').upsert(
+          { user_id: uid, gender, date_of_birth: dobDate },
+          { onConflict: 'user_id' }
+        )
+      }
 
-      Alert.alert('Saved', 'Your profile has been updated.')
+      Alert.alert(t('profileSaved'), t('profileSavedMsg'))
       router.back()
     } catch {
-      Alert.alert('Error', 'Failed to save profile. Please try again.')
+      Alert.alert(t('profileSaveError'), t('profileSaveErrorMsg'))
     } finally {
       setSaving(false)
     }
@@ -735,7 +753,7 @@ export default function EditPersonalInfoScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Edit Profile</Text>
+        <Text style={styles.headerTitle}>{t('editProfile')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -767,25 +785,25 @@ export default function EditPersonalInfoScreen() {
               <Ionicons name="camera" size={15} color={colors.mistWhite} />
             </LinearGradient>
           </Pressable>
-          <Text style={styles.changePhotoText}>Tap to change photo</Text>
+          <Text style={styles.changePhotoText}>{t('tapToChangePhoto')}</Text>
         </View>
 
         {/* ── Personal Information ── */}
-        <Text style={styles.sectionLabel}>Personal Information</Text>
+        <Text style={styles.sectionLabel}>{t('personalInformation')}</Text>
         <View style={styles.card}>
           <View style={fieldStyles.fieldSpacing}>
-            <FormField label="First Name" value={firstName} onChangeText={setFirstName} placeholder="Enter first name" />
+            <FormField label={t('firstName')} value={firstName} onChangeText={setFirstName} placeholder={t('enterFirstName')} />
           </View>
           <View style={fieldStyles.fieldSpacing}>
-            <FormField label="Last Name" value={lastName} onChangeText={setLastName} placeholder="Enter last name" />
+            <FormField label={t('lastName')} value={lastName} onChangeText={setLastName} placeholder={t('enterLastName')} />
           </View>
 
           {/* Gender */}
           <View style={fieldStyles.fieldSpacing}>
             <FormField
-              label="Gender"
-              value={gender}
-              placeholder="Select gender"
+              label={t('gender')}
+              value={gender ? t(GENDER_LABEL_MAP[gender] ?? 'gender') : ''}
+              placeholder={t('selectGender')}
               onPress={() => setShowGenderPicker(true)}
               suffix={<Ionicons name="chevron-down" size={16} color="#9CA3AF" />}
             />
@@ -793,9 +811,9 @@ export default function EditPersonalInfoScreen() {
 
           {/* Date of Birth */}
           <FormField
-            label="Date of Birth"
+            label={t('dateOfBirth')}
             value={dobLabel}
-            placeholder="Select date of birth"
+            placeholder={t('selectDateOfBirth')}
             onPress={() => setShowDatePicker(true)}
             suffix={<Ionicons name="calendar-outline" size={16} color="#9CA3AF" />}
           />
@@ -804,11 +822,11 @@ export default function EditPersonalInfoScreen() {
         </View>
 
         {/* ── Contact Information ── */}
-        <Text style={styles.sectionLabel}>Contact Information</Text>
+        <Text style={styles.sectionLabel}>{t('contactInformation')}</Text>
         <View style={styles.card}>
           <View style={fieldStyles.fieldSpacing}>
             <FormField
-              label="Phone Number (Optional)"
+              label={t('phoneNumber')}
               value={phone}
               onChangeText={setPhone}
               placeholder="e.g. +251 91 234 5678"
@@ -817,27 +835,18 @@ export default function EditPersonalInfoScreen() {
           </View>
           <View style={fieldStyles.fieldSpacing}>
             <FormField
-              label="Email Address"
-              value={emailInput}
-              onChangeText={setEmailInput}
-              placeholder="Enter email address"
-              keyboardType="email-address"
-            />
-          </View>
-          <View style={fieldStyles.fieldSpacing}>
-            <FormField
-              label="Country"
-              value={country}
+              label={t('emailAddress')}
+              value={user?.primaryEmailAddress?.emailAddress ?? ''}
               editable={false}
               suffix={<Ionicons name="lock-closed" size={14} color="#9CA3AF" />}
             />
           </View>
           <View style={fieldStyles.fieldSpacing}>
             <FormField
-              label="Address"
-              value={address}
-              onChangeText={setAddress}
-              placeholder="Enter your address"
+              label={t('country')}
+              value={country}
+              editable={false}
+              suffix={<Ionicons name="lock-closed" size={14} color="#9CA3AF" />}
             />
           </View>
         </View>
@@ -854,7 +863,7 @@ export default function EditPersonalInfoScreen() {
             end={{ x: 1, y: 0 }}
             style={styles.saveGrad}
           >
-            <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save Changes'}</Text>
+            <Text style={styles.saveText}>{saving ? t('saving') : t('saveChanges')}</Text>
           </LinearGradient>
         </Pressable>
 
@@ -958,11 +967,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 16,
     marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 6, 0.05, 2),
   },
 
   saveWrap: { borderRadius: 16, overflow: 'hidden', marginTop: 4 },

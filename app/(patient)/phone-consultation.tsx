@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Pressable,
@@ -10,270 +12,371 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useAuth } from '@clerk/clerk-expo'
-import {
-  ClientRoleType,
-  IRtcEngineEventHandler,
-} from 'react-native-agora'
-import * as ScreenCapture from 'expo-screen-capture'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
-import { useAuthStore } from '@/store/authStore'
+import { getAgoraEngine, releaseAgoraEngine, fetchAgoraToken, uidFromString } from '@/lib/agora'
+import { getAuthClient } from '@/lib/supabase'
+import { streamClient } from '@/lib/stream'
+import { logger } from '@/lib/logger'
 
-type CallStatus = 'connecting' | 'waiting' | 'connected'
+// Lazy-load Stream Chat
+let Chat: any = null
+let ChannelView: any = null
+let MessageComposer: any = null
+let MessageList: any = null
+try {
+  const sc = require('stream-chat-expo')
+  Chat = sc.Chat
+  ChannelView = sc.Channel
+  MessageComposer = sc.MessageComposer
+  MessageList = sc.MessageList
+} catch {}
 
-const STATUS_LABEL: Record<CallStatus, string> = {
-  connecting: 'Connecting...',
-  waiting: 'Waiting for doctor...',
-  connected: 'On Call',
+type CallStatus = 'connecting' | 'waiting' | 'connected' | 'error'
+
+function formatDuration(secs: number) {
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
-export default function PhoneConsultationScreen() {
-  const { doctorId, doctorName, consultationId } = useLocalSearchParams<{
-    doctorId?: string
-    doctorName?: string
-    consultationId?: string
-  }>()
+function CtrlBtn({
+  icon, label, active = false, danger = false, onPress,
+}: {
+  icon: string; label: string; active?: boolean; danger?: boolean; onPress: () => void
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.ctrlBtn,
+        active && styles.ctrlBtnActive,
+        danger && styles.ctrlBtnDanger,
+        pressed && { opacity: 0.8 },
+      ]}
+      onPress={onPress}
+    >
+      <Ionicons
+        name={icon as any}
+        size={danger ? 28 : 24}
+        color={danger ? colors.mistWhite : active ? colors.tealGreen : 'rgba(255,255,255,0.85)'}
+      />
+      <Text style={[styles.ctrlLabel, active && { color: colors.tealGreen }]}>{label}</Text>
+    </Pressable>
+  )
+}
+
+export default function PatientPhoneConsultationScreen() {
   const router = useRouter()
-  const { userId } = useAuthStore()
   const { getToken } = useAuth()
+  const { user } = useUser()
+  const { consultationId, doctorId, doctorName } = useLocalSearchParams<{
+    consultationId: string; doctorId: string; doctorName: string
+  }>()
 
-  // Prevent screenshots and screen recording during calls
-  ScreenCapture.usePreventScreenCapture()
-
-  const [seconds, setSeconds] = useState(0)
-  const [muted, setMuted] = useState(false)
-  const [speakerOn, setSpeakerOn] = useState(false)
+  const [isMuted, setIsMuted] = useState(false)
+  const [isSpeaker, setIsSpeaker] = useState(true)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [duration, setDuration] = useState(0)
   const [callStatus, setCallStatus] = useState<CallStatus>('connecting')
-  const [agoraToken, setAgoraToken] = useState<string | null>(null)
+  const [activeChannel, setActiveChannel] = useState<any>(null)
+  const [channelLoading, setChannelLoading] = useState(false)
 
-  const channelName = consultationId ?? `consult-${doctorId ?? 'demo'}`
-  const localUid = useMemo(() => userId ? uidFromString(userId) : 1, [userId])
-  const remoteUidRef = useRef<number | null>(null)
-  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null
+  const chatSlide = useRef(new Animated.Value(0)).current
+  const pulse = useRef(new Animated.Value(1)).current
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const durationRef = useRef(0)
 
-  // Fetch Agora token
+  // Agora audio call
   useEffect(() => {
-    if (!channelName) return
-    getToken().then(clerkToken => {
-      if (!clerkToken) return
-      fetchAgoraToken(channelName, localUid, clerkToken)
-        .then(setAgoraToken)
-        .catch(console.error)
-    })
-  }, [channelName, localUid, getToken])
-
-  // Timer
-  useEffect(() => {
-    const t = setInterval(() => setSeconds(s => s + 1), 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  // Agora engine — audio call
-  useEffect(() => {
-    if (!agoraReady) return
-
+    if (!user || !consultationId) return
     let mounted = true
-    let engine: ReturnType<typeof getAgoraEngine> | null = null
 
-    try {
-      engine = getAgoraEngine()
-    } catch {
-      return
-    }
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || !mounted) return
 
-    const handler: IRtcEngineEventHandler = {
-      onJoinChannelSuccess: () => {
-        if (mounted) setCallStatus('waiting')
-      },
-      onUserJoined: (_conn, uid) => {
+        const engine = getAgoraEngine()
+        const uid = uidFromString(user.id)
+        const agoraToken = await fetchAgoraToken(consultationId, uid, token)
         if (!mounted) return
-        remoteUidRef.current = uid
-        setCallStatus('connected')
-      },
-      onUserOffline: (_conn, uid) => {
-        if (!mounted) return
-        if (uid === remoteUidRef.current) {
-          remoteUidRef.current = null
-          setCallStatus('waiting')
-        }
-      },
-    }
 
-    engine.registerEventHandler(handler)
-    engine.enableAudio()
-    engine.disableVideo()
-    engine.setEnableSpeakerphone(false)
-    engine.joinChannel(agoraToken ?? '', channelName, localUid, {
-      clientRoleType: ClientRoleType.ClientRoleBroadcaster,
-    })
+        const { ChannelProfileType, ClientRoleType } = require('react-native-agora')
+
+        engine.registerEventHandler({
+          onJoinChannelSuccess: () => {
+            if (mounted) setCallStatus('waiting')
+          },
+          onUserJoined: () => {
+            if (mounted) {
+              setCallStatus('connected')
+              timerRef.current = setInterval(() => {
+                setDuration(d => { durationRef.current = d + 1; return d + 1 })
+              }, 1000)
+              // Mark consultation in_progress once both parties are connected
+              getToken().then(tok => {
+                if (!tok || !consultationId) return
+                getAuthClient(tok)
+                  .from('consultations')
+                  .update({ status: 'in_progress' })
+                  .eq('id', consultationId)
+                  .in('status', ['accepted', 'active'])
+                  .then(() => {})
+              })
+            }
+          },
+          onUserOffline: () => {
+            if (mounted) setCallStatus('waiting')
+          },
+          onError: (err: any) => {
+            logger.error('[Agora] Phone error:', err)
+            if (mounted) setCallStatus('error')
+          },
+        })
+
+        engine.enableAudio()
+        engine.setEnableSpeakerphone(isSpeaker)
+
+        await engine.joinChannel(agoraToken, consultationId, uid, {
+          channelProfile: ChannelProfileType.ChannelProfileCommunication,
+          clientRoleType: ClientRoleType.ClientRoleBroadcaster,
+        })
+      } catch (err) {
+        logger.error('[Agora] Phone join failed:', err)
+        if (mounted) setCallStatus('error')
+      }
+    })()
 
     return () => {
       mounted = false
-      engine?.unregisterEventHandler(handler)
+      if (timerRef.current) clearInterval(timerRef.current)
+      const engine = getAgoraEngine()
       engine?.leaveChannel()
       releaseAgoraEngine()
     }
-  }, [agoraReady, channelName, localUid])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consultationId, user])
 
   // Sync mute
   useEffect(() => {
-    if (!agoraReady) return
-    try { getAgoraEngine().muteLocalAudioStream(muted) } catch {}
-  }, [muted, agoraReady])
+    try { getAgoraEngine()?.muteLocalAudioStream(isMuted) } catch {}
+  }, [isMuted])
 
   // Sync speaker
   useEffect(() => {
-    if (!agoraReady) return
-    try { getAgoraEngine().setEnableSpeakerphone(speakerOn) } catch {}
-  }, [speakerOn, agoraReady])
+    try { getAgoraEngine()?.setEnableSpeakerphone(isSpeaker) } catch {}
+  }, [isSpeaker])
 
-  // Pulse animation
-  const pulse = useRef(new Animated.Value(1)).current
+  // Avatar pulse animation
   useEffect(() => {
     const anim = Animated.loop(
       Animated.sequence([
-        Animated.timing(pulse, { toValue: 1.06, duration: 900, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 1, duration: 900, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 1.06, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: true }),
       ])
     )
     anim.start()
     return () => anim.stop()
   }, [])
 
-  const formatTime = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  const openChat = () => {
+    if (!activeChannel && consultationId && Chat) {
+      setChannelLoading(true)
+      const ch = streamClient.channel('messaging', consultationId)
+      ch.watch()
+        .then(() => setActiveChannel(ch))
+        .catch(err => logger.error('[PhoneChat] watch failed:', err))
+        .finally(() => setChannelLoading(false))
+    }
+    Animated.spring(chatSlide, { toValue: 1, useNativeDriver: true, tension: 65, friction: 11 }).start()
+    setChatOpen(true)
+  }
+
+  const closeChat = () => {
+    Animated.timing(chatSlide, { toValue: 0, duration: 250, useNativeDriver: true }).start(() =>
+      setChatOpen(false)
+    )
+  }
 
   const handleEnd = () => {
-    Alert.alert('End Call', 'Are you sure you want to end this call?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'End Call',
-        style: 'destructive',
-        onPress: () =>
-          router.replace({
-            pathname: '/(patient)/consultation-summary',
-            params: { doctorId, doctorName, consultationType: 'phone' },
-          }),
-      },
-    ])
+    Alert.alert(
+      'Leave Call',
+      'The doctor will continue the session. You can rejoin from your Messages tab.',
+      [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Leave', style: 'destructive',
+          onPress: () => {
+            if (timerRef.current) clearInterval(timerRef.current)
+            try { getAgoraEngine()?.leaveChannel() } catch {}
+            releaseAgoraEngine()
+            router.replace('/(patient)/(tabs)/appointments' as any)
+          },
+        },
+      ],
+    )
+  }
+
+  const chatTranslateY = chatSlide.interpolate({ inputRange: [0, 1], outputRange: [600, 0] })
+
+  const statusLabel: Record<CallStatus, string> = {
+    connecting: 'Connecting…',
+    waiting: 'Waiting for doctor…',
+    connected: 'In call',
+    error: 'Connection failed',
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.topSection}>
-        <Text style={styles.callLabel}>{STATUS_LABEL[callStatus]}</Text>
+    <View style={styles.root}>
+      <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']}>
+        {/* Header */}
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} hitSlop={12} style={styles.backBtn}>
+            <Ionicons name="arrow-back" size={22} color="rgba(255,255,255,0.8)" />
+          </Pressable>
+          <View style={styles.badge}>
+            <Ionicons name="call" size={13} color={colors.tealGreen} />
+            <Text style={styles.badgeText}>Phone Call</Text>
+          </View>
+          <Text style={styles.timerText}>{formatDuration(duration)}</Text>
+        </View>
 
-        <Animated.View style={[styles.photoCircle, { transform: [{ scale: pulse }] }]}>
-          <Ionicons name="person" size={56} color="rgba(255,255,255,0.4)" />
+        {/* Avatar + name */}
+        <View style={styles.center}>
+          <Animated.View style={[styles.avatarWrap, { transform: [{ scale: pulse }] }]}>
+            <View style={styles.avatarRing} />
+            <View style={styles.avatarCircle}>
+              <Ionicons name="person" size={56} color="rgba(255,255,255,0.5)" />
+            </View>
+          </Animated.View>
+          <Text style={styles.name}>{doctorName ?? 'Doctor'}</Text>
+          <Text style={[
+            styles.callStatus,
+            callStatus === 'connected' && { color: colors.tealGreen },
+            callStatus === 'error' && { color: colors.error },
+          ]}>
+            {statusLabel[callStatus]}
+          </Text>
+          {callStatus === 'error' && (
+            <Text style={styles.errorHint}>Check your microphone permissions and try again.</Text>
+          )}
+          {callStatus === 'connected' && (
+            <Text style={styles.chatHint}>Tap Chat to send images or notes during the call</Text>
+          )}
+        </View>
+
+        {/* Controls */}
+        <View style={styles.controls}>
+          <CtrlBtn icon={isMuted ? 'mic-off' : 'mic'} label={isMuted ? 'Unmute' : 'Mute'} active={isMuted} onPress={() => setIsMuted(m => !m)} />
+          <CtrlBtn icon="volume-high" label="Speaker" active={isSpeaker} onPress={() => setIsSpeaker(s => !s)} />
+          <CtrlBtn icon="chatbubble-ellipses" label="Chat" active={chatOpen} onPress={chatOpen ? closeChat : openChat} />
+          <CtrlBtn icon="call" label="Leave" danger onPress={handleEnd} />
+        </View>
+      </SafeAreaView>
+
+      {/* Slide-up chat panel */}
+      {chatOpen && (
+        <Animated.View style={[styles.chatPanel, { transform: [{ translateY: chatTranslateY }] }]}>
+          <View style={styles.panelHandle} />
+          <View style={styles.panelHeader}>
+            <Text style={styles.panelTitle}>Chat — send images or notes</Text>
+            <Pressable onPress={closeChat} hitSlop={12}>
+              <Ionicons name="chevron-down" size={22} color={colors.inkBlack} />
+            </Pressable>
+          </View>
+          {!Chat ? (
+            <View style={styles.panelEmpty}>
+              <Ionicons name="chatbubble-ellipses-outline" size={40} color={colors.steelGrey} />
+              <Text style={styles.panelEmptyText}>Chat not available in Expo Go</Text>
+              <Text style={styles.panelEmptyHint}>Use a development build to enable chat</Text>
+            </View>
+          ) : channelLoading || !activeChannel ? (
+            <View style={styles.panelEmpty}>
+              <ActivityIndicator color={colors.careBlue} size="large" />
+            </View>
+          ) : (
+            <View style={{ flex: 1 }}>
+              <Chat client={streamClient}>
+                <ChannelView channel={activeChannel}>
+                  <MessageList />
+                  <MessageComposer />
+                </ChannelView>
+              </Chat>
+            </View>
+          )}
         </Animated.View>
-
-        <Text style={styles.doctorName}>{doctorName ?? 'Doctor'}</Text>
-        <Text style={styles.timer}>{formatTime(seconds)}</Text>
-
-        {/* Sound wave indicator */}
-        <View style={styles.waveRow}>
-          {[4, 8, 6, 12, 8, 5, 10, 7, 4, 9, 6, 3].map((h, i) => (
-            <View
-              key={i}
-              style={[styles.waveLine, { height: muted ? 3 : h, opacity: muted ? 0.25 : 0.8 }]}
-            />
-          ))}
-        </View>
-      </View>
-
-      {/* Controls */}
-      <View style={styles.controls}>
-        <View style={styles.controlsRow}>
-          <Pressable
-            style={[styles.controlBtn, muted && styles.controlBtnActive]}
-            onPress={() => setMuted(m => !m)}
-          >
-            <Ionicons
-              name={muted ? 'mic-off' : 'mic'}
-              size={26}
-              color={muted ? colors.mistWhite : colors.inkBlack}
-            />
-            <Text style={[styles.controlLabel, muted && styles.controlLabelActive]}>
-              {muted ? 'Unmute' : 'Mute'}
-            </Text>
-          </Pressable>
-
-          <Pressable style={styles.endBtn} onPress={handleEnd}>
-            <Ionicons name="call" size={30} color={colors.mistWhite} />
-          </Pressable>
-
-          <Pressable
-            style={[styles.controlBtn, speakerOn && styles.controlBtnActive]}
-            onPress={() => setSpeakerOn(s => !s)}
-          >
-            <Ionicons
-              name={speakerOn ? 'volume-high' : 'volume-medium'}
-              size={26}
-              color={speakerOn ? colors.mistWhite : colors.inkBlack}
-            />
-            <Text style={[styles.controlLabel, speakerOn && styles.controlLabelActive]}>
-              Speaker
-            </Text>
-          </Pressable>
-        </View>
-      </View>
-    </SafeAreaView>
+      )}
+    </View>
   )
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#070E27' },
+  root: { flex: 1, backgroundColor: '#070E27' },
 
-  topSection: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
-  callLabel: {
-    fontFamily: fonts.regular, fontSize: 14,
-    color: colors.tealGreen, letterSpacing: 1,
-    textTransform: 'uppercase', marginBottom: 32,
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 14,
   },
-  photoCircle: {
-    width: 160, height: 160, borderRadius: 80,
-    backgroundColor: '#1A2744',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 3, borderColor: 'rgba(0,191,165,0.5)',
-    marginBottom: 24,
-    shadowColor: colors.tealGreen,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.4, shadowRadius: 20, elevation: 8,
+  backBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  badge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(0,191,165,0.15)', borderRadius: 20,
+    paddingHorizontal: 14, paddingVertical: 7,
   },
-  doctorName: {
-    fontFamily: fonts.bold, fontSize: 26, color: colors.mistWhite,
-    textAlign: 'center', marginBottom: 8,
-  },
-  timer: { fontFamily: fonts.medium, fontSize: 22, color: 'rgba(255,255,255,0.75)', marginBottom: 28 },
+  badgeText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.tealGreen },
+  timerText: { fontFamily: fonts.bold, fontSize: 16, color: 'rgba(255,255,255,0.7)' },
 
-  waveRow: { flexDirection: 'row', alignItems: 'center', gap: 3, height: 20 },
-  waveLine: { width: 3, borderRadius: 2, backgroundColor: colors.tealGreen },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, paddingHorizontal: 32 },
+  avatarWrap: { alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
+  avatarRing: {
+    position: 'absolute', width: 155, height: 155, borderRadius: 78,
+    borderWidth: 1.5, borderColor: 'rgba(0,191,165,0.25)',
+  },
+  avatarCircle: {
+    width: 130, height: 130, borderRadius: 65,
+    backgroundColor: '#1A2744', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 3, borderColor: colors.tealGreen,
+  },
+  name: { fontFamily: fonts.bold, fontSize: 26, color: colors.mistWhite },
+  callStatus: { fontFamily: fonts.regular, fontSize: 14, color: 'rgba(255,255,255,0.5)' },
+  errorHint: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(211,47,47,0.7)', textAlign: 'center' },
+  chatHint: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: 8 },
 
   controls: {
-    paddingHorizontal: 32, paddingBottom: 40,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderTopLeftRadius: 32, borderTopRightRadius: 32,
-    paddingTop: 28,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around',
+    paddingHorizontal: 16, paddingBottom: 20, paddingTop: 8,
   },
-  controlsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  controlBtn: {
-    alignItems: 'center', gap: 8,
-    width: 72, height: 72, borderRadius: 36,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    justifyContent: 'center',
+  ctrlBtn: {
+    alignItems: 'center', gap: 8, paddingVertical: 14, paddingHorizontal: 12,
+    borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.08)', minWidth: 68,
   },
-  controlBtnActive: { backgroundColor: colors.careBlue },
-  controlLabel: { fontFamily: fonts.medium, fontSize: 11, color: 'rgba(255,255,255,0.7)' },
-  controlLabelActive: { color: colors.mistWhite },
-  endBtn: {
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: colors.error,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: colors.error, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 12, elevation: 6,
-    transform: [{ rotate: '135deg' }],
+  ctrlBtnActive: { backgroundColor: 'rgba(0,191,165,0.12)' },
+  ctrlBtnDanger: {
+    backgroundColor: colors.error, width: 72, height: 72,
+    borderRadius: 36, paddingVertical: 0,
   },
+  ctrlLabel: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.7)' },
+
+  chatPanel: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, height: '62%',
+    backgroundColor: colors.mistWhite,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 8, elevation: 24,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.35, shadowRadius: 14,
+  },
+  panelHandle: {
+    width: 44, height: 5, borderRadius: 3, backgroundColor: colors.steelGrey,
+    alignSelf: 'center', marginBottom: 8,
+  },
+  panelHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.cloudGrey,
+  },
+  panelTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  panelEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
+  panelEmptyText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  panelEmptyHint: { fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' },
 })

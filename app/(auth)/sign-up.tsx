@@ -1,12 +1,12 @@
-import { useAuth, useClerk, useSSO } from '@clerk/clerk-expo'
+import { useAuth, useSignIn, useSignUp, useSSO } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Linking from 'expo-linking'
-import { useRouter } from 'expo-router'
+import { useFocusEffect, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as WebBrowser from 'expo-web-browser'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   ActivityIndicator,
@@ -25,114 +25,158 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { supabaseEmailAuth } from '@/lib/supabase'
+import { LANGUAGES } from '@/constants/languages'
+import { shadow } from '@/lib/shadow'
+import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
+import { useAuthStore } from '@/store/authStore'
 
 WebBrowser.maybeCompleteAuthSession()
-
-// ─── Languages ────────────────────────────────────────────────────────────────
-
-const LANGUAGES = [
-  { id: 'en', nativeName: 'English', englishName: 'English' },
-  { id: 'so', nativeName: 'Soomaali', englishName: 'Somali' },
-  { id: 'am', nativeName: 'አማርኛ', englishName: 'Amharic' },
-  { id: 'om', nativeName: 'Afaan Oromoo', englishName: 'Oromo' },
-  { id: 'ti', nativeName: 'ትግርኛ', englishName: 'Tigrinya' },
-  { id: 'ar', nativeName: 'العربية', englishName: 'Arabic' },
-]
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 }
 
-// ─── Screen ───────────────────────────────────────────────────────────────────
-
 export default function SignUpScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
-  const { isSignedIn } = useAuth()
-  const { signOut } = useClerk()
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage } = useAppStore()
+  const { isLoaded, signUp } = useSignUp()
+  const { signIn, isLoaded: signInLoaded, setActive } = useSignIn()
+  const { startSSOFlow } = useSSO()
+  const { isSignedIn, userId } = useAuth()
+
+  const { userRole: localRole } = useAuthStore()
 
   const [langDropdown, setLangDropdown] = useState(false)
   const currentLang =
     LANGUAGES.find((l) => l.id === (selectedLanguage ?? 'en')) ?? LANGUAGES[0]
 
+  const [inputKey, setInputKey] = useState(0)
   const [fullName, setFullName] = useState('')
+  const [fullNameError, setFullNameError] = useState('')
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [showConfirm, setShowConfirm] = useState(false)
-
-  const [nameError, setNameError] = useState('')
   const [emailError, setEmailError] = useState('')
+  const [password, setPassword] = useState('')
   const [passwordError, setPasswordError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [confirmError, setConfirmError] = useState('')
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [globalError, setGlobalError] = useState('')
-  const [signUpSuccess, setSignUpSuccess] = useState(false)
-
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
   const [facebookLoading, setFacebookLoading] = useState(false)
 
-  const { startSSOFlow } = useSSO()
+  const isFormReady = fullName.trim().length > 1 && isValidEmail(email) && password.length >= 8 && password === confirmPassword
 
-  const isFormReady =
-    fullName.trim().length > 0 &&
-    isValidEmail(email) &&
-    password.length >= 8 &&
-    password === confirmPassword
+  // ── Shared: check role and navigate to appropriate home ───────────────────
+  const redirectingRef = useRef(false)
+  const ssoInProgressRef = useRef(false)
+  const checkRoleAndRedirect = useCallback(async (clerkId: string) => {
+    if (redirectingRef.current) return
+    redirectingRef.current = true
+    try {
+      // Always query Supabase — if the row was deleted, send to role selection
+      const { data } = await supabase.from('users').select('role').eq('clerk_id', clerkId).single()
+      if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+      else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+      else router.replace('/(auth)/role' as never)
+    } catch {
+      // Supabase unreachable (network error) — fall back to cached role
+      if (localRole === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+      else if (localRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+      else router.replace('/(auth)/role' as never)
+    } finally {
+      redirectingRef.current = false
+    }
+  }, [router, localRole])
 
-  // ── Validation ────────────────────────────────────────────────────────────
-  function validate(): boolean {
-    let ok = true
-    setNameError('')
+  // Clear form every time this screen comes into focus (prevents OS autofill persistence)
+  useFocusEffect(
+    useCallback(() => {
+      setInputKey(k => k + 1)
+      setFullName('')
+      setFullNameError('')
+      setEmail('')
+      setEmailError('')
+      setPassword('')
+      setPasswordError('')
+      setConfirmPassword('')
+      setConfirmError('')
+      setGlobalError('')
+      setShowPassword(false)
+      setShowConfirmPassword(false)
+    }, [])
+  )
+
+  // ── Redirect to dashboard if user is already authenticated ──────────────────
+  useFocusEffect(
+    useCallback(() => {
+      if (isSignedIn && userId && !ssoInProgressRef.current) {
+        checkRoleAndRedirect(userId)
+      }
+    }, [isSignedIn, userId, checkRoleAndRedirect])
+  )
+
+  // ── Fire when Clerk auth state changes after SSO setActive ────────────────
+  useEffect(() => {
+    if (isSignedIn && userId && ssoInProgressRef.current) {
+      ssoInProgressRef.current = false
+      checkRoleAndRedirect(userId)
+    }
+  }, [isSignedIn, userId, checkRoleAndRedirect])
+
+  // ── Email + Password sign-up via Clerk ────────────────────────────────────
+  const handleContinue = async () => {
+    if (!isLoaded || loading) return
+    const normalizedEmail = email.trim().toLowerCase()
+    let valid = true
+    setFullNameError('')
     setEmailError('')
     setPasswordError('')
     setConfirmError('')
     setGlobalError('')
-    if (!fullName.trim()) { setNameError('Please enter your full name'); ok = false }
-    if (!email.trim()) { setEmailError('Please enter your email address'); ok = false }
-    else if (!isValidEmail(email)) { setEmailError('Please enter a valid email address'); ok = false }
-    if (!password) { setPasswordError('Please enter a password'); ok = false }
-    else if (password.length < 8) { setPasswordError('Password must be at least 8 characters'); ok = false }
-    if (!confirmPassword) { setConfirmError('Please confirm your password'); ok = false }
-    else if (password !== confirmPassword) { setConfirmError('Passwords must be the same'); ok = false }
-    return ok
-  }
 
-  // ── Email sign-up via Supabase Auth ───────────────────────────────────────
-  const handleContinue = async () => {
-    if (!validate()) return
+    if (!fullName.trim() || fullName.trim().length < 2) {
+      setFullNameError('Please enter your full name.')
+      valid = false
+    }
+    if (!isValidEmail(normalizedEmail)) {
+      setEmailError('Please enter a valid email address.')
+      valid = false
+    }
+    if (password.length < 8) {
+      setPasswordError('Password must be at least 8 characters.')
+      valid = false
+    }
+    if (password !== confirmPassword) {
+      setConfirmError('Passwords do not match.')
+      valid = false
+    }
+    if (!valid) return
+
     setLoading(true)
     try {
-      const normalizedEmail = email.trim().toLowerCase()
-      const { data: { session }, error } = await supabaseEmailAuth.auth.signUp({
-        email: normalizedEmail,
-        password,
-        options: { data: { full_name: fullName.trim() } },
-      })
-
-      if (error) {
-        const msg = error.message?.toLowerCase() ?? ''
-        if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('user already')) {
-          setEmailError('This email is already registered. Please sign in instead.')
-        } else if (msg.includes('password')) {
-          setPasswordError(error.message)
-        } else {
-          setGlobalError(error.message ?? 'Something went wrong. Please try again.')
-        }
-        return
-      }
-
-      if (session) {
-        // Email confirmation disabled in Supabase — user is immediately active
-        router.replace('/(auth)/role' as never)
+      const nameParts = fullName.trim().split(/\s+/)
+      const firstName = nameParts[0]
+      const lastName = nameParts.slice(1).join(' ') || undefined
+      await signUp.create({ emailAddress: normalizedEmail, password, firstName, ...(lastName && { lastName }) })
+      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' })
+      router.push({
+        pathname: '/(auth)/verify',
+        params: { email: normalizedEmail, type: 'signup' },
+      } as never)
+    } catch (err: any) {
+      const code: string = err?.errors?.[0]?.code ?? ''
+      const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
+      if (code === 'form_identifier_exists') {
+        setEmailError('An account with this email already exists. Please sign in instead.')
+      } else if (code?.includes('password')) {
+        setPasswordError(msg || 'Please choose a stronger password (min. 8 characters).')
       } else {
-        // Email confirmation enabled — prompt user to check their inbox
-        setSignUpSuccess(true)
+        setGlobalError(msg || 'Something went wrong. Please try again.')
       }
     } finally {
       setLoading(false)
@@ -142,92 +186,82 @@ export default function SignUpScreen() {
   // ── Google SSO (Clerk) ────────────────────────────────────────────────────
   const handleGoogle = useCallback(async () => {
     if (googleLoading) return
-    if (isSignedIn) { try { await signOut() } catch {} }
     setGoogleLoading(true)
     setGlobalError('')
+    ssoInProgressRef.current = true
     try {
-      const redirectUrl = Linking.createURL('/oauth-native-callback', { scheme: 'carehub' })
-      const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
-      if (createdSessionId && setActive) {
-        await setActive({ session: createdSessionId })
-        router.replace('/(auth)/role' as never)
-      } else if (setActive) {
-        await setActive({})
-        router.replace('/(auth)/role' as never)
+      if (!signIn || !signInLoaded) return
+      const redirectUrl = Linking.createURL('/oauth-native-callback')
+      // Manually implement SSO flow so we can pass oidcPrompt: 'select_account'
+      // to force Google to show the account picker instead of auto-selecting the last account
+      await (signIn as any).create({ strategy: 'oauth_google', redirectUrl, oidcPrompt: 'select_account' })
+      const { externalVerificationRedirectURL } = signIn.firstFactorVerification
+      if (!externalVerificationRedirectURL) {
+        ssoInProgressRef.current = false
+        setGlobalError('Google sign-in failed. Please try again.')
+        return
+      }
+      const authSessionResult = await WebBrowser.openAuthSessionAsync(
+        externalVerificationRedirectURL.toString(),
+        redirectUrl
+      )
+      if (authSessionResult.type !== 'success' || !authSessionResult.url) {
+        ssoInProgressRef.current = false
+        return
+      }
+      const urlParams = new URL(authSessionResult.url).searchParams
+      const rotatingTokenNonce = urlParams.get('rotating_token_nonce') ?? ''
+      await signIn.reload({ rotatingTokenNonce })
+      const needsSignUp = signIn.firstFactorVerification.status === 'transferable'
+      if (needsSignUp) {
+        await signUp.create({ transfer: true })
+        if (signUp.createdSessionId && setActive) {
+          await setActive({ session: signUp.createdSessionId })
+        }
+      } else if (signIn.createdSessionId && setActive) {
+        await setActive({ session: signIn.createdSessionId })
       }
     } catch (err: any) {
+      ssoInProgressRef.current = false
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
-        router.replace('/(auth)/role' as never)
+        if (userId) checkRoleAndRedirect(userId)
+        else router.replace('/(auth)/role' as never)
       } else if (code !== 'oauth_access_denied') {
-        try { await signOut() } catch {}
         setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
       }
     } finally {
       setGoogleLoading(false)
     }
-  }, [isSignedIn, googleLoading, signOut, startSSOFlow, router])
+  }, [googleLoading, signIn, signInLoaded, signUp, setActive, router, userId, checkRoleAndRedirect])
 
   // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
   const handleFacebook = useCallback(async () => {
     if (facebookLoading) return
-    if (isSignedIn) { try { await signOut() } catch {} }
     setFacebookLoading(true)
     setGlobalError('')
+    ssoInProgressRef.current = true
     try {
-      const redirectUrl = Linking.createURL('/oauth-native-callback', { scheme: 'carehub' })
+      const redirectUrl = Linking.createURL('/oauth-native-callback')
       const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
       if (createdSessionId && setActive) {
         await setActive({ session: createdSessionId })
-        router.replace('/(auth)/role' as never)
-      } else if (setActive) {
-        await setActive({})
-        router.replace('/(auth)/role' as never)
+        // useEffect above will fire once isSignedIn/userId updates
       }
     } catch (err: any) {
+      ssoInProgressRef.current = false
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
-        router.replace('/(auth)/role' as never)
+        if (userId) checkRoleAndRedirect(userId)
+        else router.replace('/(auth)/role' as never)
       } else if (code !== 'oauth_access_denied') {
-        try { await signOut() } catch {}
         setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
       }
     } finally {
       setFacebookLoading(false)
     }
-  }, [isSignedIn, facebookLoading, signOut, startSSOFlow, router])
+  }, [facebookLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
 
-  // ── Success state (email confirmation required) ────────────────────────────
-  if (signUpSuccess) {
-    return (
-      <KeyboardAvoidingView style={styles.flex} behavior="padding">
-        <StatusBar style="dark" />
-        <View style={[styles.successContainer, { paddingTop: top + 32, paddingBottom: Math.max(bottom, 32) }]}>
-          <Ionicons name="mail-open-outline" size={72} color={colors.tealGreen} />
-          <Text style={styles.successTitle}>Check your email</Text>
-          <Text style={styles.successBody}>
-            We sent a confirmation link to{'\n'}
-            <Text style={styles.successEmail}>{email.trim().toLowerCase()}</Text>
-          </Text>
-          <Text style={styles.successHint}>
-            Click the link in the email to activate your account, then come back to sign in.
-          </Text>
-          <Pressable onPress={() => router.push('/(auth)/sign-in' as never)} style={styles.goSignIn}>
-            <LinearGradient
-              colors={['#2962FF', '#00BFA5']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.goSignInGradient}
-            >
-              <Text style={styles.goSignInText}>Go to Sign In</Text>
-            </LinearGradient>
-          </Pressable>
-        </View>
-      </KeyboardAvoidingView>
-    )
-  }
-
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <KeyboardAvoidingView
       style={styles.flex}
@@ -292,8 +326,8 @@ export default function SignUpScreen() {
 
         {/* ── LOGO ── */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={72} />
-          <Text style={styles.brandName}>CARE<Text style={styles.brandHub}>HUB</Text></Text>
+          <CareHubLogo size={56} variant="dark" />
+          <Text style={styles.brandName}>DA<Text style={styles.brandHub}>WA</Text></Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>
 
@@ -303,22 +337,27 @@ export default function SignUpScreen() {
 
         {/* ── FORM ── */}
         <View style={styles.form}>
+
           {/* Full Name */}
           <View style={styles.fieldGroup}>
-            <View style={[styles.inputRow, !!nameError && styles.inputRowError]}>
+            <View style={[styles.inputRow, !!fullNameError && styles.inputRowError]}>
               <Ionicons name="person-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
+                key={`name-${inputKey}`}
                 style={styles.input}
-                placeholder="Full name"
+                placeholder={t('fullName')}
                 placeholderTextColor="#9CA3AF"
                 value={fullName}
-                onChangeText={(v) => { setFullName(v); setNameError('') }}
+                onChangeText={(v) => { setFullName(v); setFullNameError('') }}
                 autoCapitalize="words"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="next"
               />
             </View>
-            {!!nameError && <Text style={styles.fieldError}>{nameError}</Text>}
+            {!!fullNameError && <Text style={styles.fieldError}>{fullNameError}</Text>}
           </View>
 
           {/* Email */}
@@ -326,6 +365,7 @@ export default function SignUpScreen() {
             <View style={[styles.inputRow, !!emailError && styles.inputRowError]}>
               <Ionicons name="mail-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
+                key={`email-${inputKey}`}
                 style={styles.input}
                 placeholder={t('typeEmail')}
                 placeholderTextColor="#9CA3AF"
@@ -334,6 +374,9 @@ export default function SignUpScreen() {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="next"
               />
             </View>
@@ -345,7 +388,8 @@ export default function SignUpScreen() {
             <View style={[styles.inputRow, !!passwordError && styles.inputRowError]}>
               <Ionicons name="lock-closed-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
-                style={[styles.input, styles.inputFlex]}
+                key={`password-${inputKey}`}
+                style={styles.input}
                 placeholder="Password"
                 placeholderTextColor="#9CA3AF"
                 value={password}
@@ -353,9 +397,12 @@ export default function SignUpScreen() {
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="next"
               />
-              <Pressable onPress={() => setShowPassword((p) => !p)} hitSlop={8} style={styles.eyeBtn}>
+              <Pressable onPress={() => setShowPassword((p) => !p)} hitSlop={8}>
                 <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#9CA3AF" />
               </Pressable>
             </View>
@@ -367,19 +414,23 @@ export default function SignUpScreen() {
             <View style={[styles.inputRow, !!confirmError && styles.inputRowError]}>
               <Ionicons name="lock-closed-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
-                style={[styles.input, styles.inputFlex]}
-                placeholder="Confirm password"
+                key={`confirm-${inputKey}`}
+                style={styles.input}
+                placeholder="Confirm Password"
                 placeholderTextColor="#9CA3AF"
                 value={confirmPassword}
                 onChangeText={(v) => { setConfirmPassword(v); setConfirmError('') }}
-                secureTextEntry={!showConfirm}
+                secureTextEntry={!showConfirmPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="done"
                 onSubmitEditing={handleContinue}
               />
-              <Pressable onPress={() => setShowConfirm((p) => !p)} hitSlop={8} style={styles.eyeBtn}>
-                <Ionicons name={showConfirm ? 'eye-off-outline' : 'eye-outline'} size={20} color="#9CA3AF" />
+              <Pressable onPress={() => setShowConfirmPassword((p) => !p)} hitSlop={8}>
+                <Ionicons name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#9CA3AF" />
               </Pressable>
             </View>
             {!!confirmError && <Text style={styles.fieldError}>{confirmError}</Text>}
@@ -417,26 +468,26 @@ export default function SignUpScreen() {
         <Pressable
           onPress={handleGoogle}
           disabled={googleLoading}
-          style={[styles.googleBtn, googleLoading && styles.dimmed]}
+          style={[styles.socialBtn, googleLoading && styles.dimmed]}
         >
           {googleLoading
-            ? <ActivityIndicator size="small" color="#757575" />
+            ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/Google.svg')} style={styles.socialIcon} contentFit="contain" />
           }
-          <Text style={styles.googleText}>{t('continueWithGoogle')}</Text>
+          <Text style={styles.socialBtnText}>{t('continueWithGoogle')}</Text>
         </Pressable>
 
         {/* ── FACEBOOK ── */}
         <Pressable
           onPress={handleFacebook}
           disabled={facebookLoading}
-          style={[styles.facebookBtn, facebookLoading && styles.dimmed]}
+          style={[styles.socialBtn, styles.socialBtnMarginTop, facebookLoading && styles.dimmed]}
         >
           {facebookLoading
-            ? <ActivityIndicator size="small" color="#757575" />
+            ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/fb.svg.png')} style={styles.socialIcon} contentFit="contain" />
           }
-          <Text style={styles.facebookText}>{t('continueWithFacebook')}</Text>
+          <Text style={styles.socialBtnText}>{t('continueWithFacebook')}</Text>
         </Pressable>
 
         {/* ── LOGIN LINK ── */}
@@ -451,24 +502,9 @@ export default function SignUpScreen() {
   )
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: '#FFFFFF' },
   scroll: { flexGrow: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 24 },
-
-  // Success screen
-  successContainer: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 16,
-    backgroundColor: '#FFFFFF',
-  },
-  successTitle: { fontFamily: fonts.bold, fontSize: 28, color: colors.inkBlack, textAlign: 'center' },
-  successBody: { fontFamily: fonts.regular, fontSize: 15, color: '#6B7280', textAlign: 'center', lineHeight: 24 },
-  successEmail: { fontFamily: fonts.bold, color: colors.inkBlack },
-  successHint: { fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF', textAlign: 'center', lineHeight: 20 },
-  goSignIn: { borderRadius: 16, overflow: 'hidden', width: '100%', marginTop: 8 },
-  goSignInGradient: { height: 52, alignItems: 'center', justifyContent: 'center' },
-  goSignInText: { fontFamily: fonts.bold, fontSize: 16, color: '#FFFFFF' },
 
   topNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
   backBtn: { padding: 4 },
@@ -478,8 +514,8 @@ const styles = StyleSheet.create({
   modalOverlay: { flex: 1 },
   langMenu: {
     position: 'absolute', right: 24, backgroundColor: '#FFFFFF', borderRadius: 12,
-    paddingVertical: 6, minWidth: 180, elevation: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 12,
+    paddingVertical: 6, minWidth: 180,
+    ...shadow('#000', 0, 4, 12, 0.15, 8),
     borderWidth: 1, borderColor: colors.steelGrey,
   },
   langMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 11 },
@@ -503,8 +539,6 @@ const styles = StyleSheet.create({
   inputRowError: { borderBottomColor: colors.error },
   icon: { marginRight: 10 },
   input: { flex: 1, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack, height: 28, paddingVertical: 0 },
-  inputFlex: { flex: 1 },
-  eyeBtn: { paddingLeft: 8, paddingVertical: 2 },
   fieldError: { fontFamily: fonts.regular, fontSize: 12, color: colors.error, marginTop: 5, marginLeft: 2, lineHeight: 16 },
   globalError: { fontFamily: fonts.regular, fontSize: 13, color: colors.error, textAlign: 'center', marginBottom: 14, lineHeight: 18 },
 
@@ -517,17 +551,12 @@ const styles = StyleSheet.create({
   orLine: { flex: 1, height: 1, backgroundColor: colors.steelGrey },
   orText: { fontFamily: fonts.medium, fontSize: 13, color: '#9CA3AF' },
 
-  googleBtn: {
+  socialBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    height: 52, borderRadius: 16, borderWidth: 1.5, borderColor: '#DADCE0', backgroundColor: '#FFFFFF', gap: 10,
+    height: 52, borderRadius: 16, borderWidth: 1.5, borderColor: colors.steelGrey, backgroundColor: '#FFFFFF', gap: 10,
   },
-  googleText: { fontFamily: fonts.semiBold, fontSize: 15, color: '#3C4043' },
-
-  facebookBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    height: 52, borderRadius: 16, borderWidth: 1.5, borderColor: '#DADCE0', backgroundColor: '#FFFFFF', gap: 10, marginTop: 12,
-  },
-  facebookText: { fontFamily: fonts.semiBold, fontSize: 15, color: '#3C4043' },
+  socialBtnMarginTop: { marginTop: 12 },
+  socialBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   socialIcon: { width: 24, height: 24 },
 
   loginRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 28, paddingBottom: 8 },

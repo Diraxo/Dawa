@@ -5,10 +5,11 @@ import { useSignUp, useSignIn } from '@clerk/nextjs'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { AuthCard } from '@/components/ui/AuthCard'
+import { otpLimiter } from '@/lib/otpLimiter'
 
 function VerifyContent() {
   const { isLoaded: suLoaded, signUp, setActive: suSetActive } = useSignUp()
-  const { isLoaded: siLoaded, signIn } = useSignIn()
+  const { isLoaded: siLoaded, signIn, setActive: siSetActive } = useSignIn()
   const router = useRouter()
   const params = useSearchParams()
   const type = params.get('type') ?? 'signup'
@@ -17,7 +18,7 @@ function VerifyContent() {
   const [code, setCode] = useState(['', '', '', '', '', ''])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [resendTimer, setResendTimer] = useState(60)
+  const [resendTimer, setResendTimer] = useState(30)
   const inputs = useRef<(HTMLInputElement | null)[]>([])
 
   useEffect(() => {
@@ -31,7 +32,13 @@ function VerifyContent() {
     const next = [...code]
     next[i] = val
     setCode(next)
-    if (val && i < 5) inputs.current[i + 1]?.focus()
+    setError('')
+    if (val && i < 5) {
+      inputs.current[i + 1]?.focus()
+    } else if (val && i === 5) {
+      const full = next.join('')
+      if (full.length === 6) handleVerify(full)
+    }
   }
 
   function handleKeyDown(i: number, e: React.KeyboardEvent) {
@@ -41,15 +48,19 @@ function VerifyContent() {
   }
 
   function handlePaste(e: React.ClipboardEvent) {
+    e.preventDefault()
     const digits = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6).split('')
     const next = [...code]
     digits.forEach((d, i) => { next[i] = d })
     setCode(next)
+    setError('')
     inputs.current[Math.min(digits.length, 5)]?.focus()
+    const full = next.join('')
+    if (full.length === 6) handleVerify(full)
   }
 
-  async function handleVerify() {
-    const otp = code.join('')
+  async function handleVerify(codeOverride?: string) {
+    const otp = codeOverride ?? code.join('')
     if (otp.length < 6) return
     setLoading(true)
     setError('')
@@ -63,11 +74,21 @@ function VerifyContent() {
       } else if (type === 'forgot' && siLoaded) {
         const result = await signIn!.attemptFirstFactor({ strategy: 'reset_password_email_code', code: otp })
         if (result.status === 'needs_new_password') {
-          router.push('/forgot-password?step=reset')
+          router.push(`/reset-password?email=${encodeURIComponent(email)}`)
         }
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Invalid code. Please try again.')
+      const anyErr = err as any
+      const errMsg: string =
+        anyErr?.errors?.[0]?.longMessage ?? anyErr?.errors?.[0]?.message ?? ''
+      const lower = errMsg.toLowerCase()
+      setError(
+        lower.includes('incorrect') || lower.includes('invalid')
+          ? 'Incorrect code. Please try again.'
+          : lower.includes('expired')
+          ? 'Code has expired. Tap "Resend code" below.'
+          : (errMsg || 'Invalid code. Please try again.')
+      )
     } finally {
       setLoading(false)
     }
@@ -75,21 +96,31 @@ function VerifyContent() {
 
   async function handleResend() {
     if (resendTimer > 0) return
+    const check = await otpLimiter.canRequest(email)
+    if (!check.allowed) {
+      if (check.waitSeconds) setResendTimer(check.waitSeconds)
+      setError(check.message ?? 'Please wait before requesting another code.')
+      return
+    }
     try {
       if (type === 'signup' && suLoaded) {
         await signUp!.prepareEmailAddressVerification({ strategy: 'email_code' })
       } else if (type === 'forgot' && siLoaded) {
         await signIn!.create({ strategy: 'reset_password_email_code', identifier: email })
       }
-      setResendTimer(60)
+      await otpLimiter.recordRequest(email)
+      setResendTimer(30)
       setCode(['', '', '', '', '', ''])
-    } catch { /* silently fail */ }
+    } catch (err: unknown) {
+      const anyErr = err as any
+      setError(anyErr?.errors?.[0]?.message ?? 'Failed to resend. Please try again.')
+    }
   }
 
   return (
     <AuthCard
       title="Verify Code"
-      subtitle={`We sent a 6-digit code to`}
+      subtitle="We sent a 6-digit code to"
     >
       <p className="text-center text-sm font-bold text-ink-black mb-6 -mt-4">{email}</p>
 
@@ -103,6 +134,7 @@ function VerifyContent() {
             inputMode="numeric"
             maxLength={1}
             value={digit}
+            autoFocus={i === 0}
             onChange={e => handleDigit(i, e.target.value)}
             onKeyDown={e => handleKeyDown(i, e)}
             className="w-12 h-14 rounded-2xl border-2 border-steel-grey text-center font-montserrat font-bold text-xl text-ink-black bg-cloud-grey focus:outline-none focus:border-int-blue transition-colors"
@@ -124,7 +156,9 @@ function VerifyContent() {
 
       {/* Info card */}
       <div className="flex items-start gap-2.5 bg-blue-50 rounded-2xl p-3.5 mb-5">
-        <span className="text-int-blue text-base mt-0.5">ℹ️</span>
+        <svg className="text-int-blue mt-0.5 shrink-0" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
         <p className="text-xs text-int-blue/80 leading-relaxed">
           Check your spam folder if you didn&apos;t receive the email.
         </p>
@@ -133,7 +167,7 @@ function VerifyContent() {
       {error && <p className="text-danger text-xs font-medium mb-3 text-center">{error}</p>}
 
       <button
-        onClick={handleVerify}
+        onClick={() => handleVerify()}
         disabled={loading || code.join('').length < 6}
         className="btn-primary w-full disabled:opacity-50"
       >
@@ -141,7 +175,7 @@ function VerifyContent() {
       </button>
 
       <p className="text-center text-sm text-ink-black/60 mt-5">
-        <Link href={type === 'signup' ? '/sign-up' : '/sign-in'} className="text-teal-green font-semibold hover:underline">
+        <Link href="/sign-up" className="text-teal-green font-semibold hover:underline">
           ← Back
         </Link>
       </p>

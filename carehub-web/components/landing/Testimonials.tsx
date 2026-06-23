@@ -9,15 +9,15 @@ const testimonials = [
     role: 'Patient · Addis Ababa',
     avatar: 'FA',
     rating: 5,
-    text: "I got a video consultation with a cardiologist within 10 minutes. The doctor was thorough, patient, and gave me a full summary at the end. CareHub is changing healthcare in Ethiopia.",
+    text: "I got a video consultation with a cardiologist within 10 minutes. The doctor was thorough, patient, and gave me a full summary at the end. Dawa is changing healthcare in Ethiopia.",
     color: 'from-care-blue to-int-blue',
   },
   {
     name: 'Dr. Meseret Tadesse',
-    role: 'General Practitioner · CareHub Doctor',
+    role: 'General Practitioner · Dawa Doctor',
     avatar: 'MT',
     rating: 5,
-    text: "I've grown my patient base by 3x since joining CareHub. The platform handles everything — scheduling, payments, even consultation notes. I just focus on caring for my patients.",
+    text: "I've grown my patient base by 3x since joining Dawa. The platform handles everything — scheduling, payments, even consultation notes. I just focus on caring for my patients.",
     color: 'from-int-blue to-teal-green',
   },
   {
@@ -25,7 +25,7 @@ const testimonials = [
     role: 'Patient · Kigali, Rwanda',
     avatar: 'SB',
     rating: 5,
-    text: "Living abroad, finding a doctor who speaks my language was nearly impossible. CareHub solved that instantly. I had a consultation in Amharic — incredible experience.",
+    text: "Living abroad, finding a doctor who speaks my language was nearly impossible. Dawa solved that instantly. I had a consultation in Amharic — incredible experience.",
     color: 'from-teal-green to-emerald-400',
   },
   {
@@ -38,7 +38,7 @@ const testimonials = [
   },
   {
     name: 'Dr. Amir Khalil',
-    role: 'Pediatrician · CareHub Doctor',
+    role: 'Pediatrician · Dawa Doctor',
     avatar: 'AK',
     rating: 5,
     text: "The doctor dashboard is intuitive and the real-time consultation tools are excellent. My patients love being able to connect via video from home instead of bringing sick children to a clinic.",
@@ -85,7 +85,7 @@ export default function Testimonials() {
             <span className="gradient-hero-text">&amp; Doctors Alike</span>
           </h2>
           <p className="text-ink-black/60 text-lg max-w-[480px] mx-auto">
-            Don&apos;t take our word for it — hear from the people who use CareHub every day.
+            Don&apos;t take our word for it — hear from the people who use Dawa every day.
           </p>
         </motion.div>
 

@@ -1,4 +1,4 @@
-import { useSignUp } from '@clerk/clerk-expo'
+import { useSignIn, useSignUp } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
@@ -19,16 +19,27 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { OTPInput } from '@/components/ui/OTPInput'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { otpLimiter } from '@/lib/otpLimiter'
+import { useTranslation } from 'react-i18next'
+import { useAppStore } from '@/store/appStore'
 
 const CODE_LENGTH = 6
-const TIMER_SECONDS = 60
+const TIMER_SECONDS = 30
+
+const LANG_NAMES: Record<string, string> = {
+  en: 'English', so: 'Soomaali', am: 'አማርኛ', om: 'Afaan Oromoo', ti: 'ትግርኛ', ar: 'العربية',
+}
 
 export default function VerifyScreen() {
+  const { t } = useTranslation()
+  const { selectedLanguage } = useAppStore()
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
-  const { email } = useLocalSearchParams<{ email: string }>()
+  const { email, type } = useLocalSearchParams<{ email: string; type: string }>()
+  const flowType = (type ?? 'signup') as 'signup' | 'forgot'
 
-  const { isLoaded, signUp, setActive } = useSignUp()
+  const { isLoaded: suLoaded, signUp, setActive: suSetActive } = useSignUp()
+  const { isLoaded: siLoaded, signIn } = useSignIn()
 
   const [code, setCode] = useState<string[]>(Array(CODE_LENGTH).fill(''))
   const [timer, setTimer] = useState(TIMER_SECONDS)
@@ -45,19 +56,35 @@ export default function VerifyScreen() {
   const fmt = (s: number) =>
     `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
 
-  // ── Verify Clerk sign-up OTP ──────────────────────────────────────────────
+  // ── Verify OTP ────────────────────────────────────────────────────────────
   const verifyCode = async (codeStr: string) => {
-    if (loading || !isLoaded || !signUp) return
+    if (loading) return
     setLoading(true)
     setError('')
     try {
-      const result = await signUp.attemptEmailAddressVerification({ code: codeStr })
-      if (result.status === 'complete' && result.createdSessionId) {
-        await setActive!({ session: result.createdSessionId })
-        router.replace('/(auth)/role' as never)
-      } else {
-        setError('Verification failed. Please try again.')
-        setCode(Array(CODE_LENGTH).fill(''))
+      if (flowType === 'signup' && suLoaded && signUp) {
+        const result = await signUp.attemptEmailAddressVerification({ code: codeStr })
+        if (result.status === 'complete' && result.createdSessionId) {
+          await suSetActive!({ session: result.createdSessionId })
+          router.replace('/(auth)/role' as never)
+        } else {
+          setError('Verification failed. Please try again.')
+          setCode(Array(CODE_LENGTH).fill(''))
+        }
+      } else if (flowType === 'forgot' && siLoaded && signIn) {
+        const result = await signIn.attemptFirstFactor({
+          strategy: 'reset_password_email_code',
+          code: codeStr,
+        })
+        if (result.status === 'needs_new_password') {
+          router.replace({
+            pathname: '/(auth)/reset-password',
+            params: { email: email ?? '' },
+          } as never)
+        } else {
+          setError('Verification failed. Please try again.')
+          setCode(Array(CODE_LENGTH).fill(''))
+        }
       }
     } catch (err: any) {
       const errCode: string = err?.errors?.[0]?.code ?? ''
@@ -80,14 +107,32 @@ export default function VerifyScreen() {
   const handleCodeChange = (newCode: string[]) => {
     setCode(newCode)
     setError('')
-    if (newCode.every((d) => d !== '')) verifyCode(newCode.join(''))
   }
 
+  // Auto-submit as soon as all 6 digits are filled
+  useEffect(() => {
+    if (code.every((d) => d !== '') && !loading) {
+      verifyCode(code.join(''))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code])
+
+  // ── Resend OTP ────────────────────────────────────────────────────────────
   const handleResend = async () => {
-    if (!isLoaded || !signUp) return
     setError('')
+    const check = await otpLimiter.canRequest(email ?? '')
+    if (!check.allowed) {
+      if (check.waitSeconds) setTimer(check.waitSeconds)
+      setError(check.message ?? 'Please wait before requesting another code.')
+      return
+    }
     try {
-      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' })
+      if (flowType === 'signup' && suLoaded && signUp) {
+        await signUp.prepareEmailAddressVerification({ strategy: 'email_code' })
+      } else if (flowType === 'forgot' && siLoaded && signIn) {
+        await signIn.create({ strategy: 'reset_password_email_code', identifier: email ?? '' })
+      }
+      await otpLimiter.recordRequest(email ?? '')
       setTimer(TIMER_SECONDS)
       setCode(Array(CODE_LENGTH).fill(''))
     } catch (err: any) {
@@ -115,19 +160,19 @@ export default function VerifyScreen() {
           <View>
             {/* ── TOP NAV ── */}
             <View style={styles.topNav}>
-              <Pressable onPress={() => router.back()} hitSlop={8} style={styles.backBtn}>
+              <Pressable onPress={() => router.canGoBack() ? router.back() : router.replace('/(auth)/sign-in' as never)} hitSlop={8} style={styles.backBtn}>
                 <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
               </Pressable>
               <View style={styles.langBtn}>
-                <Text style={styles.langText}>English</Text>
+                <Text style={styles.langText}>{LANG_NAMES[selectedLanguage ?? 'en'] ?? 'English'}</Text>
                 <Ionicons name="chevron-down" size={14} color={colors.inkBlack} />
               </View>
             </View>
 
             {/* ── HEADER ── */}
             <View style={styles.headerBlock}>
-              <Text style={styles.title}>Verify Code</Text>
-              <Text style={styles.subtitle}>Please enter the code we just sent to</Text>
+              <Text style={styles.title}>{t('verifyCode')}</Text>
+              <Text style={styles.subtitle}>{t('verifySubtitle')}</Text>
               <Text style={styles.emailText}>{email}</Text>
             </View>
 
@@ -137,10 +182,10 @@ export default function VerifyScreen() {
             {/* ── TIMER / RESEND ── */}
             <View style={styles.timerRow}>
               {timer > 0 ? (
-                <Text style={styles.timerText}>Resend code in {fmt(timer)}</Text>
+                <Text style={styles.timerText}>{t('resendCodeIn')} {fmt(timer)}</Text>
               ) : (
                 <Pressable onPress={handleResend} hitSlop={8}>
-                  <Text style={styles.resendLink}>Resend code</Text>
+                  <Text style={styles.resendLink}>{t('resendCode')}</Text>
                 </Pressable>
               )}
             </View>
@@ -156,9 +201,7 @@ export default function VerifyScreen() {
             {/* ── INFO CARD ── */}
             <View style={styles.infoCard}>
               <Ionicons name="information-circle-outline" size={22} color={colors.interactiveBlue} style={styles.cardIcon} />
-              <Text style={styles.infoText}>
-                Check your spam folder if you didn&apos;t receive the email
-              </Text>
+              <Text style={styles.infoText}>{t('spamNote')}</Text>
             </View>
           </View>
 
@@ -176,7 +219,7 @@ export default function VerifyScreen() {
             >
               {loading
                 ? <ActivityIndicator color="#FFFFFF" />
-                : <Text style={styles.continueText}>Continue →</Text>
+                : <Text style={styles.continueText}>{t('continue')}</Text>
               }
             </LinearGradient>
           </Pressable>

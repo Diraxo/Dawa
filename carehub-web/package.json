@@ -16,6 +16,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.40.0",
+    "isomorphic-dompurify": "^3.16.0",
     "lucide-react": "^1.17.0",
     "next": "14.2.35",
     "react": "^18",
@@ -25,6 +26,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

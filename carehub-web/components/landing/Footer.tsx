@@ -23,7 +23,7 @@ const cols = [
   {
     title: 'Company',
     links: [
-      { label: 'About CareHub', href: '/about' },
+      { label: 'About Dawa', href: '/about' },
       { label: 'Privacy Policy', href: '/privacy' },
       { label: 'Terms of Service', href: '/terms' },
       { label: 'Contact Us', href: '/contact' },
@@ -41,7 +41,7 @@ export default function Footer() {
             <Link href="/" className="flex items-center gap-2.5">
               <LogoMark size={36} />
               <span className="font-montserrat font-bold text-xl">
-                CARE<span className="text-teal-green">HUB</span>
+                DA<span className="text-teal-green">WA</span>
               </span>
             </Link>
             <p className="text-white/50 text-sm leading-relaxed">
@@ -89,7 +89,7 @@ export default function Footer() {
         {/* Divider */}
         <div className="border-t border-white/10 pt-8 flex flex-col md:flex-row items-center justify-between gap-4 ">
           <p className="text-white/60 text-xs mb-2">
-            © {new Date().getFullYear()} CareHub. All rights reserved.
+            © {new Date().getFullYear()} Dawa. All rights reserved.
           </p>
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-teal-green animate-pulse" />

@@ -5,7 +5,7 @@ import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { useAuth, useUser } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
-import { formatDate } from '@/lib/utils'
+import { formatDate, stripDrPrefix } from '@/lib/utils'
 import Link from 'next/link'
 import LogoMark from '@/components/ui/LogoMark'
 
@@ -48,17 +48,17 @@ export default function ConsultationSummaryPage() {
   const [submitting, setSubmitting] = useState(false)
   const [rated, setRated] = useState(false)
   const [myUserId, setMyUserId] = useState<string | null>(null)
+  const [shareMsg, setShareMsg] = useState('')
 
   useEffect(() => {
     async function load() {
       const token = await getToken()
-      if (token && user) {
-        const client = getAuthClient(token)
-        const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
-        if (userData) setMyUserId(userData.id)
-      }
+      if (!token || !user) { setLoading(false); return }
+      const client = getAuthClient(token)
+      const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+      if (userData) setMyUserId(userData.id)
 
-      const { data } = await supabase
+      const { data } = await client
         .from('consultations')
         .select(`
           id, type, status, started_at, ended_at, duration_minutes, patient_amount, doctor_id,
@@ -70,7 +70,7 @@ export default function ConsultationSummaryPage() {
 
       setConsultation(data as unknown as ConsultationDetail)
 
-      const { data: existingReview } = await supabase
+      const { data: existingReview } = await client
         .from('reviews')
         .select('id')
         .eq('consultation_id', id)
@@ -82,6 +82,31 @@ export default function ConsultationSummaryPage() {
     load()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user])
+
+  async function handleShare() {
+    const doctorName = consultation?.doctor?.user?.full_name ?? 'my doctor'
+    const shareData = {
+      title: 'Dawa Consultation Summary',
+      text: `Consultation summary with Dr. ${stripDrPrefix(doctorName)} — ${consultation?.type} consultation on ${consultation?.started_at ? formatDate(consultation.started_at) : 'recent date'}.`,
+      url: window.location.href,
+    }
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share(shareData)
+      } catch {
+        // user dismissed
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(window.location.href)
+        setShareMsg('Link copied!')
+        setTimeout(() => setShareMsg(''), 2500)
+      } catch {
+        setShareMsg('Copy failed')
+        setTimeout(() => setShareMsg(''), 2500)
+      }
+    }
+  }
 
   async function submitRating() {
     if (!rating || !myUserId || !consultation) return
@@ -138,25 +163,39 @@ export default function ConsultationSummaryPage() {
         {/* Header */}
         <div className="p-6 border-b border-steel-grey flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <LogoMark size={32} />
-            <span className="font-montserrat font-bold text-base text-ink-black">CARE<span className="text-teal-green">HUB</span></span>
+            <LogoMark size={32} variant="dark" />
+            <span className="font-montserrat font-bold text-base text-ink-black">DA<span className="text-teal-green">WA</span></span>
           </div>
-          <button
-            onClick={() => window.print()}
-            className="btn-outline h-9 px-4 text-xs rounded-xl"
-          >
-            🖨️ Print / Save PDF
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleShare}
+              className="btn-outline h-9 px-4 text-xs rounded-xl"
+            >
+              {shareMsg || '🔗 Share'}
+            </button>
+            <button
+              onClick={() => window.print()}
+              className="btn-outline h-9 px-4 text-xs rounded-xl"
+            >
+              ⬇️ Download PDF
+            </button>
+            <button
+              onClick={() => window.print()}
+              className="btn-outline h-9 px-4 text-xs rounded-xl"
+            >
+              🖨️ Print
+            </button>
+          </div>
         </div>
 
         {/* Doctor + meta */}
         <div className="p-6 border-b border-steel-grey bg-cloud-grey/50">
           <div className="flex items-center gap-4 mb-4">
             <div className="w-12 h-12 rounded-2xl bg-gradient-hero flex items-center justify-center text-white font-black text-xl">
-              {consultation.doctor?.user?.full_name?.charAt(0) ?? '?'}
+              {stripDrPrefix(consultation.doctor?.user?.full_name ?? '?').charAt(0)}
             </div>
             <div>
-              <p className="font-montserrat font-bold text-base text-ink-black">Dr. {consultation.doctor?.user?.full_name}</p>
+              <p className="font-montserrat font-bold text-base text-ink-black">Dr. {stripDrPrefix(consultation.doctor?.user?.full_name ?? '')}</p>
               <p className="text-ink-black/60 text-sm">{consultation.doctor?.specialty} · {consultation.doctor?.hospital_name}</p>
             </div>
           </div>

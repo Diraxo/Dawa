@@ -4,9 +4,13 @@ import { useEffect, useState, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { useAuth, useUser } from '@clerk/nextjs'
+import { logger } from '@/lib/logger'
 import { getAuthClient } from '@/lib/supabase'
 import { uidFromString, fetchAgoraToken } from '@/lib/agora'
+import { getStreamClient, fetchStreamToken } from '@/lib/stream'
+import { stripDrPrefix } from '@/lib/utils'
 import type { IAgoraRTCClient, IMicrophoneAudioTrack } from 'agora-rtc-sdk-ng'
+import type { Channel } from 'stream-chat'
 
 interface Consultation {
   id: string
@@ -14,7 +18,7 @@ interface Consultation {
   started_at: string | null
   doctor: {
     specialty: string
-    user: { full_name: string } | null
+    user: { full_name: string; clerk_id: string } | null
   } | null
 }
 
@@ -25,6 +29,20 @@ const STATUS_LABEL: Record<CallStatus, string> = {
   waiting: 'Waiting for doctor…',
   connected: 'On Call',
   error: 'Connection failed',
+}
+
+interface ChatMsg { id: string; text: string; userId: string; createdAt: string; attachmentUrl?: string }
+
+function toMsg(raw: Record<string, unknown>): ChatMsg {
+  const attachments = (raw.attachments as Record<string, unknown>[] | undefined) ?? []
+  const attachment = attachments[0]
+  return {
+    id: String(raw.id ?? ''),
+    text: String(raw.text ?? ''),
+    userId: String((raw.user as Record<string, unknown>)?.id ?? ''),
+    createdAt: String(raw.created_at ?? ''),
+    attachmentUrl: attachment ? String(attachment.image_url ?? attachment.asset_url ?? '') : undefined,
+  }
 }
 
 export default function PhoneConsultationPage() {
@@ -38,26 +56,48 @@ export default function PhoneConsultationPage() {
   const [elapsed, setElapsed] = useState(0)
   const [callStatus, setCallStatus] = useState<CallStatus>('connecting')
   const [ending, setEnding] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [messages, setMessages] = useState<ChatMsg[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [fileUploading, setFileUploading] = useState(false)
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const agoraClientRef = useRef<IAgoraRTCClient | null>(null)
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null)
+  const channelRef = useRef<Channel | null>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Load consultation info
   useEffect(() => {
     async function load() {
       const { data } = await supabase
         .from('consultations')
-        .select('id, status, started_at, doctor:doctor_profiles(specialty, user:users(full_name))')
+        .select('id, status, started_at, doctor:doctor_profiles(specialty, user:users(full_name, clerk_id))')
         .eq('id', id)
         .single()
       setConsultation(data as unknown as Consultation)
       setLoading(false)
     }
     load()
-    timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [id])
+
+  // Start timer when connected
+  useEffect(() => {
+    if (callStatus === 'connected') {
+      timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+    } else {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [callStatus])
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   // Agora audio call
   useEffect(() => {
@@ -103,7 +143,7 @@ export default function PhoneConsultationPage() {
         await client.publish([mic])
         if (mounted) setCallStatus('waiting')
       } catch (err) {
-        console.error('[Agora] Phone call error:', err)
+        logger.error('[Agora] Phone call error:', err)
         if (mounted) setCallStatus('error')
       }
     }
@@ -125,6 +165,65 @@ export default function PhoneConsultationPage() {
     micTrackRef.current?.setEnabled(!muted)
   }, [muted])
 
+  // Initialize Stream Chat channel
+  async function initChat() {
+    if (channelRef.current || !user || !consultation) return
+    setChatLoading(true)
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) return
+      const streamToken = await fetchStreamToken(clerkToken)
+      const client = getStreamClient()
+      if (!client.userID) {
+        await client.connectUser({ id: user.id, name: user.fullName ?? 'Patient' }, streamToken)
+      }
+      const doctorClerkId = consultation.doctor?.user?.clerk_id ?? ''
+      const members = [user.id, doctorClerkId].filter(Boolean)
+      const channel = client.channel('messaging', id, { members })
+      channelRef.current = channel
+      const state = await channel.watch()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      setMessages((state.messages ?? []).map((m: any) => toMsg(m)))
+      channel.on('message.new', (event) => {
+        if (!event.message) return
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        setMessages(prev => [...prev, toMsg(event.message as any)])
+      })
+    } catch (err) {
+      logger.error('[Stream] Chat init error:', err)
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  async function openChat() {
+    setChatOpen(true)
+    await initChat()
+  }
+
+  async function sendMessage() {
+    const text = chatInput.trim()
+    if (!text || !channelRef.current) return
+    setChatInput('')
+    await channelRef.current.sendMessage({ text })
+  }
+
+  async function sendFile(file: File) {
+    if (!channelRef.current) return
+    setFileUploading(true)
+    try {
+      const res = await channelRef.current.sendImage(file)
+      await channelRef.current.sendMessage({
+        text: '',
+        attachments: [{ type: 'image', image_url: res.file, asset_url: res.file }],
+      })
+    } catch (err) {
+      logger.error('[Stream] Image upload error:', err)
+    } finally {
+      setFileUploading(false)
+    }
+  }
+
   function formatTime(s: number) {
     return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
   }
@@ -134,6 +233,7 @@ export default function PhoneConsultationPage() {
     if (timerRef.current) clearInterval(timerRef.current)
     micTrackRef.current?.close()
     await agoraClientRef.current?.leave()
+    channelRef.current?.stopWatching()
     const token = await getToken()
     if (!token) { setEnding(false); return }
     const client = getAuthClient(token)
@@ -153,94 +253,145 @@ export default function PhoneConsultationPage() {
     )
   }
 
-  const doctorName = consultation?.doctor?.user?.full_name ?? 'Doctor'
+  const doctorName = stripDrPrefix(consultation?.doctor?.user?.full_name ?? 'Doctor')
 
   return (
-    <div className="min-h-screen bg-[#070E27] flex flex-col items-center justify-between p-6 py-14">
-      {/* Doctor info */}
-      <div className="flex-1 flex flex-col items-center justify-center">
-        <p className={`text-xs uppercase tracking-widest font-bold mb-8 ${
-          callStatus === 'connected' ? 'text-teal-green' :
-          callStatus === 'error' ? 'text-danger' : 'text-white/50'
-        }`}>
-          {STATUS_LABEL[callStatus]}
-        </p>
-
-        {/* Pulsing avatar */}
-        <div className="relative mb-6">
-          {callStatus === 'connected' && (
-            <>
-              <div className="absolute inset-0 rounded-full bg-white/10 animate-ping" style={{ transform: 'scale(1.3)' }} />
-              <div className="absolute inset-0 rounded-full bg-white/5 animate-ping" style={{ transform: 'scale(1.6)', animationDelay: '0.4s' }} />
-            </>
-          )}
-          <div className="relative w-36 h-36 rounded-full bg-gradient-to-br from-care-blue to-teal-green flex items-center justify-center text-white font-black text-5xl shadow-lg">
-            {doctorName.charAt(0)}
-          </div>
-        </div>
-
-        <h1 className="font-montserrat font-black text-2xl text-white mb-1">Dr. {doctorName}</h1>
-        <p className="text-white/50 text-sm mb-2">{consultation?.doctor?.specialty}</p>
-        <p className="text-teal-green font-bold text-base mb-1">📞 Phone Call</p>
-        <p className="font-mono text-white/70 text-xl mb-8">{formatTime(elapsed)}</p>
-
-        {/* Sound wave — animated when connected */}
-        <div className="flex items-center gap-1 h-8">
-          {[4, 8, 6, 14, 10, 6, 12, 8, 5, 10, 7, 4].map((h, i) => (
-            <div
-              key={i}
-              className="w-1 rounded-full bg-teal-green/70 transition-all duration-300"
-              style={{
-                height: muted || callStatus !== 'connected' ? 3 : h,
-                opacity: callStatus === 'connected' ? 0.7 : 0.2,
-              }}
-            />
-          ))}
-        </div>
-
-        {callStatus === 'error' && (
-          <p className="text-danger/70 text-xs mt-4 max-w-xs text-center">
-            Could not connect to audio. Check your microphone permissions and try again.
+    <div className="min-h-screen bg-[#070E27] flex">
+      {/* Main call area */}
+      <div className={`flex flex-col items-center justify-between p-6 py-14 transition-all duration-300 ${chatOpen ? 'flex-1' : 'w-full'}`}>
+        {/* Doctor info */}
+        <div className="flex-1 flex flex-col items-center justify-center w-full">
+          <p className={`text-xs uppercase tracking-widest font-bold mb-8 ${
+            callStatus === 'connected' ? 'text-teal-green' :
+            callStatus === 'error' ? 'text-danger' : 'text-white/50'
+          }`}>
+            {STATUS_LABEL[callStatus]}
           </p>
-        )}
-      </div>
 
-      {/* Controls */}
-      <div className="w-full max-w-xs">
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col items-center gap-2">
-            <button
-              onClick={() => setMuted(m => !m)}
-              className={`w-14 h-14 rounded-full flex items-center justify-center text-xl transition-all ${
-                muted ? 'bg-care-blue' : 'bg-white/10 hover:bg-white/20'
-              }`}
-            >
-              {muted ? '🔇' : '🎤'}
-            </button>
-            <span className="text-white/50 text-[10px]">{muted ? 'Unmute' : 'Mute'}</span>
-          </div>
-
-          <div className="flex flex-col items-center gap-2">
-            <button
-              onClick={endCall}
-              disabled={ending}
-              className="w-20 h-20 rounded-full bg-danger flex items-center justify-center text-white text-2xl hover:bg-danger/80 transition-colors disabled:opacity-50"
-              style={{ boxShadow: '0 4px 20px rgba(211,47,47,0.5)' }}
-            >
-              📵
-            </button>
-            <span className="text-white/50 text-[10px]">End Call</span>
-          </div>
-
-          {/* Speaker — web browsers play through default device, this is a visual indicator */}
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-14 h-14 rounded-full bg-white/10 flex items-center justify-center text-xl text-white/40">
-              🔊
+          {/* Pulsing avatar */}
+          <div className="relative mb-6">
+            {callStatus === 'connected' && (
+              <>
+                <div className="absolute inset-0 rounded-full bg-white/10 animate-ping" style={{ transform: 'scale(1.3)' }} />
+                <div className="absolute inset-0 rounded-full bg-white/5 animate-ping" style={{ transform: 'scale(1.6)', animationDelay: '0.4s' }} />
+              </>
+            )}
+            <div className="relative w-36 h-36 rounded-full bg-gradient-to-br from-care-blue to-teal-green flex items-center justify-center text-white font-black text-5xl shadow-lg">
+              {doctorName.charAt(0)}
             </div>
-            <span className="text-white/30 text-[10px]">Speaker</span>
+          </div>
+
+          <h1 className="font-montserrat font-black text-2xl text-white mb-1">Dr. {doctorName}</h1>
+          <p className="text-white/50 text-sm mb-2">{consultation?.doctor?.specialty}</p>
+          <p className="text-teal-green font-bold text-base mb-1">📞 Phone Call</p>
+          <p className="font-mono text-white/70 text-xl mb-8">{formatTime(elapsed)}</p>
+
+          {/* Sound wave */}
+          <div className="flex items-center gap-1 h-8">
+            {[4, 8, 6, 14, 10, 6, 12, 8, 5, 10, 7, 4].map((h, i) => (
+              <div key={i} className="w-1 rounded-full bg-teal-green/70 transition-all duration-300"
+                style={{ height: muted || callStatus !== 'connected' ? 3 : h, opacity: callStatus === 'connected' ? 0.7 : 0.2 }} />
+            ))}
+          </div>
+
+          {callStatus === 'error' && (
+            <p className="text-danger/70 text-xs mt-4 max-w-xs text-center">
+              Could not connect to audio. Check your microphone permissions and try again.
+            </p>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div className="w-full max-w-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col items-center gap-2">
+              <button onClick={() => setMuted(m => !m)}
+                className={`w-14 h-14 rounded-full flex items-center justify-center text-xl transition-all ${muted ? 'bg-care-blue' : 'bg-white/10 hover:bg-white/20'}`}>
+                {muted ? '🔇' : '🎤'}
+              </button>
+              <span className="text-white/50 text-[10px]">{muted ? 'Unmute' : 'Mute'}</span>
+            </div>
+
+            <div className="flex flex-col items-center gap-2">
+              <button onClick={endCall} disabled={ending}
+                className="w-20 h-20 rounded-full bg-danger flex items-center justify-center text-white text-2xl hover:bg-danger/80 transition-colors disabled:opacity-50"
+                style={{ boxShadow: '0 4px 20px rgba(211,47,47,0.5)' }}>
+                📵
+              </button>
+              <span className="text-white/50 text-[10px]">End Call</span>
+            </div>
+
+            <div className="flex flex-col items-center gap-2">
+              <button onClick={chatOpen ? () => setChatOpen(false) : openChat}
+                className={`w-14 h-14 rounded-full flex items-center justify-center text-xl transition-all ${chatOpen ? 'bg-teal-green/30' : 'bg-white/10 hover:bg-white/20'}`}>
+                💬
+              </button>
+              <span className="text-white/50 text-[10px]">Chat</span>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Chat panel */}
+      {chatOpen && (
+        <div className="w-80 bg-white flex flex-col border-l border-steel-grey">
+          <div className="bg-white border-b border-steel-grey px-4 py-3 flex items-center justify-between">
+            <div>
+              <p className="font-montserrat font-bold text-sm text-ink-black">Chat with Dr. {doctorName}</p>
+              <p className="text-xs text-ink-black/40">Share notes, medicine names or images</p>
+            </div>
+            <button onClick={() => setChatOpen(false)} className="text-ink-black/40 hover:text-ink-black text-lg">✕</button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2 bg-cloud-grey">
+            {chatLoading ? (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-ink-black/30 text-sm">Connecting…</div>
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-center p-4">
+                <div>
+                  <p className="text-2xl mb-2">💬</p>
+                  <p className="text-ink-black/40 text-xs">No messages yet. Start chatting with the doctor.</p>
+                </div>
+              </div>
+            ) : (
+              messages.map(m => {
+                const mine = m.userId === user?.id
+                return (
+                  <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm ${mine ? 'bg-int-blue text-white rounded-br-sm' : 'bg-white text-ink-black rounded-bl-sm shadow-sm'}`}>
+                      {m.attachmentUrl && <img src={m.attachmentUrl} alt="attachment" className="max-w-full rounded-lg mb-1" />}
+                      {m.text && <p>{m.text}</p>}
+                      <p className={`text-[9px] mt-0.5 ${mine ? 'text-white/60' : 'text-ink-black/40'}`}>
+                        {m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      </p>
+                    </div>
+                  </div>
+                )
+              })
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="bg-white border-t border-steel-grey p-3 flex gap-2 items-end">
+            <input type="file" accept="image/*" ref={fileInputRef} className="hidden"
+              onChange={e => { const f = e.target.files?.[0]; if (f) sendFile(f); e.target.value = '' }} />
+            <button onClick={() => fileInputRef.current?.click()} disabled={fileUploading}
+              className="w-9 h-9 rounded-xl bg-cloud-grey flex items-center justify-center text-sm text-ink-black/50 hover:bg-steel-grey transition-colors disabled:opacity-40 flex-shrink-0">
+              {fileUploading ? '⏳' : '📎'}
+            </button>
+            <input type="text" value={chatInput} onChange={e => setChatInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && sendMessage()}
+              placeholder="Type a message…"
+              className="flex-1 h-9 px-3 rounded-xl border border-steel-grey bg-cloud-grey font-montserrat text-xs text-ink-black focus:outline-none focus:border-int-blue" />
+            <button onClick={sendMessage} disabled={!chatInput.trim()}
+              className="h-9 px-3 rounded-xl bg-int-blue text-white font-bold text-xs disabled:opacity-40 flex-shrink-0">
+              →
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

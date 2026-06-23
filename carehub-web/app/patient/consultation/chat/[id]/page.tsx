@@ -1,11 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
 import { useAuth, useUser } from '@clerk/nextjs'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { getStreamClient, fetchStreamToken } from '@/lib/stream'
 import Link from 'next/link'
+import { stripDrPrefix } from '@/lib/utils'
+import type { Channel, FormatMessageResponse } from 'stream-chat'
 
 interface Consultation {
   id: string
@@ -17,124 +19,137 @@ interface Consultation {
   } | null
 }
 
-interface Message {
-  id: string
-  sender_id: string
-  content: string
-  type: string
-  created_at: string
-}
-
 export default function ChatConsultationPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
-  const { getToken } = useAuth()
+  const { getToken, userId: clerkUserId } = useAuth()
   const { user } = useUser()
   const [consultation, setConsultation] = useState<Consultation | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
+  const [channel, setChannel] = useState<Channel | null>(null)
+  const [messages, setMessages] = useState<FormatMessageResponse[]>([])
   const [input, setInput] = useState('')
-  const [myUserId, setMyUserId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [ending, setEnding] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    if (!user || !clerkUserId) return
+    let cancelled = false
+
     async function load() {
-      const token = await getToken()
-      if (!token || !user) return
-      const client = getAuthClient(token)
+      try {
+        const token = await getToken()
+        if (!token) return
+        const client = getAuthClient(token)
 
-      const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
-      if (userData) setMyUserId(userData.id)
+        // Fetch consultation metadata from Supabase
+        const { data: consult } = await supabase
+          .from('consultations')
+          .select('id, status, started_at, doctor:doctor_profiles(specialty, user:users(full_name))')
+          .eq('id', id)
+          .single()
+        if (!cancelled) setConsultation(consult as unknown as Consultation)
 
-      const { data: consult } = await supabase
-        .from('consultations')
-        .select('id, status, started_at, doctor:doctor_profiles(specialty, user:users(full_name))')
-        .eq('id', id)
-        .single()
-      setConsultation(consult as unknown as Consultation)
+        // Connect to Stream
+        const streamClient = getStreamClient()
+        if (!streamClient.userID) {
+          const streamToken = await fetchStreamToken(token)
+          await streamClient.connectUser(
+            { id: clerkUserId!, name: user!.fullName ?? user!.firstName ?? 'Patient' },
+            streamToken
+          )
+        }
 
-      const { data: msgs } = await supabase
-        .from('messages')
-        .select('id, sender_id, content, type, created_at')
-        .eq('consultation_id', id)
-        .order('created_at', { ascending: true })
-      setMessages((msgs ?? []) as Message[])
-      setLoading(false)
+        // The channel ID = the consultation ID (set when the channel was created from mobile/doctor)
+        const ch = streamClient.channel('messaging', id)
+        await ch.watch()
 
-      supabase
-        .channel(`chat-${id}`)
-        .on('postgres_changes', {
-          event: 'INSERT', schema: 'public', table: 'messages',
-          filter: `consultation_id=eq.${id}`,
-        }, payload => {
-          setMessages(prev => [...prev, payload.new as Message])
-        })
-        .subscribe()
+        if (cancelled) return
+
+        setChannel(ch)
+        setMessages(ch.state.messages)
+      } catch (err) {
+        console.error('[Chat] load error:', err)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
     }
+
     load()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user])
+    return () => { cancelled = true }
+  }, [id, user, clerkUserId])
+
+  // Subscribe to real-time Stream messages
+  useEffect(() => {
+    if (!channel) return
+
+    const unsub = channel.on('message.new', event => {
+      if (event.message) {
+        setMessages(prev => [...prev, event.message as FormatMessageResponse])
+      }
+    })
+
+    return () => unsub.unsubscribe()
+  }, [channel])
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   async function sendMessage() {
     const text = input.trim()
-    if (!text || !myUserId) return
+    if (!text || !channel) return
     setInput('')
-    const token = await getToken()
-    if (!token) return
-    const client = getAuthClient(token)
-    await client.from('messages').insert({
-      consultation_id: id,
-      sender_id: myUserId,
-      content: text,
-      type: 'text',
-    })
+    await channel.sendMessage({ text })
   }
 
-  async function endConsultation() {
+  async function leaveConsultation() {
     setEnding(true)
-    const token = await getToken()
-    if (!token) { setEnding(false); return }
-    const client = getAuthClient(token)
-    await client.from('consultations').update({
-      status: 'completed',
-      ended_at: new Date().toISOString(),
-    }).eq('id', id)
-    router.push(`/patient/summary/${id}`)
+    try {
+      // Patients leave — only the doctor can end and mark as completed
+      router.push('/patient')
+    } finally {
+      setEnding(false)
+    }
   }
 
   if (loading) {
     return (
       <div className="p-8 flex items-center justify-center min-h-[60vh]">
-        <div className="text-ink-black/40 text-sm">Loading chat…</div>
+        <div className="text-ink-black/40 text-sm">Connecting to chat…</div>
       </div>
     )
   }
 
   const isReadOnly = consultation?.status === 'completed' || consultation?.status === 'cancelled'
+  const doctorName = consultation?.doctor?.user?.full_name ?? ''
 
   return (
     <div className="flex h-screen">
       {/* Left sidebar — doctor info */}
-      <div className="w-64 border-r border-steel-grey bg-white flex flex-col p-5 gap-4 hidden lg:flex">
+      <div className="w-64 border-r border-steel-grey bg-white flex-col p-5 gap-4 hidden lg:flex">
         <Link href="/patient" className="text-ink-black/50 text-sm hover:text-ink-black transition-colors">← Back</Link>
         <div className="card p-4 flex flex-col gap-2">
           <div className="w-12 h-12 rounded-2xl bg-gradient-hero flex items-center justify-center text-white font-black text-xl">
-            {consultation?.doctor?.user?.full_name?.charAt(0) ?? '?'}
+            {stripDrPrefix(doctorName).charAt(0) || '?'}
           </div>
-          <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {consultation?.doctor?.user?.full_name}</p>
+          <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {stripDrPrefix(doctorName)}</p>
           <p className="text-ink-black/50 text-xs">{consultation?.doctor?.specialty}</p>
           <div className="flex items-center gap-1.5 mt-1">
-            <div className="w-2 h-2 rounded-full bg-success" />
-            <span className="text-xs text-success font-semibold">Active</span>
+            <div className={`w-2 h-2 rounded-full ${isReadOnly ? 'bg-steel-grey' : 'bg-success'}`} />
+            <span className={`text-xs font-semibold ${isReadOnly ? 'text-ink-black/40' : 'text-success'}`}>
+              {isReadOnly ? 'Ended' : 'Active'}
+            </span>
           </div>
         </div>
         {!isReadOnly && (
           <button
-            onClick={endConsultation}
+            onClick={leaveConsultation}
             disabled={ending}
-            className="mt-auto btn-outline text-danger border-danger/30 hover:bg-danger/5 text-sm h-10 rounded-xl disabled:opacity-50"
+            className="mt-auto btn-outline text-ink-black/60 border-steel-grey text-sm h-10 rounded-xl disabled:opacity-50"
           >
-            {ending ? '…' : 'End Chat'}
+            {ending ? '…' : 'Leave Chat'}
           </button>
         )}
       </div>
@@ -146,17 +161,20 @@ export default function ChatConsultationPage() {
           <div className="flex items-center gap-3">
             <Link href="/patient" className="text-ink-black/50 text-sm hover:text-ink-black lg:hidden">←</Link>
             <div className="w-8 h-8 rounded-xl bg-gradient-hero flex items-center justify-center text-white font-bold text-sm">
-              {consultation?.doctor?.user?.full_name?.charAt(0) ?? '?'}
+              {stripDrPrefix(doctorName).charAt(0) || '?'}
             </div>
             <div>
-              <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {consultation?.doctor?.user?.full_name}</p>
+              <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {stripDrPrefix(doctorName)}</p>
               <p className="text-xs text-success font-semibold">💬 Chat Consultation</p>
             </div>
           </div>
           {!isReadOnly && (
-            <button onClick={endConsultation} disabled={ending}
-              className="text-xs text-danger font-semibold px-3 py-1.5 rounded-lg border border-danger/20 hover:bg-danger/5 transition-colors disabled:opacity-50">
-              End Chat
+            <button
+              onClick={leaveConsultation}
+              disabled={ending}
+              className="text-xs text-ink-black/60 font-semibold px-3 py-1.5 rounded-lg border border-steel-grey hover:bg-cloud-grey transition-colors disabled:opacity-50"
+            >
+              {ending ? '…' : 'Leave Chat'}
             </button>
           )}
         </div>
@@ -179,7 +197,7 @@ export default function ChatConsultationPage() {
             </div>
           )}
           {messages.map(m => {
-            const mine = m.sender_id === myUserId
+            const mine = m.user?.id === clerkUserId
             return (
               <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl text-sm ${
@@ -187,7 +205,7 @@ export default function ChatConsultationPage() {
                     ? 'bg-int-blue text-white rounded-br-sm'
                     : 'bg-white text-ink-black rounded-bl-sm shadow-card'
                 }`}>
-                  {m.content}
+                  {m.text}
                   <p className={`text-[10px] mt-1 ${mine ? 'text-white/60' : 'text-ink-black/40'}`}>
                     {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </p>
@@ -195,6 +213,7 @@ export default function ChatConsultationPage() {
               </div>
             )
           })}
+          <div ref={bottomRef} />
         </div>
 
         {/* Input */}
@@ -204,7 +223,7 @@ export default function ChatConsultationPage() {
               type="text"
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && sendMessage()}
+              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
               placeholder="Type a message…"
               className="flex-1 h-11 px-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none focus:border-int-blue"
             />

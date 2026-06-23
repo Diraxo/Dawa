@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 
-const LAST_UPDATED = 'June 2025'
+const LAST_UPDATED = 'June 2026'
 
 type Block =
   | { type: 'text'; text: string }
@@ -26,7 +26,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub ("we", "our", "us") is committed to protecting your personal information and health data. This Privacy Policy explains how we collect, use, store, and protect your information when you use the CareHub mobile application and website.',
+        text: 'Dawa ("we", "our", "us") is committed to protecting your personal information and health data. This Privacy Policy explains how we collect, use, store, and protect your information when you use the Dawa mobile application and website.',
       },
     ],
   },
@@ -98,7 +98,7 @@ const SECTIONS: Section[] = [
           'Health data is stored on secure Supabase servers',
           'Doctor documents are stored in encrypted file storage',
           'We never sell your personal or health data to third parties',
-          'Access to your data is restricted to authorized CareHub staff only',
+          'Access to your data is restricted to authorized Dawa staff only',
           'Consultation chats are private between patient and doctor only',
         ],
       },
@@ -138,7 +138,7 @@ const SECTIONS: Section[] = [
           'Opt out of non-essential communications',
         ],
       },
-      { type: 'text', text: 'To exercise these rights, contact us at: privacy@carehub.com' },
+      { type: 'text', text: 'To exercise these rights, contact us at: privacy@dawa.app' },
     ],
   },
   {
@@ -162,7 +162,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
+        text: 'Dawa is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
       },
     ],
   },
@@ -192,7 +192,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub Support Team\nEmail: privacy@carehub.com\nWebsite: www.carehub.com/privacy',
+        text: 'Dawa Support Team\nEmail: privacy@dawa.app\nWebsite: www.dawa.app/privacy',
       },
     ],
   },
@@ -241,7 +241,7 @@ export default function PrivacyPolicyScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() => router.canGoBack() ? router.back() : router.replace('/(auth)/sign-up' as never)}
           style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.6 }]}
           hitSlop={10}
         >
@@ -275,12 +275,12 @@ export default function PrivacyPolicyScreen() {
 
         <Pressable
           style={({ pressed }) => [styles.footerCard, pressed && { opacity: 0.8 }]}
-          onPress={() => Linking.openURL('mailto:privacy@carehub.com')}
+          onPress={() => Linking.openURL('mailto:privacy@dawa.app')}
         >
           <Ionicons name="mail-outline" size={18} color={colors.tealGreen} />
           <Text style={styles.footerText}>
             Contact us:{' '}
-            <Text style={styles.footerLink}>privacy@carehub.com</Text>
+            <Text style={styles.footerLink}>privacy@dawa.app</Text>
           </Text>
         </Pressable>
 

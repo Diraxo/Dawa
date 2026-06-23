@@ -26,7 +26,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'By using CareHub, you agree to these Terms of Service. If you do not agree, please do not use our services.',
+        text: 'By using Dawa, you agree to these Terms of Service. If you do not agree, please do not use our services.',
       },
     ],
   },
@@ -36,11 +36,11 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub is a telemedicine platform that connects patients with verified healthcare professionals for remote consultations via chat, phone call, and video call.',
+        text: 'Dawa is a telemedicine platform that connects patients with verified healthcare professionals for remote consultations via chat, phone call, and video call.',
       },
       {
         type: 'text',
-        text: 'CareHub does NOT provide emergency medical services. If you have a medical emergency, call your local emergency number immediately.',
+        text: 'Dawa does NOT provide emergency medical services. If you have a medical emergency, call your local emergency number immediately.',
       },
     ],
   },
@@ -50,7 +50,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'IMPORTANT: CareHub consultations are not a substitute for in-person emergency care. Doctors on CareHub provide general medical advice and consultations only. For any life-threatening condition, go to your nearest hospital or call emergency services immediately.',
+        text: 'IMPORTANT: Dawa consultations are not a substitute for in-person emergency care. Doctors on Dawa provide general medical advice and consultations only. For any life-threatening condition, go to your nearest hospital or call emergency services immediately.',
       },
     ],
   },
@@ -115,7 +115,7 @@ const SECTIONS: Section[] = [
         type: 'bullets',
         items: [
           'Consultation fees are charged per session',
-          'CareHub takes a 20% platform commission',
+          'Dawa takes a 20% platform commission',
           'Doctors receive 80% of each consultation fee',
           'Refunds are available if a doctor does not respond within 30 seconds of a request',
           'Refunds are NOT available once a consultation has started',
@@ -128,7 +128,7 @@ const SECTIONS: Section[] = [
     num: '7',
     title: 'PROHIBITED USES',
     blocks: [
-      { type: 'text', text: 'You may NOT use CareHub to:' },
+      { type: 'text', text: 'You may NOT use Dawa to:' },
       {
         type: 'bullets',
         items: [
@@ -148,7 +148,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'All CareHub content, logo, design, and software are owned by CareHub and protected by copyright law. You may not copy, modify, or distribute our content without permission.',
+        text: 'All Dawa content, logo, design, and software are owned by Dawa and protected by copyright law. You may not copy, modify, or distribute our content without permission.',
       },
     ],
   },
@@ -158,7 +158,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'CareHub is a platform connecting patients and doctors. We are not liable for the medical advice provided by doctors on our platform. Doctors are independent healthcare professionals, not CareHub employees.',
+        text: 'Dawa is a platform connecting patients and doctors. We are not liable for the medical advice provided by doctors on our platform. Doctors are independent healthcare professionals, not Dawa employees.',
       },
     ],
   },
@@ -237,7 +237,7 @@ export default function TermsScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() => router.canGoBack() ? router.back() : router.replace('/(auth)/sign-up' as never)}
           style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.6 }]}
           hitSlop={10}
         >

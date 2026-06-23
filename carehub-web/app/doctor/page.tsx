@@ -4,8 +4,9 @@ import { useEffect, useState, useRef } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { useRouter } from 'next/navigation'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { getStreamClient, fetchStreamToken } from '@/lib/stream'
 import { RealtimeChannel } from '@supabase/supabase-js'
-import { getGreeting } from '@/lib/utils'
+import { getGreeting, stripDrPrefix } from '@/lib/utils'
 import { MessageCircle, Phone, Video, ClipboardList, CheckCircle2, Star, Wallet, Calendar, User } from 'lucide-react'
 
 interface DoctorStats {
@@ -22,7 +23,16 @@ interface IncomingRequest {
   id: string
   type: string
   patientName: string
+  patientClerkId: string
   amount: number
+}
+
+interface TodayAppointment {
+  id: string
+  type: string
+  patientName: string
+  time: string
+  status: string
 }
 
 export default function DoctorHomePage() {
@@ -33,33 +43,23 @@ export default function DoctorHomePage() {
     totalConsultations: 0, completedToday: 0, rating: 0, earnings: 0, isOnline: false, profileId: null, status: ''
   })
   const [loading, setLoading] = useState(true)
+  const [todaySchedule, setTodaySchedule] = useState<TodayAppointment[]>([])
   const [request, setRequest] = useState<IncomingRequest | null>(null)
-  const [countdown, setCountdown] = useState(30)
   const channelRef = useRef<RealtimeChannel | null>(null)
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const shownIds = useRef(new Set<string>())
 
   useEffect(() => {
     if (!user) return
     loadStats()
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  useEffect(() => {
-    if (request) {
-      setCountdown(30)
-      timerRef.current = setInterval(() => {
-        setCountdown(prev => {
-          if (prev <= 1) {
-            handleDecline(request.id)
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-    }
-    return () => { if (timerRef.current) clearInterval(timerRef.current) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request?.id])
 
   async function loadStats() {
     const token = await getToken()
@@ -76,12 +76,30 @@ export default function DoctorHomePage() {
 
     if (!profile) { setLoading(false); return }
 
-    const today = new Date().toISOString().split('T')[0]
-    const [{ count: completedToday }, { data: earningsData }] = await Promise.all([
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+
+    const [{ count: completedToday }, { data: earningsData }, { data: scheduleData }, { data: waitingData }] = await Promise.all([
       client.from('consultations').select('id', { count: 'exact', head: true })
-        .eq('doctor_id', profile.id).eq('status', 'completed').gte('created_at', today),
+        .eq('doctor_id', profile.id).eq('status', 'completed').gte('created_at', today.toISOString()),
       client.from('consultations').select('doctor_amount')
         .eq('doctor_id', profile.id).eq('status', 'completed'),
+      client.from('consultations')
+        .select('id, type, status, scheduled_at, patient:users!patient_id(full_name)')
+        .eq('doctor_id', profile.id)
+        .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress'])
+        .gte('scheduled_at', today.toISOString())
+        .lt('scheduled_at', tomorrow.toISOString())
+        .order('scheduled_at', { ascending: true }),
+      client.from('consultations')
+        .select('id, type, patient_id, patient_amount')
+        .eq('doctor_id', profile.id)
+        .eq('status', 'waiting_for_doctor')
+        .eq('payment_status', 'paid')
+        .order('created_at', { ascending: true })
+        .limit(1),
     ])
 
     const earnings = (earningsData ?? []).reduce((sum, r) => sum + (r.doctor_amount ?? 0), 0)
@@ -95,20 +113,45 @@ export default function DoctorHomePage() {
       profileId: profile.id,
       status: profile.status,
     })
+    setTodaySchedule((scheduleData ?? []).map((c: any) => ({
+      id: c.id,
+      type: c.type,
+      patientName: c.patient?.full_name ?? 'Patient',
+      time: c.scheduled_at ? new Date(c.scheduled_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+      status: c.status,
+    })))
     setLoading(false)
 
+    // Populate incoming request on page load so a refresh doesn't lose a waiting patient
+    if (waitingData && waitingData.length > 0) {
+      const w = waitingData[0]
+      if (!shownIds.current.has(w.id)) {
+        shownIds.current.add(w.id)
+        const { data: pat } = await client.from('users').select('full_name, clerk_id').eq('id', w.patient_id).single()
+        setRequest({ id: w.id, type: w.type, patientName: pat?.full_name ?? 'Patient', patientClerkId: pat?.clerk_id ?? '', amount: w.patient_amount ?? 0 })
+      }
+    }
+
     if (profile.id) {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
       channelRef.current = supabase
         .channel(`doctor-home-${profile.id}`)
         .on('postgres_changes', {
-          event: 'INSERT',
+          event: 'UPDATE',
           schema: 'public',
           table: 'consultations',
           filter: `doctor_id=eq.${profile.id}`,
         }, async payload => {
-          const c = payload.new as { id: string; type: string; patient_id: string; patient_amount: number }
-          const { data: pat } = await supabase.from('users').select('full_name').eq('id', c.patient_id).single()
-          setRequest({ id: c.id, type: c.type, patientName: pat?.full_name ?? 'Patient', amount: c.patient_amount ?? 0 })
+          const c = payload.new as { id: string; type: string; status: string; patient_id: string; patient_amount: number; payment_status: string }
+          if (c.status !== 'waiting_for_doctor') return
+          if (c.payment_status !== 'paid') return
+          if (shownIds.current.has(c.id)) return
+          shownIds.current.add(c.id)
+          const { data: pat } = await client.from('users').select('full_name, clerk_id').eq('id', c.patient_id).single()
+          setRequest({ id: c.id, type: c.type, patientName: pat?.full_name ?? 'Patient', patientClerkId: pat?.clerk_id ?? '', amount: c.patient_amount ?? 0 })
         })
         .subscribe()
     }
@@ -125,45 +168,58 @@ export default function DoctorHomePage() {
   }
 
   async function handleAccept(consultId: string) {
-    if (timerRef.current) clearInterval(timerRef.current)
     const token = await getToken()
+    const type = request?.type ?? 'chat'
+    const patientClerkId = request?.patientClerkId ?? ''
+
     if (token) {
       const client = getAuthClient(token)
-      await client.from('consultations').update({ status: 'active', started_at: new Date().toISOString() }).eq('id', consultId)
+      await client.from('consultations').update({ status: 'accepted', started_at: new Date().toISOString() }).eq('id', consultId)
     }
-    const type = request?.type ?? 'chat'
+
+    // For chat consultations, create the Stream channel immediately so the patient
+    // can enter without hitting a race condition where the channel doesn't exist yet.
+    if (type === 'chat' && user && patientClerkId) {
+      try {
+        const clerkToken = token ?? await getToken()
+        if (clerkToken) {
+          const streamToken = await fetchStreamToken(clerkToken)
+          const streamCli = getStreamClient()
+          if (!streamCli.userID) {
+            await streamCli.connectUser(
+              { id: user.id, name: user.fullName ?? user.firstName ?? 'Doctor' },
+              streamToken,
+            )
+          }
+          const ch = streamCli.channel('messaging', consultId, {
+            members: [user.id, patientClerkId],
+          })
+          await ch.create()
+        }
+      } catch {
+        // channel may already exist — not fatal
+      }
+    }
+
     setRequest(null)
     router.push(`/doctor/consultation/${type}/${consultId}`)
   }
 
   async function handleDecline(id: string) {
-    if (timerRef.current) clearInterval(timerRef.current)
     const token = await getToken()
     if (token) {
       const client = getAuthClient(token)
-      await client.from('consultations').update({ status: 'cancelled' }).eq('id', id)
+      await client.from('consultations').update({ status: 'declined' }).eq('id', id)
     }
     setRequest(null)
   }
 
-  if (stats.status && stats.status !== 'approved') {
-    return (
-      <div className="p-8 flex items-center justify-center h-full min-h-[60vh]">
-        <div className="card p-12 text-center max-w-md">
-          <div className="text-5xl mb-4">⏳</div>
-          <h1 className="font-montserrat font-black text-2xl text-ink-black mb-2">Under Review</h1>
-          <p className="text-ink-black/50 text-sm">
-            Your application is being reviewed. You&apos;ll be notified once approved.
-          </p>
-        </div>
-      </div>
-    )
-  }
+  const isPending = !loading && !!stats.status && stats.status !== 'approved'
 
   return (
     <div className="p-8 max-w-5xl relative">
-      {/* Incoming request overlay */}
-      {request && (
+      {/* Incoming request overlay — only for approved doctors */}
+      {request && stats.status === 'approved' && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="card p-8 max-w-sm w-full text-center">
             <div className="w-16 h-16 rounded-3xl bg-gradient-interactive flex items-center justify-center mx-auto mb-3 animate-bounce-sm">
@@ -177,8 +233,8 @@ export default function DoctorHomePage() {
             <p className="text-ink-black/60 text-sm mb-1">{request.patientName} wants a {request.type} consultation</p>
             <p className="text-teal-green font-bold text-sm mb-4">ETB {request.amount}</p>
 
-            <div className="w-16 h-16 rounded-full border-4 border-care-blue mx-auto flex items-center justify-center mb-6">
-              <span className="font-black text-2xl text-care-blue">{countdown}</span>
+            <div className="inline-flex items-center gap-1.5 bg-success/10 text-success border border-success/30 rounded-full px-3 py-1 text-xs font-semibold mb-6">
+              ✓ Payment Confirmed
             </div>
 
             <div className="flex gap-3">
@@ -195,26 +251,50 @@ export default function DoctorHomePage() {
         </div>
       )}
 
+      {/* Pending / rejected banner */}
+      {isPending && (
+        <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl mb-6 text-sm font-montserrat border
+          ${stats.status === 'rejected'
+            ? 'bg-[#FEE2E2] border-[#FECACA] text-[#991B1B]'
+            : 'bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]'}`}>
+          <span className="text-lg shrink-0 mt-0.5">{stats.status === 'rejected' ? '❌' : '⏳'}</span>
+          <div>
+            <p className="font-bold mb-0.5">
+              {stats.status === 'rejected' ? 'Application Not Approved' : 'Account Under Review'}
+            </p>
+            <p className="opacity-80">
+              {stats.status === 'rejected'
+                ? 'Your application was not approved. Please contact support to reapply.'
+                : 'Your account is being reviewed by our admin team. You cannot perform any actions until you are approved.'}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Greeting */}
       <div className="mb-8 flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-montserrat font-black text-3xl text-ink-black">
-            {getGreeting()}, Dr. {user?.firstName ?? 'Doctor'} 👋
+            {getGreeting()}, Dr. {stripDrPrefix(user?.firstName ?? 'Doctor')} 👋
           </h1>
           <p className="text-ink-black/50 text-sm mt-1">Ready to help patients today?</p>
         </div>
 
-        {/* Online toggle */}
+        {/* Online toggle — disabled until approved */}
         <button
-          onClick={toggleOnline}
+          onClick={isPending ? undefined : toggleOnline}
+          disabled={isPending}
+          title={isPending ? 'Available after admin approval' : undefined}
           className={`flex items-center gap-3 px-5 py-3 rounded-2xl font-montserrat font-bold text-sm transition-all ${
-            stats.isOnline
-              ? 'bg-success/10 text-success border border-success/20'
-              : 'bg-steel-grey/50 text-ink-black/50 border border-steel-grey'
+            isPending
+              ? 'bg-steel-grey/30 text-ink-black/30 border border-steel-grey cursor-not-allowed'
+              : stats.isOnline
+                ? 'bg-success/10 text-success border border-success/20'
+                : 'bg-steel-grey/50 text-ink-black/50 border border-steel-grey'
           }`}
         >
-          <div className={`w-3 h-3 rounded-full ${stats.isOnline ? 'bg-success animate-pulse' : 'bg-steel-grey'}`} />
-          {stats.isOnline ? 'Online · Taking Patients' : 'Go Online'}
+          <div className={`w-3 h-3 rounded-full ${isPending ? 'bg-steel-grey' : stats.isOnline ? 'bg-success animate-pulse' : 'bg-steel-grey'}`} />
+          {isPending ? 'Pending Approval' : stats.isOnline ? 'Online · Taking Patients' : 'Go Online'}
         </button>
       </div>
 
@@ -237,7 +317,7 @@ export default function DoctorHomePage() {
       </div>
 
       {/* Quick links */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         {[
           { icon: ClipboardList, label: 'View Consultations', href: '/doctor/consultations', desc: 'Manage all sessions' },
           { icon: Calendar, label: 'My Schedule', href: '/doctor/schedule', desc: 'Set your availability' },
@@ -254,6 +334,39 @@ export default function DoctorHomePage() {
             <span className="ml-auto text-ink-black/30">→</span>
           </a>
         ))}
+      </div>
+
+      {/* Today's schedule */}
+      <div>
+        <h2 className="font-montserrat font-bold text-lg text-ink-black mb-3">Today&apos;s Schedule</h2>
+        {loading ? (
+          <div className="flex flex-col gap-2">
+            {[1, 2].map(i => <div key={i} className="h-16 shimmer-bg rounded-2xl" />)}
+          </div>
+        ) : todaySchedule.length === 0 ? (
+          <div className="card p-8 text-center">
+            <p className="text-3xl mb-2">📅</p>
+            <p className="text-ink-black/40 text-sm">No appointments scheduled for today</p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {todaySchedule.map(appt => {
+              const typeIcons: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+              return (
+                <div key={appt.id} className="card p-4 flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center text-xl flex-shrink-0">
+                    {typeIcons[appt.type] ?? '📋'}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-montserrat font-semibold text-sm text-ink-black">{appt.patientName}</p>
+                    <p className="text-xs text-ink-black/40 mt-0.5">{appt.time} · {appt.type.charAt(0).toUpperCase() + appt.type.slice(1)}</p>
+                  </div>
+                  <div className="w-2 h-2 rounded-full bg-teal-green flex-shrink-0" />
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

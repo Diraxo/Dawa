@@ -1,8 +1,9 @@
 import { StreamChat } from 'stream-chat'
 
-export const streamClient = StreamChat.getInstance(
-  process.env.EXPO_PUBLIC_STREAM_API_KEY!
-)
+const STREAM_KEY = process.env.EXPO_PUBLIC_STREAM_API_KEY ?? ''
+if (!STREAM_KEY) console.error('[Stream] EXPO_PUBLIC_STREAM_API_KEY is not set — chat will not work')
+
+export const streamClient = StreamChat.getInstance(STREAM_KEY || 'missing-key')
 
 export async function createConsultationChannel(
   consultationId: string,

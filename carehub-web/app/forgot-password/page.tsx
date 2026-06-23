@@ -1,117 +1,89 @@
 'use client'
 
-import { Suspense, useState } from 'react'
+import { useState } from 'react'
 import { useSignIn } from '@clerk/nextjs'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { Mail } from 'lucide-react'
 import { AuthCard } from '@/components/ui/AuthCard'
 
-function ForgotPasswordContent() {
-  const { isLoaded, signIn, setActive } = useSignIn()
-  const router = useRouter()
-  const params = useSearchParams()
-  const step = params.get('step') ?? 'email'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  async function handleSendCode(e: React.FormEvent) {
-    e.preventDefault()
-    if (!isLoaded) return
-    setLoading(true)
-    setError('')
-    try {
-      await signIn!.create({ strategy: 'reset_password_email_code', identifier: email })
-      router.push(`/verify?type=forgot&email=${encodeURIComponent(email)}`)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Email not found')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function handleResetPassword(e: React.FormEvent) {
-    e.preventDefault()
-    if (!isLoaded) return
-    if (password !== confirm) { setError('Passwords do not match'); return }
-    if (password.length < 8) { setError('Password must be at least 8 characters'); return }
-    setLoading(true)
-    setError('')
-    try {
-      const result = await signIn!.resetPassword({ password })
-      if (result.status === 'complete') {
-        await setActive!({ session: result.createdSessionId })
-        router.push('/dashboard')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Reset failed')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  if (step === 'reset') {
-    return (
-      <AuthCard title="New Password" subtitle="Choose a strong, secure password">
-        <form onSubmit={handleResetPassword} className="flex flex-col gap-4">
-          <input
-            type="password"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            placeholder="New password (min. 8 chars)"
-            required
-            className="w-full h-[52px] px-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none focus:border-int-blue"
-          />
-          <input
-            type="password"
-            value={confirm}
-            onChange={e => setConfirm(e.target.value)}
-            placeholder="Confirm new password"
-            required
-            className="w-full h-[52px] px-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none focus:border-int-blue"
-          />
-          {error && <p className="text-danger text-xs font-medium">{error}</p>}
-          <button type="submit" disabled={loading} className="btn-primary w-full disabled:opacity-50">
-            {loading ? 'Resetting…' : 'Reset Password →'}
-          </button>
-        </form>
-      </AuthCard>
-    )
-  }
-
-  return (
-    <AuthCard title="Forgot Password?" subtitle="Enter your email to receive a reset code">
-      <form onSubmit={handleSendCode} className="flex flex-col gap-4">
-        <div className="relative">
-          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40">✉️</span>
-          <input
-            type="email"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-            placeholder="Your email address"
-            required
-            className="w-full h-[52px] pl-11 pr-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none focus:border-int-blue"
-          />
-        </div>
-        {error && <p className="text-danger text-xs font-medium">{error}</p>}
-        <button type="submit" disabled={loading} className="btn-primary w-full disabled:opacity-50">
-          {loading ? 'Sending…' : 'Send Reset Code →'}
-        </button>
-      </form>
-      <p className="text-center text-sm text-ink-black/60 mt-5">
-        <Link href="/sign-in" className="text-teal-green font-semibold hover:underline">← Back to Sign In</Link>
-      </p>
-    </AuthCard>
-  )
+function isValidEmail(v: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
 }
 
 export default function ForgotPasswordPage() {
+  const { isLoaded, signIn } = useSignIn()
+  const router = useRouter()
+
+  const [email, setEmail] = useState('')
+  const [emailError, setEmailError] = useState('')
+  const [globalError, setGlobalError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!isLoaded || !isValidEmail(email) || loading) return
+    const normalizedEmail = email.trim().toLowerCase()
+    setEmailError('')
+    setGlobalError('')
+    setLoading(true)
+    try {
+      await signIn!.create({
+        strategy: 'reset_password_email_code',
+        identifier: normalizedEmail,
+      })
+      router.push(`/verify?email=${encodeURIComponent(normalizedEmail)}&type=forgot`)
+    } catch (err: any) {
+      const code: string = err?.errors?.[0]?.code ?? ''
+      const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
+      if (code === 'form_identifier_not_found') {
+        setEmailError('No account found with this email.')
+      } else {
+        setGlobalError(msg || 'Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
-    <Suspense>
-      <ForgotPasswordContent />
-    </Suspense>
+    <AuthCard
+      title="Forgot Password?"
+      subtitle="Enter your email and we'll send you a reset code"
+    >
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <div>
+          <div className="relative">
+            <Mail size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <input
+              type="email"
+              value={email}
+              onChange={e => { setEmail(e.target.value); setEmailError('') }}
+              placeholder="Type your email"
+              autoFocus
+              className={`w-full h-[52px] pl-7 pr-4 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${emailError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+            />
+          </div>
+          {emailError && <p className="text-danger text-xs mt-1.5">{emailError}</p>}
+        </div>
+
+        {globalError && <p className="text-danger text-xs font-medium">{globalError}</p>}
+
+        <button
+          type="submit"
+          disabled={!isValidEmail(email) || loading}
+          className="btn-primary w-full disabled:opacity-50"
+        >
+          {loading ? 'Sending code…' : 'Send Reset Code →'}
+        </button>
+      </form>
+
+      <p className="text-center text-sm text-ink-black/60 mt-6">
+        Remember your password?{' '}
+        <Link href="/sign-in" className="text-teal-green font-semibold hover:underline">
+          Sign In
+        </Link>
+      </p>
+    </AuthCard>
   )
 }

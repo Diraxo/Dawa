@@ -1,15 +1,18 @@
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 
 export default function PaymentMethodsScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -22,7 +25,7 @@ export default function PaymentMethodsScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Payment Methods</Text>
+        <Text style={styles.headerTitle}>{t('paymentMethodsTitle')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -37,28 +40,24 @@ export default function PaymentMethodsScreen() {
           <View style={styles.heroIconWrap}>
             <Ionicons name="card" size={40} color={colors.mistWhite} />
           </View>
-          <Text style={styles.heroTitle}>Payments Coming Soon</Text>
-          <Text style={styles.heroSub}>
-            Secure online payment integration is currently in development. You will be able to manage
-            saved cards, mobile wallets, and more.
-          </Text>
+          <Text style={styles.heroTitle}>{t('paymentComingSoon')}</Text>
+          <Text style={styles.heroSub}>{t('paymentComingSoonDesc')}</Text>
           <View style={styles.featurePill}>
             <Ionicons name="lock-closed" size={13} color="rgba(255,255,255,0.9)" />
             <Text style={styles.featurePillText}>Bank-grade Security</Text>
           </View>
         </LinearGradient>
 
-        {/* Placeholder features */}
+        {/* How payments work */}
         {[
-          { icon: 'card-outline', title: 'Credit / Debit Cards', sub: 'Visa, Mastercard, Amex' },
-          { icon: 'phone-portrait-outline', title: 'Mobile Money', sub: 'M-PESA, Telebirr, Airtel' },
-          { icon: 'wallet-outline', title: 'Digital Wallets', sub: 'Apple Pay, Google Pay' },
-          { icon: 'cash-outline', title: 'Bank Transfer', sub: 'Direct bank payment' },
+          { icon: 'shield-checkmark-outline', title: 'Secure Checkout via Chapa', sub: 'Payments are processed at the time of booking using Chapa, Ethiopia\'s trusted payment gateway.' },
+          { icon: 'card-outline', title: 'Accepted Methods', sub: 'Telebirr, CBE Birr, Amole, HelloCash, and major debit/credit cards via Chapa.' },
+          { icon: 'receipt-outline', title: 'Automatic Receipts', sub: 'A receipt is sent to your email after each payment.' },
+          { icon: 'lock-closed-outline', title: 'Bank-grade Security', sub: 'Your payment details are never stored on our servers. All transactions are encrypted.' },
         ].map((item) => (
-          <Pressable
+          <View
             key={item.title}
-            style={({ pressed }) => [styles.featureRow, pressed && { opacity: 0.7 }]}
-            onPress={() => Alert.alert('Coming Soon', 'This payment method will be available soon.')}
+            style={styles.featureRow}
           >
             <View style={styles.featureIcon}>
               <Ionicons
@@ -71,10 +70,7 @@ export default function PaymentMethodsScreen() {
               <Text style={styles.featureTitle}>{item.title}</Text>
               <Text style={styles.featureSub}>{item.sub}</Text>
             </View>
-            <View style={styles.soonBadge}>
-              <Text style={styles.soonText}>Soon</Text>
-            </View>
-          </Pressable>
+          </View>
         ))}
       </View>
     </SafeAreaView>
@@ -99,11 +95,7 @@ const styles = StyleSheet.create({
     padding: 28,
     alignItems: 'center',
     marginBottom: 24,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
-    elevation: 5,
+    ...shadow(colors.careBlue, 0, 4, 12, 0.22, 5),
   },
   heroIconWrap: {
     width: 80,
@@ -148,11 +140,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 16,
     marginBottom: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   featureIcon: {
     width: 44,

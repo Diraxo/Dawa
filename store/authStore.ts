@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 
 import { streamClient } from '@/lib/stream'
+import { logger } from '@/lib/logger'
 
 type UserRole = 'patient' | 'doctor' | null
 
@@ -12,12 +13,14 @@ interface AuthState {
   userName: string | null
   userPhotoUrl: string | null
   isStreamConnected: boolean
+  _hasHydrated: boolean
 
   setUserRole: (role: UserRole) => void
   setUser: (userId: string, name: string, photoUrl: string | null) => void
   connectStream: (token: string) => Promise<void>
   disconnectStream: () => Promise<void>
   clearAuth: () => void
+  setHasHydrated: (v: boolean) => void
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -28,8 +31,10 @@ export const useAuthStore = create<AuthState>()(
       userName: null,
       userPhotoUrl: null,
       isStreamConnected: false,
+      _hasHydrated: false,
 
       setUserRole: (role) => set({ userRole: role }),
+      setHasHydrated: (v) => set({ _hasHydrated: v }),
 
       setUser: (userId, name, photoUrl) =>
         set({ userId, userName: name, userPhotoUrl: photoUrl }),
@@ -49,7 +54,7 @@ export const useAuthStore = create<AuthState>()(
           )
           set({ isStreamConnected: true })
         } catch (err) {
-          console.error('[Stream] connectUser failed:', err)
+          logger.error('[Stream] connectUser failed:', err)
         }
       },
 
@@ -60,14 +65,17 @@ export const useAuthStore = create<AuthState>()(
         set({ isStreamConnected: false })
       },
 
-      clearAuth: () =>
+      clearAuth: () => {
+        // Disconnect Stream before clearing state to prevent orphan connections
+        try { streamClient.disconnectUser() } catch {}
         set({
           userRole: null,
           userId: null,
           userName: null,
           userPhotoUrl: null,
           isStreamConnected: false,
-        }),
+        })
+      },
     }),
     {
       name: 'carehub-auth-storage',
@@ -79,6 +87,9 @@ export const useAuthStore = create<AuthState>()(
         userPhotoUrl: state.userPhotoUrl,
         // isStreamConnected not persisted — reconnect on each cold start
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true)
+      },
     }
   )
 )

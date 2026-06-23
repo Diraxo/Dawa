@@ -5,6 +5,7 @@ import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 
 export type AlertVariant = 'success' | 'error' | 'warning' | 'info' | 'confirm' | 'logout'
 
@@ -170,11 +171,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     width: '100%',
     maxWidth: 360,
-    elevation: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.18,
-    shadowRadius: 24,
+    ...shadow('#000', 0, 8, 24, 0.18, 20),
   },
   iconCircle: {
     width: 72,

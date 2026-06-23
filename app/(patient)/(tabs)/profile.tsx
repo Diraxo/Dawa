@@ -18,9 +18,11 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import Constants from 'expo-constants'
+import { shadow } from '@/lib/shadow'
 import { supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
+import { useTranslation } from 'react-i18next'
 
 const LANGUAGE_DISPLAY: Record<string, string> = {
   en: 'English', so: 'Soomaali', am: 'አማርኛ',
@@ -41,6 +43,7 @@ interface MenuItem {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ProfileScreen() {
+  const { t } = useTranslation()
   const { user } = useUser()
   const { signOut } = useAuth()
   const router = useRouter()
@@ -69,7 +72,6 @@ export default function ProfileScreen() {
 
   const confirmDeactivate = async () => {
     setShowDeactivateAlert(false)
-    await supabase.from('users').update({ is_active: false }).eq('clerk_id', user?.id)
     await disconnectStream()
     await supabaseEmailAuth.auth.signOut()
     clearAuth()
@@ -98,44 +100,44 @@ export default function ProfileScreen() {
   const menuItems: MenuItem[] = [
     {
       icon: 'person-outline',
-      label: 'Personal Information',
-      subtitle: 'Update your account details',
+      label: t('personalInformation'),
+      subtitle: t('updateAccountDetails'),
       onPress: () => router.push('/(patient)/edit-personal-info'),
     },
     {
       icon: 'fitness-outline',
-      label: 'Medical Records',
-      subtitle: 'View history & documents',
+      label: t('medicalRecords'),
+      subtitle: t('viewHistoryDocs'),
       onPress: () => router.push('/(patient)/medical-records'),
     },
     {
       icon: 'card-outline',
-      label: 'Payment Methods',
-      subtitle: 'Manage saved payment info (Placeholder)',
+      label: t('paymentMethods'),
+      subtitle: t('managePaymentInfo'),
       onPress: () => router.push('/(patient)/payment-methods'),
     },
     {
       icon: 'notifications-outline',
-      label: 'Notifications',
-      subtitle: 'Configure app alerts',
+      label: t('notifications'),
+      subtitle: t('configureAlerts'),
       onPress: () => router.push('/(patient)/notification-settings'),
     },
     {
       icon: 'globe-outline',
-      label: 'Language',
+      label: t('language'),
       subtitle: LANGUAGE_DISPLAY[selectedLanguage ?? 'en'] ?? 'English',
       onPress: () => router.push('/(patient)/language-settings'),
     },
     {
       icon: 'help-circle-outline',
-      label: 'Help & Support',
-      subtitle: 'FAQs & Contact Us',
+      label: t('helpSupport'),
+      subtitle: t('faqsContact'),
       onPress: () => router.push('/(patient)/help-support'),
     },
     {
       icon: 'information-circle-outline',
-      label: 'About CareHub',
-      subtitle: 'Our mission & story',
+      label: t('aboutDawa'),
+      subtitle: t('ourMissionStory'),
       onPress: () => router.push('/(patient)/about-carehub'),
     },
   ]
@@ -148,7 +150,7 @@ export default function ProfileScreen() {
         visible={showLogoutAlert}
         variant="logout"
         title="Log Out"
-        message="Are you sure you want to log out of your CareHub account?"
+        message="Are you sure you want to log out of your Dawa account?"
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowLogoutAlert(false) },
           {
@@ -203,7 +205,7 @@ export default function ProfileScreen() {
         visible={showDeleteErrorAlert}
         variant="error"
         title="Unable to Delete"
-        message="We couldn't delete your account. Please contact support at support@carehub.app"
+        message="We couldn't delete your account. Please contact support at support@dawa.app"
         buttons={[
           { text: 'OK', style: 'primary', onPress: () => setShowDeleteErrorAlert(false) },
         ]}
@@ -216,7 +218,7 @@ export default function ProfileScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Page title */}
-        <Text style={styles.pageTitle}>Profile</Text>
+        <Text style={styles.pageTitle}>{t('profile')}</Text>
 
         {/* ── Profile hero card ── */}
         <LinearGradient
@@ -254,7 +256,7 @@ export default function ProfileScreen() {
                 size={11}
                 color="rgba(255,255,255,0.9)"
               />
-              <Text style={styles.patientBadgeText}>Verified Patient</Text>
+              <Text style={styles.patientBadgeText}>{t('verifiedPatient')}</Text>
             </View>
           </View>
         </LinearGradient>
@@ -271,7 +273,7 @@ export default function ProfileScreen() {
             style={styles.editBtnGradient}
           >
             <Ionicons name="pencil" size={17} color={colors.mistWhite} />
-            <Text style={styles.editBtnText}>Edit Personal Info</Text>
+            <Text style={styles.editBtnText}>{t('editPersonalInfo')}</Text>
           </LinearGradient>
         </Pressable>
 
@@ -310,7 +312,7 @@ export default function ProfileScreen() {
           onPress={handleDeactivate}
         >
           <Ionicons name="pause-circle-outline" size={19} color={colors.warning} />
-          <Text style={styles.deactivateBtnText}>Deactivate Account</Text>
+          <Text style={styles.deactivateBtnText}>{t('deactivateAccount')}</Text>
         </Pressable>
 
         {/* ── Delete Account ── */}
@@ -319,7 +321,7 @@ export default function ProfileScreen() {
           onPress={handleDeleteAccount}
         >
           <Ionicons name="trash-outline" size={19} color={colors.error} />
-          <Text style={styles.deleteBtnText}>Delete Account</Text>
+          <Text style={styles.deleteBtnText}>{t('deleteAccount')}</Text>
         </Pressable>
 
         {/* ── Logout ── */}
@@ -328,11 +330,11 @@ export default function ProfileScreen() {
           onPress={handleLogout}
         >
           <Ionicons name="log-out-outline" size={19} color="#6B7280" />
-          <Text style={styles.logoutText}>Logout</Text>
+          <Text style={styles.logoutText}>{t('logOut')}</Text>
         </Pressable>
 
         {/* ── Version footer ── */}
-        <Text style={styles.version}>CareHub v{APP_VERSION}</Text>
+        <Text style={styles.version}>Dawa v{APP_VERSION}</Text>
 
         <View style={styles.bottomPad} />
       </ScrollView>
@@ -363,11 +365,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     marginBottom: 14,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    elevation: 5,
+    ...shadow(colors.careBlue, 0, 4, 12, 0.25, 5),
   },
   avatarWrap: { position: 'relative' },
   avatar: { width: 66, height: 66, borderRadius: 33, borderWidth: 2, borderColor: 'rgba(255,255,255,0.4)' },
@@ -448,11 +446,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderRadius: 16,
     marginBottom: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 6, 0.06, 2),
     overflow: 'hidden',
   },
   menuItem: {
@@ -500,11 +494,7 @@ const styles = StyleSheet.create({
     borderColor: colors.warning,
     backgroundColor: colors.mistWhite,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   deactivateBtnText: {
     fontFamily: fonts.semiBold,
@@ -522,11 +512,7 @@ const styles = StyleSheet.create({
     borderColor: colors.error,
     backgroundColor: colors.mistWhite,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   deleteBtnText: {
     fontFamily: fonts.semiBold,

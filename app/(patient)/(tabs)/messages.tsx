@@ -3,8 +3,10 @@ import { useRouter } from 'expo-router'
 import { useEffect, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,8 +17,11 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { Conversation, ConversationItem } from '@/components/ui/ConversationItem'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
+import { logger } from '@/lib/logger'
+import { useTranslation } from 'react-i18next'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +42,7 @@ function formatMsgTime(date: string | Date | null | undefined): string {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function MessagesScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
   const { isStreamConnected, userId } = useAuthStore()
 
@@ -44,6 +50,7 @@ export default function MessagesScreen() {
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all')
 
   // ── Fetch real channels from Stream ─────────────────────────────────────────
 
@@ -98,7 +105,7 @@ export default function MessagesScreen() {
 
         setConversations(convos)
       } catch (err) {
-        console.error('[Messages] queryChannels error:', err)
+        logger.error('[Messages] queryChannels error:', err)
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -121,13 +128,12 @@ export default function MessagesScreen() {
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
-    if (!q) return conversations
-    return conversations.filter(
-      (c) =>
-        c.doctorName.toLowerCase().includes(q) ||
-        c.doctorSubtitle.toLowerCase().includes(q)
-    )
-  }, [conversations, searchQuery])
+    return conversations.filter((c) => {
+      const nameMatch = !q || c.doctorName.toLowerCase().includes(q) || c.doctorSubtitle.toLowerCase().includes(q)
+      const statusMatch = statusFilter === 'all' || c.consultationStatus === statusFilter
+      return nameMatch && statusMatch
+    })
+  }, [conversations, searchQuery, statusFilter])
 
   const pinned = useMemo(() => filtered.filter((c) => c.isPinned), [filtered])
   const others = useMemo(() => filtered.filter((c) => !c.isPinned), [filtered])
@@ -160,16 +166,57 @@ export default function MessagesScreen() {
   const handleLongPress = (id: string) => setOpenMenuId(id)
   const handleMenuClose = () => setOpenMenuId(null)
 
-  const handleDelete = (id: string) =>
+  const handleDelete = async (id: string) => {
+    try {
+      const channels = await streamClient.queryChannels(
+        { id: { $eq: id }, members: { $in: [userId ?? ''] } },
+        {},
+        { state: false, watch: false, limit: 1 }
+      )
+      if (channels.length > 0) {
+        await channels[0].hide()
+      }
+    } catch (err) {
+      logger.error('[Messages] hide channel error:', err)
+    }
     setConversations((prev) => prev.filter((c) => c.id !== id))
+  }
 
-  const handlePin = (id: string) =>
+  const handlePin = async (id: string) => {
+    const convo = conversations.find((c) => c.id === id)
+    if (!convo) return
+    try {
+      const channels = await streamClient.queryChannels(
+        { id: { $eq: id }, members: { $in: [userId ?? ''] } },
+        {},
+        { state: false, watch: false, limit: 1 }
+      )
+      if (channels.length > 0) {
+        await channels[0].update({ pinned: !convo.isPinned } as any)
+      }
+    } catch (err) {
+      logger.error('[Messages] pin channel error:', err)
+    }
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, isPinned: !c.isPinned } : c))
     )
+  }
 
-  const handleArchive = (id: string) =>
+  const handleArchive = async (id: string) => {
+    try {
+      const channels = await streamClient.queryChannels(
+        { id: { $eq: id }, members: { $in: [userId ?? ''] } },
+        {},
+        { state: false, watch: false, limit: 1 }
+      )
+      if (channels.length > 0) {
+        await channels[0].hide()
+      }
+    } catch (err) {
+      logger.error('[Messages] archive channel error:', err)
+    }
     setConversations((prev) => prev.filter((c) => c.id !== id))
+  }
 
   // ── Item render ─────────────────────────────────────────────────────────────
 
@@ -192,7 +239,7 @@ export default function MessagesScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={['top']}>
         <View style={styles.header}>
-          <Text style={styles.title}>Inbox</Text>
+          <Text style={styles.title}>{t('messages')}</Text>
         </View>
         <View style={styles.centerWrap}>
           <ActivityIndicator color={colors.careBlue} size="large" />
@@ -207,14 +254,14 @@ export default function MessagesScreen() {
         <Ionicons name="chatbubbles-outline" size={48} color={colors.steelGrey} />
       </View>
       <Text style={styles.emptyTitle}>
-        {searchQuery ? 'No results found' : 'No messages yet'}
+        {searchQuery ? 'No results found' : t('noMessages')}
       </Text>
       <Text style={styles.emptySub}>
         {searchQuery
           ? `No conversations match "${searchQuery}"`
           : !isStreamConnected
           ? 'Sign in to see your consultations.'
-          : 'Book a consultation to start chatting with a doctor.'}
+          : t('noMessagesDesc')}
       </Text>
     </View>
   )
@@ -226,16 +273,13 @@ export default function MessagesScreen() {
       {/* ── Header ── */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Text style={styles.title}>Inbox</Text>
+          <Text style={styles.title}>{t('messages')}</Text>
           {totalUnread > 0 && (
             <View style={styles.headerBadge}>
               <Text style={styles.headerBadgeText}>{totalUnread}</Text>
             </View>
           )}
         </View>
-        <Pressable style={styles.searchIconBtn} hitSlop={8}>
-          <Ionicons name="options-outline" size={22} color={colors.inkBlack} />
-        </Pressable>
       </View>
 
       {/* ── Search ── */}
@@ -244,7 +288,7 @@ export default function MessagesScreen() {
           <Ionicons name="search-outline" size={17} color="#9CA3AF" />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search messages..."
+            placeholder={t('searchConversations')}
             placeholderTextColor="#9CA3AF"
             value={searchQuery}
             onChangeText={setSearchQuery}
@@ -258,6 +302,19 @@ export default function MessagesScreen() {
           )}
         </View>
       </View>
+
+      {/* ── Status filter chips ── */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipsRow}>
+        {([['all', t('allChats')], ['active', t('activeChats')], ['completed', t('endedChats')]] as const).map(([key, label]) => (
+          <Pressable
+            key={key}
+            onPress={() => setStatusFilter(key)}
+            style={[styles.filterChip, statusFilter === key && styles.filterChipActive]}
+          >
+            <Text style={[styles.filterChipText, statusFilter === key && styles.filterChipTextActive]}>{label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
 
       {/* ── Conversation list ── */}
       {filtered.length === 0 ? (
@@ -371,11 +428,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 11,
     gap: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.05, 1),
   },
   searchInput: {
     flex: 1,
@@ -443,4 +496,14 @@ const styles = StyleSheet.create({
   },
 
   bottomPad: { height: 24 },
+
+  filterChipsRow: { paddingHorizontal: 16, paddingBottom: 10, gap: 8 },
+  filterChip: {
+    borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6,
+    backgroundColor: colors.mistWhite,
+    borderWidth: 1, borderColor: colors.steelGrey,
+  },
+  filterChipActive: { borderColor: 'transparent', backgroundColor: colors.careBlue },
+  filterChipText: { fontFamily: fonts.medium, fontSize: 13, color: '#6B7280' },
+  filterChipTextActive: { color: colors.mistWhite },
 })

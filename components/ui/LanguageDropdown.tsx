@@ -13,18 +13,9 @@ import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { LANGUAGES } from '@/constants/languages'
+import { shadow } from '@/lib/shadow'
 import { useAppStore } from '@/store/appStore'
-
-// ─── Data ─────────────────────────────────────────────────────────────────────
-
-const LANGUAGES = [
-  { id: 'en', nativeName: 'English' },
-  { id: 'so', nativeName: 'Soomaali' },
-  { id: 'am', nativeName: 'አማርኛ' },
-  { id: 'om', nativeName: 'Afaan Oromoo' },
-  { id: 'ti', nativeName: 'ትግርኛ' },
-  { id: 'ar', nativeName: 'العربية' },
-] as const
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -139,11 +130,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingVertical: 8,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 10,
+    ...shadow('#000', 0, 8, 20, 0.15, 10),
   },
   sheetTitle: {
     fontFamily: fonts.bold,

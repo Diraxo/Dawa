@@ -2,24 +2,66 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useUser } from '@clerk/nextjs'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 
-interface AlertItem {
+interface NotificationRow {
   id: string
   title: string
   body: string
+  type: string
+  data_json: Record<string, string> | null
 }
 
-const POLL_MS = 60_000
+const POLL_MS = 30_000
 
-// Polls the notifications table for unread appointment alerts (created by the
-// send-appointment-notification edge function: "starting soon" ~15 min before
-// and "starting now" at the appointment time). Shows a browser notification
-// plus an in-page toast, then marks them read.
+const TYPE_ICONS: Record<string, string> = {
+  new_request: '🔔',
+  accepted: '✅',
+  declined: '❌',
+  summary_ready: '📋',
+  review_received: '⭐',
+  appointment_reminder: '⏰',
+  appointment_start: '🏥',
+}
+
+function resolveUrl(n: NotificationRow, role: string): string {
+  const data = n.data_json ?? {}
+  const screen = (data.screen ?? '') as string
+  const consultationId = (data.consultationId ?? '') as string
+  const consultationType = (data.consultationType ?? 'chat') as string
+
+  if (role === 'doctor') {
+    switch (screen) {
+      case 'incoming_request': return '/doctor/consultations'
+      case 'consultations':   return '/doctor/consultations'
+      case 'profile':         return '/doctor/profile'
+      default:
+        return consultationId ? '/doctor/schedule' : '/doctor/home'
+    }
+  }
+
+  // Patient
+  switch (screen) {
+    case 'consultation':
+      return consultationId
+        ? `/patient/consultation/${consultationType}/${consultationId}`
+        : '/patient/appointments'
+    case 'consultation_summary':
+      return consultationId ? `/patient/summary/${consultationId}` : '/patient/appointments'
+    case 'profile':
+      return '/patient/profile'
+    default:
+      return '/patient/appointments'
+  }
+}
+
 export default function AppointmentAlerts() {
   const { user, isSignedIn } = useUser()
-  const [alerts, setAlerts] = useState<AlertItem[]>([])
+  const router = useRouter()
+  const [alerts, setAlerts] = useState<NotificationRow[]>([])
   const userIdRef = useRef<string | null>(null)
+  const userRoleRef = useRef<string>('patient')
 
   useEffect(() => {
     if (!isSignedIn || !user) return
@@ -35,19 +77,19 @@ export default function AppointmentAlerts() {
         if (!userIdRef.current) {
           const { data } = await supabase
             .from('users')
-            .select('id')
+            .select('id, role')
             .eq('clerk_id', user!.id)
             .maybeSingle()
           if (!data) return
           userIdRef.current = data.id
+          userRoleRef.current = (data as any).role ?? 'patient'
         }
 
         const { data: rows } = await supabase
           .from('notifications')
-          .select('id, title, body')
+          .select('id, title, body, type, data_json')
           .eq('user_id', userIdRef.current)
           .is('read_at', null)
-          .in('type', ['appointment_reminder', 'appointment_start'])
           .order('created_at', { ascending: false })
           .limit(5)
 
@@ -58,11 +100,14 @@ export default function AppointmentAlerts() {
             try {
               new Notification(n.title, { body: n.body, icon: '/favicon.ico' })
             } catch {
-              // Some mobile browsers require a service worker — toast still shows
+              // Some browsers require a service worker — in-page toast still shows
             }
           }
         }
-        setAlerts(prev => [...rows.filter(r => !prev.some(p => p.id === r.id)), ...prev].slice(0, 5))
+
+        setAlerts(prev =>
+          [...(rows as NotificationRow[]).filter(r => !prev.some(p => p.id === r.id)), ...prev].slice(0, 5)
+        )
 
         await supabase
           .from('notifications')
@@ -86,25 +131,37 @@ export default function AppointmentAlerts() {
 
   return (
     <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-[calc(100vw-2rem)] sm:max-w-sm">
-      {alerts.map(a => (
-        <div
-          key={a.id}
-          className="bg-white rounded-2xl shadow-xl border border-steel-grey p-4 flex items-start gap-3"
-        >
-          <span className="text-xl">⏰</span>
-          <div className="flex-1 min-w-0">
-            <p className="font-montserrat font-bold text-sm text-ink-black">{a.title}</p>
-            <p className="text-ink-black/60 text-xs mt-0.5">{a.body}</p>
-          </div>
-          <button
-            onClick={() => setAlerts(prev => prev.filter(p => p.id !== a.id))}
-            className="text-ink-black/30 hover:text-ink-black text-sm"
-            aria-label="Dismiss"
+      {alerts.map(a => {
+        const icon = TYPE_ICONS[a.type] ?? '🔔'
+        const url = resolveUrl(a, userRoleRef.current)
+        return (
+          <div
+            key={a.id}
+            onClick={() => {
+              setAlerts(prev => prev.filter(p => p.id !== a.id))
+              router.push(url)
+            }}
+            className="bg-white rounded-2xl shadow-xl border border-steel-grey p-4 flex items-start gap-3 cursor-pointer hover:shadow-2xl transition-shadow"
           >
-            ✕
-          </button>
-        </div>
-      ))}
+            <span className="text-xl flex-shrink-0">{icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="font-montserrat font-bold text-sm text-ink-black">{a.title}</p>
+              <p className="text-ink-black/60 text-xs mt-0.5 leading-relaxed">{a.body}</p>
+              <p className="text-int-blue text-xs mt-1 font-semibold">Tap to open →</p>
+            </div>
+            <button
+              onClick={e => {
+                e.stopPropagation()
+                setAlerts(prev => prev.filter(p => p.id !== a.id))
+              }}
+              className="text-ink-black/30 hover:text-ink-black text-sm flex-shrink-0 mt-0.5"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )
+      })}
     </div>
   )
 }

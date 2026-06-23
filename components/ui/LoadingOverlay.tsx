@@ -6,6 +6,7 @@ import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 
 interface LoadingOverlayProps {
   visible: boolean
@@ -96,11 +97,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     width: '100%',
     maxWidth: 320,
-    elevation: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.25,
-    shadowRadius: 28,
+    ...shadow('#000', 0, 12, 28, 0.25, 24),
   },
   logoRow: {
     alignItems: 'center',

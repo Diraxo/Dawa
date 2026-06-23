@@ -2,7 +2,7 @@ import { useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
@@ -15,28 +15,75 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
-
-const STEPS = [
-  { icon: 'search-outline', label: 'Admin reviews your credentials', color: colors.information },
-  { icon: 'checkmark-circle-outline', label: 'You receive approval notification', color: colors.tealGreen },
-  { icon: 'radio-button-on-outline', label: 'Go online and start consultations', color: colors.success },
-] as const
 
 export default function UnderReviewScreen() {
   const router = useRouter()
   const { user } = useUser()
   const { clearReg } = useDoctorStore()
+  const { t } = useTranslation()
+
+  const STEPS = [
+    { icon: 'search-outline', label: t('reviewStep1'), color: colors.information },
+    { icon: 'checkmark-circle-outline', label: t('reviewStep2'), color: colors.tealGreen },
+    { icon: 'radio-button-on-outline', label: t('reviewStep3'), color: colors.success },
+  ] as const
   const [checking, setChecking] = useState(false)
   const [showRejectionModal, setShowRejectionModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
+  const [profileId, setProfileId] = useState<string | null>(null)
+
+  // Fetch this doctor's profile ID so we can filter the Realtime subscription
+  useEffect(() => {
+    if (!user?.id) return
+    supabase
+      .from('doctor_profiles')
+      .select('id, users!inner(clerk_id)')
+      .eq('users.clerk_id' as any, user.id)
+      .maybeSingle()
+      .then(({ data }) => { if (data?.id) setProfileId(data.id) })
+  }, [user?.id])
+
+  // Automatically react when admin approves or rejects — filtered to this doctor only
+  useEffect(() => {
+    if (!profileId) return
+
+    const channel = supabase
+      .channel(`doctor-approval-${profileId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'doctor_profiles',
+          filter: `id=eq.${profileId}`,
+        },
+        (payload) => {
+          const updated = payload.new as { status: string; rejection_reason?: string }
+          if (updated.status === 'approved') {
+            clearReg()
+            router.replace('/(doctor)/(tabs)/home')
+          } else if (updated.status === 'rejected') {
+            setRejectionReason(
+              updated.rejection_reason ?? 'Your application was not approved. Please reapply with valid documents.'
+            )
+            setShowRejectionModal(true)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [profileId])
 
   const handleCheckStatus = async () => {
     if (checking) return
@@ -59,10 +106,10 @@ export default function UnderReviewScreen() {
         )
         setShowRejectionModal(true)
       } else {
-        Alert.alert('Still Under Review', 'Your application is being reviewed. Check back in 24–48 hours.')
+        Alert.alert(t('stillUnderReview'), t('stillUnderReviewMsg'))
       }
     } catch {
-      Alert.alert('Connection Error', 'Could not check your application status. Please try again.')
+      Alert.alert(t('connectionError'), t('connectionErrorMsg'))
     } finally {
       setChecking(false)
     }
@@ -75,7 +122,7 @@ export default function UnderReviewScreen() {
   }
 
   const handleSupport = () => {
-    Linking.openURL('mailto:support@carehub.app?subject=Doctor%20Application%20Help')
+    Linking.openURL('mailto:support@dawa.app?subject=Doctor%20Application%20Help')
   }
 
   return (
@@ -100,17 +147,14 @@ export default function UnderReviewScreen() {
           </View>
         </View>
 
-        <Text style={styles.title}>Application Submitted!</Text>
-        <Text style={styles.subtitle}>
-          Our team will review your documents within{' '}
-          <Text style={styles.subtitleBold}>24–48 hours</Text>. You will receive an email and notification once your account is approved.
-        </Text>
+        <Text style={styles.title}>{t('applicationSubmitted')}</Text>
+        <Text style={styles.subtitle}>{t('underReviewSubtitle')}</Text>
 
         {/* Divider */}
         <View style={styles.divider} />
 
         {/* What happens next */}
-        <Text style={styles.sectionTitle}>What happens next?</Text>
+        <Text style={styles.sectionTitle}>{t('whatHappensNext')}</Text>
         <View style={styles.stepsWrap}>
           {STEPS.map((step, i) => (
             <View key={i} style={styles.stepRow}>
@@ -128,14 +172,19 @@ export default function UnderReviewScreen() {
         {/* Need help */}
         <Pressable onPress={handleSupport} style={styles.helpRow}>
           <Ionicons name="help-circle-outline" size={18} color={colors.tealGreen} />
-          <Text style={styles.helpText}>Need help?{' '}<Text style={styles.helpLink}>Contact support</Text></Text>
+          <Text style={styles.helpText}>{t('needHelp')}{' '}<Text style={styles.helpLink}>{t('contactSupport')}</Text></Text>
         </Pressable>
 
         <View style={{ height: 20 }} />
       </ScrollView>
 
-      {/* Check status button */}
+      {/* Footer buttons */}
       <View style={styles.footer}>
+        <GradientButton
+          label={t('goHome')}
+          onPress={() => router.replace('/(doctor)/(tabs)/home')}
+        />
+        <View style={{ height: 10 }} />
         <Pressable
           onPress={handleCheckStatus}
           disabled={checking}
@@ -146,7 +195,7 @@ export default function UnderReviewScreen() {
           ) : (
             <>
               <Ionicons name="refresh-outline" size={18} color={colors.careBlue} />
-              <Text style={styles.checkStatusText}>Check Application Status</Text>
+              <Text style={styles.checkStatusText}>{t('checkApplicationStatus')}</Text>
             </>
           )}
         </Pressable>
@@ -161,14 +210,14 @@ export default function UnderReviewScreen() {
             <View style={styles.rejectionIconWrap}>
               <Ionicons name="close-circle" size={40} color={colors.error} />
             </View>
-            <Text style={styles.rejectionTitle}>Application Not Approved</Text>
+            <Text style={styles.rejectionTitle}>{t('applicationNotApproved')}</Text>
             <View style={styles.rejectionReasonCard}>
-              <Text style={styles.rejectionReasonLabel}>Reason:</Text>
+              <Text style={styles.rejectionReasonLabel}>{t('reason')}</Text>
               <Text style={styles.rejectionReasonText}>{rejectionReason}</Text>
             </View>
-            <GradientButton label="Reapply" onPress={handleReapply} />
+            <GradientButton label={t('reapply')} onPress={handleReapply} />
             <View style={styles.modalSpacer} />
-            <OutlineButton label="Contact Support" onPress={handleSupport} />
+            <OutlineButton label={t('contactSupport')} onPress={handleSupport} />
             <View style={{ height: 8 }} />
           </View>
         </View>
@@ -185,16 +234,13 @@ const styles = StyleSheet.create({
   hourglassCircle: {
     width: 150, height: 150, borderRadius: 75,
     overflow: 'hidden',
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.12, shadowRadius: 20, elevation: 4,
+    ...shadow(colors.careBlue, 0, 8, 20, 0.12, 4),
   },
   hourglassGradient: { width: 150, height: 150, alignItems: 'center', justifyContent: 'center' },
   checkBadge: {
     position: 'absolute', bottom: 6, right: 6,
     borderRadius: 18, overflow: 'hidden',
-    shadowColor: colors.tealGreen, shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.35, shadowRadius: 6, elevation: 3,
+    ...shadow(colors.tealGreen, 0, 2, 6, 0.35, 3),
   },
   checkBadgeGrad: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
 

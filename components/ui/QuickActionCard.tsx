@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text } from 'react-native'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 
 type Variant = 'outline' | 'teal' | 'blue'
 
@@ -55,11 +56,7 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 16,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 2,
+    ...shadow('#000', 0, 2, 6, 0.08, 2),
   },
   outlineCard: {
     backgroundColor: colors.mistWhite,

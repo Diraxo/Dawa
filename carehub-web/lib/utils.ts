@@ -39,3 +39,8 @@ export function getGreeting() {
 export function truncate(str: string, n: number) {
   return str.length > n ? str.slice(0, n - 1) + '…' : str
 }
+
+// Strips existing "Dr." prefix so the UI can safely add its own without doubling
+export function stripDrPrefix(name: string): string {
+  return name.replace(/^Dr\.?\s+/i, '').trim()
+}

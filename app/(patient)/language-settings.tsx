@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -12,66 +13,69 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { LANGUAGES } from '@/constants/languages'
+import { shadow } from '@/lib/shadow'
 import i18n, { LANGUAGE_STORAGE_KEY } from '@/lib/i18n'
+import { getAuthClient } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-export interface Language {
-  code: string
-  name: string
-  nativeName: string
-  flag: string
-  region: string
-}
-
-export const LANGUAGES: Language[] = [
-  { code: 'en', name: 'English', nativeName: 'English', flag: '🇺🇸', region: 'United States' },
-  { code: 'am', name: 'Amharic', nativeName: 'አማርኛ', flag: '🇪🇹', region: 'Ethiopia' },
-  { code: 'om', name: 'Afaan Oromoo', nativeName: 'Afaan Oromoo', flag: '🇪🇹', region: 'Ethiopia' },
-  { code: 'ti', name: 'Tigrinya', nativeName: 'ትግርኛ', flag: '🇪🇷', region: 'Eritrea / Ethiopia' },
-  { code: 'so', name: 'Somali', nativeName: 'Soomaali', flag: '🇸🇴', region: 'Somalia' },
-  { code: 'ar', name: 'Arabic', nativeName: 'العربية', flag: '🇸🇦', region: 'Middle East' },
-]
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function LanguageSettingsScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
+  const { getToken } = useAuth()
+  const { user } = useUser()
   const { setSelectedLanguage } = useAppStore()
   const [selected, setSelected] = useState(i18n.language ?? 'en')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     AsyncStorage.getItem(LANGUAGE_STORAGE_KEY).then((code) => {
-      if (code) setSelected(code)
+      if (code) {
+        setSelected(code)
+        i18n.changeLanguage(code)
+      }
     })
   }, [])
 
   const handleSelect = (code: string) => {
     setSelected(code)
+    i18n.changeLanguage(code)
   }
 
   const handleSave = async () => {
     setSaving(true)
     try {
       setSelectedLanguage(selected)
+      await i18n.changeLanguage(selected)
       await AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, selected)
-      Alert.alert('Language Updated', `App language set to ${LANGUAGES.find((l) => l.code === selected)?.name}.`, [
-        { text: 'OK', onPress: () => router.back() },
+      // Persist to DB so the web and other sessions reflect the preference
+      if (user?.id) {
+        const token = await getToken()
+        if (token) {
+          await getAuthClient(token)
+            .from('users')
+            .update({ language: selected })
+            .eq('clerk_id', user.id)
+        }
+      }
+      Alert.alert(t('languageUpdated'), t('languageUpdatedMsg', { langName: LANGUAGES.find((l) => l.id === selected)?.englishName }), [
+        { text: t('ok'), onPress: () => router.back() },
       ])
     } catch {
-      Alert.alert('Error', 'Failed to change language. Please try again.')
+      Alert.alert(t('profileSaveError'), t('languageErrorMsg'))
     } finally {
       setSaving(false)
     }
   }
 
-  const currentLang = LANGUAGES.find((l) => l.code === selected)
+  const currentLang = LANGUAGES.find((l) => l.id === selected)
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -84,7 +88,7 @@ export default function LanguageSettingsScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Language</Text>
+        <Text style={styles.headerTitle}>{t('language')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -104,24 +108,24 @@ export default function LanguageSettingsScreen() {
           <View>
             <Text style={styles.bannerTitle}>{currentLang?.nativeName}</Text>
             <Text style={styles.bannerSub}>
-              {currentLang?.name} · {currentLang?.region}
+              {currentLang?.englishName} · {currentLang?.region}
             </Text>
           </View>
         </LinearGradient>
 
-        <Text style={styles.sectionLabel}>Select Language</Text>
+        <Text style={styles.sectionLabel}>{t('selectLanguage')}</Text>
 
         <View style={styles.card}>
           {LANGUAGES.map((lang, idx) => {
-            const isSelected = lang.code === selected
+            const isSelected = lang.id === selected
             return (
-              <View key={lang.code}>
+              <View key={lang.id}>
                 <Pressable
                   style={({ pressed }) => [
                     styles.langRow,
                     pressed && { backgroundColor: '#F9FAFB' },
                   ]}
-                  onPress={() => handleSelect(lang.code)}
+                  onPress={() => handleSelect(lang.id)}
                 >
                   <Text style={styles.langFlag}>{lang.flag}</Text>
                   <View style={styles.langTextWrap}>
@@ -129,7 +133,7 @@ export default function LanguageSettingsScreen() {
                       {lang.nativeName}
                     </Text>
                     <Text style={styles.langSub}>
-                      {lang.name} · {lang.region}
+                      {lang.englishName} · {lang.region}
                     </Text>
                   </View>
                   {isSelected ? (
@@ -151,10 +155,7 @@ export default function LanguageSettingsScreen() {
           })}
         </View>
 
-        <Text style={styles.note}>
-          Language changes apply throughout the entire app. Some content may remain in English
-          while translations are being expanded.
-        </Text>
+        <Text style={styles.note}>{t('languageNote')}</Text>
 
         {/* Save button */}
         <Pressable
@@ -168,7 +169,7 @@ export default function LanguageSettingsScreen() {
             end={{ x: 1, y: 0 }}
             style={styles.saveGrad}
           >
-            <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save Language'}</Text>
+            <Text style={styles.saveText}>{saving ? t('saving') : t('saveLanguage')}</Text>
           </LinearGradient>
         </Pressable>
 
@@ -202,11 +203,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     marginBottom: 24,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 4,
+    ...shadow(colors.careBlue, 0, 3, 10, 0.2, 4),
   },
   bannerFlag: { fontSize: 40 },
   bannerTitle: { fontFamily: fonts.bold, fontSize: 22, color: colors.mistWhite, marginBottom: 2 },
@@ -226,11 +223,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 5, 0.05, 2),
   },
   langRow: {
     flexDirection: 'row',

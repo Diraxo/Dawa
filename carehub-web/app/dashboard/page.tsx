@@ -62,7 +62,7 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-cloud-grey">
       <div className="flex flex-col items-center gap-3">
-        <LogoMark size={56} />
+        <LogoMark size={56} variant="dark" />
         <p className="text-ink-black/50 text-sm font-medium font-montserrat">Loading your dashboard…</p>
       </div>
     </div>

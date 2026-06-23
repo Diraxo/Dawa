@@ -1,19 +1,25 @@
 import Image from 'next/image'
 
-// The CareHub logo (hands holding a teal heart) inside a white rounded square
-// so it reads on light, dark, and gradient backgrounds alike.
-export default function LogoMark({ size = 40, className = '' }: { size?: number; className?: string }) {
+interface LogoMarkProps {
+  size?: number
+  className?: string
+  /** 'light' = white logo for dark/gradient backgrounds (default). 'dark' = dark logo for white/light backgrounds. */
+  variant?: 'light' | 'dark'
+}
+
+export default function LogoMark({ size = 40, className = '', variant = 'light' }: LogoMarkProps) {
   return (
     <span
-      className={`inline-flex items-center justify-center bg-white border border-steel-grey/60 shadow-sm flex-shrink-0 ${className}`}
-      style={{ width: size, height: size, borderRadius: Math.round(size * 0.3) }}
+      className={`inline-flex items-center justify-center overflow-hidden flex-shrink-0 ${className}`}
+      style={{ width: size, height: size, borderRadius: Math.round(size * 0.22) }}
     >
       <Image
-        src="/logo.png"
-        alt="CareHub"
-        width={Math.round(size * 0.74)}
-        height={Math.round(size * 0.74)}
+        src={variant === 'dark' ? '/dark-logo.jpg' : '/white-logo.jpg'}
+        alt="Dawa"
+        width={size}
+        height={size}
         priority
+        style={{ borderRadius: Math.round(size * 0.22), objectFit: 'cover' }}
       />
     </span>
   )

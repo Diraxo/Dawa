@@ -10,8 +10,7 @@ import RoleGuard from '@/components/ui/RoleGuard'
 // (register / under-review) render full-page without the dashboard sidebar.
 export default function DoctorShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const onboarding =
-    pathname.startsWith('/doctor/register') || pathname.startsWith('/doctor/under-review')
+  const onboarding = pathname.startsWith('/doctor/register')
 
   return (
     <RoleGuard allow="doctor">

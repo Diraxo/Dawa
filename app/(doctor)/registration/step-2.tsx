@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Modal,
   Pressable,
@@ -12,25 +12,40 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
-
-const SPECIALTIES = [
-  'General Practice', 'Dermatology', 'Pediatrics', 'Cardiology',
-  'Mental Health', 'Gynecology', 'Orthopedics', 'Neurology',
-  'ENT', 'Ophthalmology', 'Dentistry', 'Other',
-]
 
 const MAX_BIO = 300
 
 export default function RegistrationStep2() {
   const router = useRouter()
   const store = useDoctorStore()
+  const { t } = useTranslation()
+  const [specialtiesList, setSpecialtiesList] = useState<string[]>([])
+
+  useEffect(() => {
+    const FALLBACK_SPECIALTIES = [
+      'Cardiology', 'Dermatology', 'Emergency Medicine', 'Endocrinology',
+      'Family Medicine', 'Gastroenterology', 'General Practice', 'Gynecology',
+      'Internal Medicine', 'Nephrology', 'Neurology', 'Obstetrics',
+      'Oncology', 'Ophthalmology', 'Orthopedics', 'Pediatrics',
+      'Psychiatry', 'Pulmonology', 'Radiology', 'Surgery', 'Urology',
+    ]
+    supabase
+      .from('specialties')
+      .select('name')
+      .order('name', { ascending: true })
+      .then(({ data }) => {
+        setSpecialtiesList(data?.length ? data.map(s => s.name) : FALLBACK_SPECIALTIES)
+      })
+  }, [])
 
   const [licenseNumber, setLicenseNumber] = useState(store.regLicenseNumber)
   const [specialty, setSpecialty] = useState(store.regSpecialty)
@@ -63,7 +78,7 @@ export default function RegistrationStep2() {
           <Text style={styles.stepLabel}>Step 2 of 4</Text>
         </View>
 
-        <Text style={styles.title}>Your Credentials</Text>
+        <Text style={styles.title}>{t('yourCredentials')}</Text>
 
         {/* Progress bar */}
         <View style={styles.progressTrack}>
@@ -71,7 +86,7 @@ export default function RegistrationStep2() {
         </View>
 
         {/* License Number */}
-        <Text style={styles.label}>Medical License Number</Text>
+        <Text style={styles.label}>{t('medicalLicenseNumber')}</Text>
         <TextInput
           style={styles.input}
           placeholder="e.g. MED-2024-XXXXX"
@@ -82,16 +97,16 @@ export default function RegistrationStep2() {
         />
 
         {/* Specialty */}
-        <Text style={styles.label}>Specialty</Text>
+        <Text style={styles.label}>{t('specialty')}</Text>
         <Pressable onPress={() => setShowSpecialtyPicker(true)} style={styles.pickerBtn}>
           <Text style={[styles.pickerText, !specialty && styles.pickerPlaceholder]}>
-            {specialty || 'Select specialty'}
+            {specialty || t('selectSpecialty')}
           </Text>
           <Ionicons name="chevron-down" size={18} color="#6B7280" />
         </Pressable>
 
         {/* Years of Experience */}
-        <Text style={styles.label}>Years of Experience</Text>
+        <Text style={styles.label}>{t('yearsOfExperience')}</Text>
         <View style={styles.stepperRow}>
           <Pressable
             onPress={() => setExperience((e) => Math.max(0, e - 1))}
@@ -112,7 +127,7 @@ export default function RegistrationStep2() {
         </View>
 
         {/* Hospital / Clinic */}
-        <Text style={styles.label}>Hospital / Clinic Name</Text>
+        <Text style={styles.label}>{t('hospitalClinicName')}</Text>
         <TextInput
           style={styles.input}
           placeholder="e.g. Tikur Anbessa Hospital"
@@ -122,7 +137,7 @@ export default function RegistrationStep2() {
         />
 
         {/* Short Bio */}
-        <Text style={styles.label}>Short Bio</Text>
+        <Text style={styles.label}>{t('shortBio')}</Text>
         <TextInput
           style={styles.bioInput}
           placeholder="Tell patients a little about yourself, your experience, and approach to care..."
@@ -154,9 +169,9 @@ export default function RegistrationStep2() {
           <Pressable style={styles.modalBackdrop} onPress={() => setShowSpecialtyPicker(false)} />
           <View style={styles.modalSheet}>
             <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>Select Specialty</Text>
+            <Text style={styles.modalTitle}>{t('selectSpecialty')}</Text>
             <ScrollView>
-              {SPECIALTIES.map((s) => (
+              {specialtiesList.map((s) => (
                 <Pressable
                   key={s}
                   onPress={() => { setSpecialty(s); setShowSpecialtyPicker(false) }}

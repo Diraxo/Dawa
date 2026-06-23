@@ -3,12 +3,14 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 
-const LAST_UPDATED = 'June 10, 2026'
+const LAST_UPDATED = 'June 21, 2026'
 
 interface PolicySection {
   title: string
@@ -18,7 +20,7 @@ interface PolicySection {
 const SECTIONS: PolicySection[] = [
   {
     title: '1. Information We Collect',
-    body: `We collect the following categories of personal information when you use CareHub:
+    body: `We collect the following categories of personal information when you use Dawa:
 
 • Account Information: Your name, email address, phone number, and profile photo.
 • Health Information: Medical history, consultation notes, diagnoses, and uploaded health documents — provided voluntarily by you or your consulting doctor.
@@ -67,28 +69,28 @@ We never sell your data to third parties.`,
 • Access: Request a copy of all personal data we hold about you.
 • Correction: Update incorrect or incomplete information via the "Edit Personal Info" screen.
 • Deletion: Permanently delete your account and all associated data via Profile → Delete Account.
-• Portability: Request your data in a machine-readable format by emailing privacy@carehub.app.
+• Portability: Request your data in a machine-readable format by emailing privacy@dawa.app.
 • Withdrawal of Consent: You can revoke consent for non-essential data processing at any time.
 
-To exercise these rights, contact us at privacy@carehub.app.`,
+To exercise these rights, contact us at privacy@dawa.app.`,
   },
   {
     title: '6. Age Requirements & Eligibility',
-    body: `CareHub enforces strict minimum age requirements for all account types to ensure a safe and responsible healthcare environment.
+    body: `Dawa enforces strict minimum age requirements for all account types to ensure a safe and responsible healthcare environment.
 
 Patients
-You must be at least 18 years old to register and use CareHub as a patient. By creating a patient account, you confirm that you are 18 years of age or older. Your date of birth is collected during profile setup and is used solely to verify this requirement.
+You must be at least 18 years old to register and use Dawa as a patient. By creating a patient account, you confirm that you are 18 years of age or older. Your date of birth is collected during profile setup and is used solely to verify this requirement.
 
 Healthcare Professionals (Doctors)
-All healthcare professionals registering on CareHub must be at least 24 years old. This minimum reflects the age at which a person can realistically hold a recognised medical degree and be licensed to practice. Age is verified as part of the doctor application and document review process carried out by our admin team.
+All healthcare professionals registering on Dawa must be at least 24 years old. This minimum reflects the age at which a person can realistically hold a recognised medical degree and be licensed to practice. Age is verified as part of the doctor application and document review process carried out by our admin team.
 
 No Service to Minors
-CareHub is not directed at, and does not knowingly collect personal information from, any person under the age of 18. If we discover that a user under 18 has created an account, we will immediately suspend the account and permanently delete all associated data.
+Dawa is not directed at, and does not knowingly collect personal information from, any person under the age of 18. If we discover that a user under 18 has created an account, we will immediately suspend the account and permanently delete all associated data.
 
 False Age Information
 Providing a false date of birth to circumvent these requirements is a violation of our Terms of Service and may result in immediate account termination and deletion of all data.
 
-If you believe a minor has registered on CareHub, please contact us immediately at privacy@carehub.app and we will investigate and act promptly.`,
+If you believe a minor has registered on Dawa, please contact us immediately at privacy@dawa.app and we will investigate and act promptly.`,
   },
   {
     title: '7. Third-Party Links',
@@ -100,21 +102,22 @@ If you believe a minor has registered on CareHub, please contact us immediately 
   },
   {
     title: '9. Changes to This Policy',
-    body: `We may update this Privacy Policy periodically. When we make significant changes, we will notify you via push notification or email. Your continued use of CareHub after changes take effect constitutes acceptance of the updated policy.`,
+    body: `We may update this Privacy Policy periodically. When we make significant changes, we will notify you via push notification or email. Your continued use of Dawa after changes take effect constitutes acceptance of the updated policy.`,
   },
   {
     title: '10. Contact Us',
     body: `If you have questions, concerns, or requests about this Privacy Policy, please contact:
 
-CareHub Privacy Team
-Email: privacy@carehub.app
-Support: support@carehub.app
+Dawa Privacy Team
+Email: privacy@dawa.app
+Support: support@dawa.app
 Address: Addis Ababa, Ethiopia`,
   },
 ]
 
 export default function PrivacyPolicyScreen() {
   const router = useRouter()
+  const { t } = useTranslation()
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -126,7 +129,7 @@ export default function PrivacyPolicyScreen() {
         >
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.headerTitle}>Privacy Policy</Text>
+        <Text style={styles.headerTitle}>{t('privacyPolicy')}</Text>
         <View style={{ width: 36 }} />
       </View>
 
@@ -150,7 +153,7 @@ export default function PrivacyPolicyScreen() {
         </LinearGradient>
 
         <Text style={styles.intro}>
-          CareHub (&quot;we&quot;, &quot;us&quot;, &quot;our&quot;) is committed to protecting your privacy and ensuring
+          Dawa (&quot;we&quot;, &quot;us&quot;, &quot;our&quot;) is committed to protecting your privacy and ensuring
           the security of your personal and health information. This Privacy Policy explains
           how we collect, use, and safeguard your data when you use our mobile application
           and related services.
@@ -198,11 +201,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     marginBottom: 20,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 4,
+    ...shadow(colors.careBlue, 0, 3, 10, 0.2, 4),
   },
   heroTitle: { fontFamily: fonts.bold, fontSize: 18, color: colors.mistWhite, marginBottom: 2 },
   heroSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.8)' },
@@ -216,11 +215,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderRadius: 14,
     padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
 
   section: {
@@ -228,11 +223,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   sectionTitle: {
     fontFamily: fonts.bold,

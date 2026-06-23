@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   FlatList,
@@ -18,6 +18,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import i18n from '@/lib/i18n'
+import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 
@@ -109,17 +111,34 @@ export default function LanguageScreen() {
 
   // English is the default — buttons start enabled
   const [selectedId, setSelectedId] = useState<string>('en')
+  const [enabledLangCodes, setEnabledLangCodes] = useState<string[] | null>(null)
+
+  useEffect(() => {
+    supabase
+      .from('platform_settings')
+      .select('value')
+      .eq('key', 'languages')
+      .maybeSingle()
+      .then(({ data }) => {
+        if (Array.isArray(data?.value)) setEnabledLangCodes(data.value as string[])
+      })
+  }, [])
+
+  const visibleLanguages = enabledLangCodes
+    ? LANGUAGES.filter((l) => enabledLangCodes.includes(l.id))
+    : LANGUAGES
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleSelect = (id: string) => {
     setSelectedId(id)
+    i18n.changeLanguage(id)
   }
 
-  const handleNav = (route: '/(auth)/sign-in' | '/(auth)/sign-up') => {
-    persistLanguage(selectedId)        // updates Zustand + calls i18n.changeLanguage
-    saveLanguageToSupabase(selectedId) // fire-and-forget; silently skips if no session
-    router.push(route as never)
+  const handleContinue = () => {
+    persistLanguage(selectedId)
+    saveLanguageToSupabase(selectedId)
+    router.push('/(auth)/sign-up' as never)
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -128,7 +147,7 @@ export default function LanguageScreen() {
     <LanguageItem
       item={item}
       selected={selectedId === item.id}
-      isLast={index === LANGUAGES.length - 1}
+      isLast={index === visibleLanguages.length - 1}
       onPress={() => handleSelect(item.id)}
     />
   )
@@ -147,8 +166,8 @@ export default function LanguageScreen() {
         style={[styles.header, { paddingTop: top + 10 }]}
       >
         <View style={styles.headerContent}>
-          <CareHubLogo size={64} />
-          <Text style={styles.brandName}>CAREHUB</Text>
+          <CareHubLogo size={64} variant="dark" />
+          <Text style={styles.brandName}>DAWA</Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>
         {/* White arc that carves into the gradient */}
@@ -164,7 +183,7 @@ export default function LanguageScreen() {
       {/* ── LANGUAGE LIST (card container, scrollable FlatList) ── */}
       <View style={styles.listCard}>
         <FlatList
-          data={LANGUAGES}
+          data={visibleLanguages}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           showsVerticalScrollIndicator={false}
@@ -173,32 +192,20 @@ export default function LanguageScreen() {
         />
       </View>
 
-      {/* ── FOOTER: Login + Sign Up buttons ── */}
+      {/* ── FOOTER: Continue button ── */}
       <View style={[styles.footer, { paddingBottom: Math.max(bottom, 20) }]}>
-        {/* Login — outline */}
         <Pressable
-          onPress={() => isActive && handleNav('/(auth)/sign-in')}
-          pointerEvents={isActive ? 'auto' : 'none'}
-          style={[styles.loginWrapper, !isActive && styles.disabledOpacity]}
-        >
-          <View style={styles.loginButton}>
-            <Text style={styles.loginText}>{t('login')}</Text>
-          </View>
-        </Pressable>
-
-        {/* Sign Up — gradient */}
-        <Pressable
-          onPress={() => isActive && handleNav('/(auth)/sign-up')}
-          pointerEvents={isActive ? 'auto' : 'none'}
-          style={[styles.signUpWrapper, !isActive && styles.disabledOpacity]}
+          onPress={handleContinue}
+          disabled={!isActive}
+          style={[styles.continueWrapper, !isActive && styles.disabledOpacity]}
         >
           <LinearGradient
             colors={['#2962FF', '#00BFA5']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.signUpButton}
+            style={styles.continueButton}
           >
-            <Text style={styles.signUpText}>{t('signUp')}</Text>
+            <Text style={styles.continueText}>{t('continue')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -272,14 +279,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderRadius: 20,
     overflow: 'hidden',
-    // Android shadow
-    elevation: 3,
-    // iOS shadow
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    // Needed so elevation shadow renders correctly on Android
+    ...shadow('#000', 0, 2, 10, 0.08, 3),
     marginBottom: 4,
   },
   listContent: {
@@ -346,8 +346,6 @@ const styles = StyleSheet.create({
 
   // ── Footer ──
   footer: {
-    flexDirection: 'row',
-    gap: 12,
     paddingHorizontal: 20,
     paddingTop: 16,
     backgroundColor: '#FFFFFF',
@@ -355,41 +353,17 @@ const styles = StyleSheet.create({
   disabledOpacity: {
     opacity: 0.5,
   },
-
-  // Login (outline)
-  loginWrapper: {
-    flex: 1,
+  continueWrapper: {
     borderRadius: 16,
     overflow: 'hidden',
   },
-  loginButton: {
-    height: 52,
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: colors.steelGrey,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loginText: {
-    fontFamily: fonts.semiBold,
-    fontSize: 16,
-    color: colors.inkBlack,
-  },
-
-  // Sign Up (gradient)
-  signUpWrapper: {
-    flex: 1,
-    borderRadius: 16,
-    overflow: 'hidden',
-  },
-  signUpButton: {
+  continueButton: {
     height: 52,
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  signUpText: {
+  continueText: {
     fontFamily: fonts.bold,
     fontSize: 16,
     color: '#FFFFFF',

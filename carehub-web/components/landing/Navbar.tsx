@@ -36,9 +36,9 @@ export default function Navbar() {
       <div className="container-site flex items-center justify-between h-[72px]">
         {/* Logo */}
         <Link href={isSignedIn ? '/dashboard' : '/'} className="flex items-center gap-2.5 group">
-          <LogoMark size={36} />
+          <LogoMark size={36} variant={scrolled ? 'dark' : 'light'} />
           <span className={`font-montserrat font-bold text-xl transition-colors ${scrolled ? 'text-ink-black' : 'text-white'}`}>
-            CARE<span className="text-teal-green">HUB</span>
+            DA<span className="text-teal-green">WA</span>
           </span>
         </Link>
 

@@ -10,12 +10,31 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useTranslation } from 'react-i18next'
 import type { Channel } from 'stream-chat'
-import { Chat, Channel as ChannelView, MessageComposer, MessageList } from 'stream-chat-expo'
+
+// stream-chat-expo uses a native TurboModule (StreamVideoThumbnail) that is not
+// registered in Expo Go — require it lazily so the route doesn't crash on load.
+let Chat: any = null
+let ChannelView: any = null
+let MessageComposer: any = null
+let MessageList: any = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const sc = require('stream-chat-expo')
+  Chat = sc.Chat
+  ChannelView = sc.Channel
+  MessageComposer = sc.MessageComposer
+  MessageList = sc.MessageList
+} catch {}
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { useAuth } from '@clerk/clerk-expo'
+import { logger } from '@/lib/logger'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +78,8 @@ export default function ChatConsultationScreen() {
   }>()
 
   const router = useRouter()
+  const { t } = useTranslation()
+  const { getToken } = useAuth()
 
   const initialState: ConsultationState = (() => {
     if (consultationStatus === 'completed') return 'completed'
@@ -88,13 +109,42 @@ export default function ChatConsultationScreen() {
     return () => clearInterval(interval)
   }, [consultationState, scheduledAt])
 
-  // ── Waiting → active (production: Supabase realtime on consultations.status) ─
+  // ── Waiting → active via Supabase Realtime ────────────────────────────────
 
   useEffect(() => {
-    if (consultationState !== 'waiting') return
-    const timeout = setTimeout(() => setConsultationState('active'), 3000)
-    return () => clearTimeout(timeout)
-  }, [consultationState])
+    if (consultationState !== 'waiting' || !channelId) return
+    const sub = supabase
+      .channel(`patient-chat-status-${channelId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${channelId}` },
+        (payload) => {
+          const status = (payload.new as { status: string }).status
+          if (status === 'accepted' || status === 'in_progress' || status === 'active') {
+            setConsultationState('active')
+          } else if (status === 'completed' || status === 'declined' || status === 'cancelled') {
+            setConsultationState('completed')
+          }
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(sub) }
+  }, [consultationState, channelId])
+
+  // ── Mark consultation in_progress when patient enters active chat ─────────
+
+  useEffect(() => {
+    if (consultationState !== 'active' || !channelId) return
+    getToken().then(token => {
+      if (!token) return
+      getAuthClient(token)
+        .from('consultations')
+        .update({ status: 'in_progress' })
+        .eq('id', channelId)
+        .in('status', ['accepted', 'active'])
+        .then(() => {})
+    })
+  }, [consultationState, channelId])
 
   // ── Watch Stream channel once active or completed ──────────────────────────
 
@@ -110,14 +160,14 @@ export default function ChatConsultationScreen() {
       .then(() => {
         if (mounted) setActiveChannel(ch)
       })
-      .catch((err) => console.error('[Chat] channel watch failed:', err))
+      .catch((err) => logger.error('[Chat] channel watch failed:', err))
       .finally(() => {
         if (mounted) setChannelLoading(false)
       })
 
     return () => {
       mounted = false
-      ch.stopWatching()
+      ch.stopWatching().catch(() => {})
       setActiveChannel(null)
     }
   }, [channelId, consultationState])
@@ -126,28 +176,34 @@ export default function ChatConsultationScreen() {
 
   const handleBack = () => {
     if (consultationState === 'active') {
-      Alert.alert('Leave Consultation?', 'You can rejoin from the Appointments tab.', [
-        { text: 'Stay', style: 'cancel' },
-        { text: 'Leave', style: 'destructive', onPress: () => router.back() },
+      // Leave the chat but keep the consultation active.
+      // The conversation stays in the Messages tab — the patient can return to it anytime.
+      Alert.alert(t('leaveConsultation'), t('leaveConsultationMsg'), [
+        { text: t('stay'), style: 'cancel' },
+        {
+          text: t('leave'),
+          style: 'destructive',
+          onPress: () => router.replace('/(patient)/(tabs)/messages' as never),
+        },
       ])
     } else {
-      router.back()
+      router.canGoBack() ? router.back() : router.replace('/(patient)/(tabs)/messages' as never)
     }
   }
 
-  const handleEndConsultation = () => {
-    Alert.alert('End Consultation', 'Are you sure you want to end this consultation?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'End',
-        style: 'destructive',
-        onPress: () =>
-          router.replace({
-            pathname: '/(patient)/consultation-summary',
-            params: { doctorId, doctorName, consultationType: 'chat' },
-          }),
-      },
-    ])
+  const handleLeaveConsultation = () => {
+    Alert.alert(
+      t('leaveConsultation'),
+      'You can return to this consultation from the Messages tab at any time. The doctor will continue the session.',
+      [
+        { text: t('stay'), style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: () => router.replace('/(patient)/(tabs)/messages' as never),
+        },
+      ],
+    )
   }
 
   // ── Countdown screen ───────────────────────────────────────────────────────
@@ -163,7 +219,7 @@ export default function ChatConsultationScreen() {
             <Text style={styles.headerDoctorName} numberOfLines={1}>
               {doctorName ?? 'Doctor'}
             </Text>
-            <Text style={styles.headerSub}>Upcoming Appointment</Text>
+            <Text style={styles.headerSub}>{t('upcomingAppointment')}</Text>
           </View>
           <View style={styles.headerPlaceholder} />
         </View>
@@ -172,14 +228,12 @@ export default function ChatConsultationScreen() {
           <View style={styles.lockIconCircle}>
             <Ionicons name="time-outline" size={54} color={colors.careBlue} />
           </View>
-          <Text style={styles.lockTitle}>Consultation Hasn&apos;t Started</Text>
-          <Text style={styles.lockSub}>Your appointment begins in</Text>
+          <Text style={styles.lockTitle}>{t('consultationHasntStarted')}</Text>
+          <Text style={styles.lockSub}>{t('appointmentBeginsIn')}</Text>
           <View style={styles.countdownBox}>
             <Text style={styles.countdownText}>{formatCountdown(remaining)}</Text>
           </View>
-          <Text style={styles.lockNote}>
-            The chat will unlock only once the doctor{'\n'}starts the session at the scheduled time.
-          </Text>
+          <Text style={styles.lockNote}>{t('chatUnlockNote')}</Text>
         </View>
       </SafeAreaView>
     )
@@ -199,7 +253,7 @@ export default function ChatConsultationScreen() {
               {doctorName ?? 'Doctor'}
             </Text>
             <Text style={[styles.headerSub, { color: colors.tealGreen }]}>
-              It&apos;s time · Waiting for doctor
+              {t('itsTimeWaitingForDoctor')}
             </Text>
           </View>
           <View style={styles.headerPlaceholder} />
@@ -209,18 +263,14 @@ export default function ChatConsultationScreen() {
           <View style={[styles.lockIconCircle, styles.lockIconCircleTeal]}>
             <Ionicons name="hourglass-outline" size={54} color={colors.tealGreen} />
           </View>
-          <Text style={styles.lockTitle}>Waiting for Doctor</Text>
-          <Text style={styles.lockSub}>
-            It&apos;s time for your appointment.{'\n'}The doctor will begin your session shortly.
-          </Text>
+          <Text style={styles.lockTitle}>{t('waitingForDoctor')}</Text>
+          <Text style={styles.lockSub}>{t('waitingForDoctorDesc')}</Text>
           <View style={styles.dotsRow}>
             <View style={[styles.dot, styles.dot1]} />
             <View style={[styles.dot, styles.dot2]} />
             <View style={[styles.dot, styles.dot3]} />
           </View>
-          <Text style={styles.lockNote}>
-            The chat will open automatically{'\n'}once the doctor starts the session.
-          </Text>
+          <Text style={styles.lockNote}>{t('chatOpenAutoNote')}</Text>
         </View>
       </SafeAreaView>
     )
@@ -257,7 +307,7 @@ export default function ChatConsultationScreen() {
                   { color: isCompleted ? '#9CA3AF' : colors.success },
                 ]}
               >
-                {isCompleted ? 'Consultation ended' : 'Online'}
+                {isCompleted ? t('consultationEnded') : t('online')}
               </Text>
             </View>
           </View>
@@ -265,10 +315,10 @@ export default function ChatConsultationScreen() {
 
         {!isCompleted ? (
           <Pressable
-            onPress={handleEndConsultation}
+            onPress={handleLeaveConsultation}
             style={({ pressed }) => [styles.endBtn, pressed && { opacity: 0.8 }]}
           >
-            <Text style={styles.endBtnText}>End</Text>
+            <Text style={styles.endBtnText}>Leave</Text>
           </Pressable>
         ) : (
           <View style={styles.headerPlaceholder} />
@@ -279,20 +329,22 @@ export default function ChatConsultationScreen() {
       {isCompleted && (
         <View style={styles.endedBanner}>
           <Ionicons name="lock-closed-outline" size={13} color="#6B7280" />
-          <Text style={styles.endedBannerText}>
-            Consultation ended · This conversation is read-only
-          </Text>
+          <Text style={styles.endedBannerText}>{t('consultationEndedBanner')}</Text>
         </View>
       )}
 
       {/* ── Stream Chat area ── */}
-      {!channelId ? (
+      {!Chat ? (
         <View style={styles.loadingWrap}>
           <Ionicons name="chatbubble-ellipses-outline" size={52} color={colors.steelGrey} />
-          <Text style={styles.noChannelTitle}>Chat Not Connected</Text>
-          <Text style={styles.noChannelSub}>
-            The channel will be available once the doctor starts the session.
-          </Text>
+          <Text style={styles.noChannelTitle}>{t('chatNotConnected')}</Text>
+          <Text style={styles.noChannelSub}>{t('chatRequiresBuild')}</Text>
+        </View>
+      ) : !channelId ? (
+        <View style={styles.loadingWrap}>
+          <Ionicons name="chatbubble-ellipses-outline" size={52} color={colors.steelGrey} />
+          <Text style={styles.noChannelTitle}>{t('chatNotConnected')}</Text>
+          <Text style={styles.noChannelSub}>{t('channelAvailableWhenDoctorStarts')}</Text>
         </View>
       ) : channelLoading || !activeChannel ? (
         <View style={styles.loadingWrap}>
@@ -326,11 +378,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderBottomWidth: 1,
     borderBottomColor: colors.cloudGrey,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
+    ...shadow('#000', 0, 1, 4, 0.06, 2),
   },
   backBtn: {
     width: 36,
@@ -463,11 +511,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: 32,
     paddingVertical: 18,
-    shadowColor: colors.careBlue,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    elevation: 3,
+    ...shadow(colors.careBlue, 0, 4, 12, 0.12, 3),
     marginVertical: 4,
   },
   countdownText: {

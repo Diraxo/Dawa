@@ -2,7 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 
-export type Gender = 'Male' | 'Female' | 'Other'
+export type Gender = 'Male' | 'Female'
+export type DoctorStatus = 'pending' | 'approved' | 'rejected' | 'suspended' | null
 
 export interface IncomingRequest {
   id: string
@@ -11,16 +12,20 @@ export interface IncomingRequest {
   consultationType: 'chat' | 'phone' | 'video'
   price: number
   currency: string
+  patientId: string
+  patientClerkId: string
+  waitingStartedAt?: string
 }
 
 interface DoctorState {
   isOnline: boolean
+  doctorStatus: DoctorStatus
   incomingRequest: IncomingRequest | null
 
   // Registration — Step 1: Personal Info
   regFullName: string
   regPhone: string
-  regDateOfBirth: string
+  regDateOfBirth: string   // ISO date string "YYYY-MM-DD"
   regGender: Gender | null
   regProfilePhotoUri: string | null
 
@@ -32,10 +37,13 @@ interface DoctorState {
   regBio: string
 
   // Registration — Step 3: Documents
-  regLicenseDocUri: string | null
-  regLicenseDocName: string | null
-  regNationalIdUri: string | null
-  regNationalIdName: string | null
+  regLicenseDocUris: string[]   // multiple documents allowed
+  regLicenseDocNames: string[]
+  regIdDocType: 'national_id' | 'passport' | null
+  regNationalIdFrontUri: string | null  // also used for passport photo
+  regNationalIdFrontName: string | null
+  regNationalIdBackUri: string | null   // only used for national_id type
+  regNationalIdBackName: string | null
 
   // Registration — Step 4: Pricing
   regChatPrice: string
@@ -43,6 +51,7 @@ interface DoctorState {
   regVideoPrice: string
 
   setIsOnline: (online: boolean) => void
+  setDoctorStatus: (status: DoctorStatus) => void
   setIncomingRequest: (req: IncomingRequest | null) => void
   updateReg: (data: Partial<Omit<DoctorState,
     'setIsOnline' | 'setIncomingRequest' | 'updateReg' | 'clearReg' | 'incomingRequest'
@@ -54,6 +63,7 @@ export const useDoctorStore = create<DoctorState>()(
   persist(
     (set) => ({
       isOnline: false,
+      doctorStatus: null,
       incomingRequest: null,
 
       regFullName: '',
@@ -68,16 +78,20 @@ export const useDoctorStore = create<DoctorState>()(
       regHospitalName: '',
       regBio: '',
 
-      regLicenseDocUri: null,
-      regLicenseDocName: null,
-      regNationalIdUri: null,
-      regNationalIdName: null,
+      regLicenseDocUris: [],
+      regLicenseDocNames: [],
+      regIdDocType: null,
+      regNationalIdFrontUri: null,
+      regNationalIdFrontName: null,
+      regNationalIdBackUri: null,
+      regNationalIdBackName: null,
 
       regChatPrice: '',
       regPhonePrice: '',
       regVideoPrice: '',
 
       setIsOnline: (online) => set({ isOnline: online }),
+      setDoctorStatus: (status) => set({ doctorStatus: status }),
       setIncomingRequest: (req) => set({ incomingRequest: req }),
       updateReg: (data) => set(data as Partial<DoctorState>),
 
@@ -93,10 +107,13 @@ export const useDoctorStore = create<DoctorState>()(
           regYearsOfExperience: 1,
           regHospitalName: '',
           regBio: '',
-          regLicenseDocUri: null,
-          regLicenseDocName: null,
-          regNationalIdUri: null,
-          regNationalIdName: null,
+          regLicenseDocUris: [],
+          regLicenseDocNames: [],
+          regIdDocType: null,
+          regNationalIdFrontUri: null,
+          regNationalIdFrontName: null,
+          regNationalIdBackUri: null,
+          regNationalIdBackName: null,
           regChatPrice: '',
           regPhonePrice: '',
           regVideoPrice: '',
@@ -107,20 +124,22 @@ export const useDoctorStore = create<DoctorState>()(
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (s) => ({
         isOnline: s.isOnline,
+        doctorStatus: s.doctorStatus,
         regFullName: s.regFullName,
         regPhone: s.regPhone,
         regDateOfBirth: s.regDateOfBirth,
         regGender: s.regGender,
-        regProfilePhotoUri: s.regProfilePhotoUri,
+        // Don't persist file URIs — they may be base64 data URLs (large) or
+        // file:// paths that become invalid after the picker session ends
         regLicenseNumber: s.regLicenseNumber,
         regSpecialty: s.regSpecialty,
         regYearsOfExperience: s.regYearsOfExperience,
         regHospitalName: s.regHospitalName,
         regBio: s.regBio,
-        regLicenseDocUri: s.regLicenseDocUri,
-        regLicenseDocName: s.regLicenseDocName,
-        regNationalIdUri: s.regNationalIdUri,
-        regNationalIdName: s.regNationalIdName,
+        regLicenseDocNames: s.regLicenseDocNames,
+        regIdDocType: s.regIdDocType,
+        regNationalIdFrontName: s.regNationalIdFrontName,
+        regNationalIdBackName: s.regNationalIdBackName,
         regChatPrice: s.regChatPrice,
         regPhonePrice: s.regPhonePrice,
         regVideoPrice: s.regVideoPrice,

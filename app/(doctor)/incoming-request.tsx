@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
-  Animated,
   Pressable,
   StyleSheet,
   Text,
@@ -15,106 +15,159 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-
-const TYPE_META: Record<string, { icon: string; label: string; color: string; bg: string }> = {
-  chat:  { icon: 'chatbubble-ellipses', label: 'Chat Consultation',  color: colors.tealGreen,    bg: 'rgba(0,191,165,0.15)' },
-  phone: { icon: 'call',                label: 'Phone Consultation', color: colors.careBlue,     bg: 'rgba(26,69,152,0.15)' },
-  video: { icon: 'videocam',            label: 'Video Consultation', color: '#7C3AED',            bg: 'rgba(124,58,237,0.15)' },
-}
-
-const TOTAL_SECONDS = 30
+import { shadow } from '@/lib/shadow'
+import { createConsultationChannel } from '@/lib/stream'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { useAuthStore } from '@/store/authStore'
+import { logger } from '@/lib/logger'
+import { useTranslation } from 'react-i18next'
 
 export default function IncomingRequestScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
+  const { getToken } = useAuth()
+  const { user } = useUser()
+  const { userId } = useAuthStore()
+
   const {
     patientName,
     patientId,
+    patientClerkId,
     consultationType,
     consultationId,
   } = useLocalSearchParams<{
-    patientName: string
-    patientId?: string
-    consultationType: string
-    consultationId?: string
+    patientName:       string
+    patientId?:        string
+    patientClerkId?:   string
+    consultationType:  string
+    consultationId?:   string
+    waitingStartedAt?: string // kept for backwards compat, no longer used
   }>()
 
+  const TYPE_META: Record<string, { icon: string; label: string; color: string; bg: string }> = {
+    chat:  { icon: 'chatbubble-ellipses', label: t('chatConsultation'),  color: colors.tealGreen, bg: 'rgba(0,191,165,0.15)' },
+    phone: { icon: 'call',                label: t('phoneConsultation'), color: colors.careBlue,  bg: 'rgba(26,69,152,0.15)' },
+    video: { icon: 'videocam',            label: t('videoConsultation'), color: '#7C3AED',         bg: 'rgba(124,58,237,0.15)' },
+  }
+
   const meta = TYPE_META[consultationType ?? 'chat'] ?? TYPE_META.chat
-  const [secondsLeft, setSecondsLeft] = useState(TOTAL_SECONDS)
   const [responded, setResponded] = useState(false)
+  const navigatedRef = useRef(false)
 
-  // Countdown
+  // ── Realtime: dismiss if patient cancels before doctor responds ──────────
   useEffect(() => {
-    if (responded) return
-    const interval = setInterval(() => {
-      setSecondsLeft(s => {
-        if (s <= 1) {
-          clearInterval(interval)
-          handleAutoDecline()
-          return 0
-        }
-        return s - 1
-      })
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [responded])
+    if (!consultationId) return
+    const channel = supabase
+      .channel(`incoming-request-${consultationId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },
+        (payload) => {
+          const status: string = (payload.new as any)?.status ?? ''
+          if (responded || navigatedRef.current) return
+          if (status === 'cancelled') {
+            navigatedRef.current = true
+            setResponded(true)
+            Alert.alert(
+              t('requestCancelled'),
+              t('patientCancelledRequest'),
+              [{ text: t('ok'), onPress: () => router.canGoBack() ? router.back() : router.replace('/(doctor)/(tabs)/home' as never) }],
+            )
+          }
+        },
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [consultationId, responded])
 
-  // Circular progress arc (SVG-free: use a rotating conic fill via Animated)
-  const progress = useRef(new Animated.Value(1)).current
-  useEffect(() => {
-    Animated.timing(progress, {
-      toValue: 0,
-      duration: TOTAL_SECONDS * 1000,
-      useNativeDriver: false,
-    }).start()
-  }, [])
-
-  // Pulse on the avatar
-  const pulse = useRef(new Animated.Value(1)).current
-  useEffect(() => {
-    const anim = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1.08, duration: 700, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 1,    duration: 700, useNativeDriver: true }),
-      ])
-    )
-    anim.start()
-    return () => anim.stop()
-  }, [])
-
-  const handleAutoDecline = () => {
-    if (responded) return
-    setResponded(true)
-    Alert.alert(
-      'Request Expired',
-      'You did not respond in time. The request has been automatically declined.',
-      [{ text: 'OK', onPress: () => router.back() }]
-    )
+  const updateStatus = async (id: string, status: 'accepted' | 'declined') => {
+    try {
+      const token = await getToken()
+      if (!token || !id) return
+      const update: Record<string, unknown> = { status }
+      if (status === 'accepted') update.started_at = new Date().toISOString()
+      await getAuthClient(token).from('consultations').update(update).eq('id', id)
+    } catch {
+      // best effort
+    }
   }
 
   const handleDecline = () => {
     Alert.alert(
-      'Decline Request',
-      `Are you sure you want to decline ${patientName ?? 'this patient'}'s request?`,
+      t('declineRequest'),
+      `${t('areYouSureDecline')} ${patientName ?? 'this patient'}'s request?`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('cancel'), style: 'cancel' },
         {
-          text: 'Decline',
+          text: t('decline'),
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
+            if (navigatedRef.current) return
+            navigatedRef.current = true
             setResponded(true)
-            router.back()
+            if (consultationId) await updateStatus(consultationId, 'declined')
+            router.canGoBack()
+              ? router.back()
+              : router.replace('/(doctor)/(tabs)/home' as never)
           },
         },
-      ]
+      ],
     )
   }
 
-  const handleAccept = () => {
+  const handleAccept = async () => {
+    if (!consultationId) {
+      Alert.alert('Error', 'No consultation ID found. Please try again.')
+      return
+    }
+    if (navigatedRef.current) return
+
+    // Verify payment before accepting
+    try {
+      const token = await getToken()
+      if (!token) {
+        Alert.alert('Error', 'Authentication error. Please try again.')
+        return
+      }
+      const { data: chk } = await getAuthClient(token)
+        .from('consultations')
+        .select('payment_status')
+        .eq('id', consultationId)
+        .single()
+      if (chk?.payment_status !== 'paid') {
+        Alert.alert('Payment Pending', 'Payment has not been confirmed yet. Please wait a moment.')
+        return
+      }
+    } catch {
+      // proceed if check fails
+    }
+
+    navigatedRef.current = true
     setResponded(true)
+    await updateStatus(consultationId, 'accepted')
+
+    // Create the Stream channel so chat is available after acceptance.
+    // Stream user IDs are Clerk IDs — never fall back to Supabase UUIDs.
+    try {
+      const doctorUserId = userId ?? user?.id ?? ''
+      if (!patientClerkId) {
+        logger.error('[Stream] patientClerkId missing — channel not created for consultation:', consultationId)
+      } else if (doctorUserId) {
+        await createConsultationChannel(consultationId, patientClerkId, doctorUserId, {
+          doctorName:     user?.fullName ?? user?.firstName ?? 'Doctor',
+          doctorSubtitle: '',
+          doctorPhotoUrl: user?.imageUrl ?? null,
+        })
+      }
+    } catch {
+      // channel might already exist
+    }
+
     const params = {
-      patientName: patientName ?? 'Patient',
-      patientId: patientId ?? '',
-      consultationId: consultationId ?? `consult-${patientId ?? 'demo'}`,
+      patientName:    patientName ?? 'Patient',
+      patientId:      patientId ?? '',
+      consultationId,
+      channelId:      consultationId,
     }
     const route =
       consultationType === 'phone'
@@ -126,8 +179,6 @@ export default function IncomingRequestScreen() {
     router.replace({ pathname: route as any, params })
   }
 
-  const timerColor = secondsLeft <= 10 ? colors.error : secondsLeft <= 20 ? colors.warning : colors.tealGreen
-
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       {/* Top badge */}
@@ -138,48 +189,62 @@ export default function IncomingRequestScreen() {
         </View>
       </View>
 
-      {/* Center */}
+      {/* Center content */}
       <View style={styles.center}>
-        {/* Incoming label */}
-        <Text style={styles.incomingLabel}>Incoming Request</Text>
+        <Text style={styles.incomingLabel}>{t('incomingRequest')}</Text>
 
-        {/* Avatar with pulse */}
-        <Animated.View style={[styles.avatarWrap, { transform: [{ scale: pulse }] }]}>
-          <View style={styles.avatarCircle}>
-            <Ionicons name="person" size={56} color="rgba(255,255,255,0.5)" />
-          </View>
-        </Animated.View>
+        <View style={styles.avatarCircle}>
+          <Ionicons name="person" size={56} color="rgba(255,255,255,0.5)" />
+        </View>
 
         <Text style={styles.patientName}>{patientName ?? 'Patient'}</Text>
-        <Text style={styles.patientSub}>wants to start a {meta.label.toLowerCase()}</Text>
+        <Text style={styles.patientSub}>
+          {t('wantsToStartA')} {meta.label.toLowerCase()}
+        </Text>
 
-        {/* Timer ring */}
-        <View style={styles.timerContainer}>
-          <View style={styles.timerRingTrack}>
-            <Text style={[styles.timerNumber, { color: timerColor }]}>
-              {String(secondsLeft).padStart(2, '0')}
-            </Text>
-            <Text style={styles.timerSec}>sec</Text>
+        {/* Payment confirmed badge */}
+        <View style={styles.paymentBadge}>
+          <Ionicons name="checkmark-circle" size={16} color={colors.success} />
+          <Text style={styles.paymentBadgeText}>Payment Confirmed</Text>
+        </View>
+
+        {/* Consultation info */}
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="person-outline" size={15} color="rgba(255,255,255,0.5)" />
+            <Text style={styles.infoLabel}>Patient</Text>
+            <Text style={styles.infoValue}>{patientName ?? 'Patient'}</Text>
           </View>
-          <Text style={styles.timerHint}>Auto-declines when timer expires</Text>
+          <View style={styles.infoDivider} />
+          <View style={styles.infoRow}>
+            <Ionicons name={meta.icon as any} size={15} color={meta.color} />
+            <Text style={styles.infoLabel}>Type</Text>
+            <Text style={[styles.infoValue, { color: meta.color }]}>{meta.label}</Text>
+          </View>
+          <View style={styles.infoDivider} />
+          <View style={styles.infoRow}>
+            <Ionicons name="card-outline" size={15} color={colors.success} />
+            <Text style={styles.infoLabel}>Payment</Text>
+            <Text style={[styles.infoValue, { color: colors.success }]}>Paid</Text>
+          </View>
         </View>
       </View>
 
       {/* Action buttons */}
       <View style={styles.actions}>
-        {/* Decline */}
         <Pressable
           style={({ pressed }) => [styles.declineBtn, pressed && { opacity: 0.75 }]}
           onPress={handleDecline}
+          disabled={responded}
         >
           <Ionicons name="close" size={28} color={colors.error} />
-          <Text style={styles.declineLabel}>Decline</Text>
+          <Text style={styles.declineLabel}>{t('decline')}</Text>
         </Pressable>
 
-        {/* Accept */}
         <Pressable
-          style={({ pressed }) => [styles.acceptWrap, pressed && { opacity: 0.88 }]}
+          style={({ pressed }) => [styles.acceptWrap, pressed && { opacity: 0.88 }, responded && { opacity: 0.5 }]}
           onPress={handleAccept}
+          disabled={responded}
         >
           <LinearGradient
             colors={gradients.interactive}
@@ -188,7 +253,7 @@ export default function IncomingRequestScreen() {
             style={styles.acceptBtn}
           >
             <Ionicons name="checkmark" size={28} color={colors.mistWhite} />
-            <Text style={styles.acceptLabel}>Accept</Text>
+            <Text style={styles.acceptLabel}>{t('accept')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -206,46 +271,49 @@ const styles = StyleSheet.create({
   },
   typeBadgeText: { fontFamily: fonts.semiBold, fontSize: 13 },
 
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
 
   incomingLabel: {
     fontFamily: fonts.medium, fontSize: 13,
     color: 'rgba(255,255,255,0.5)',
     letterSpacing: 1.5, textTransform: 'uppercase',
-    marginBottom: 28,
   },
 
-  avatarWrap: { marginBottom: 24 },
   avatarCircle: {
-    width: 130, height: 130, borderRadius: 65,
+    width: 120, height: 120, borderRadius: 60,
     backgroundColor: '#1A2744',
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 3, borderColor: colors.tealGreen,
-    shadowColor: colors.tealGreen,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5, shadowRadius: 20, elevation: 10,
+    ...shadow(colors.tealGreen, 0, 0, 20, 0.4, 10),
   },
 
   patientName: {
     fontFamily: fonts.bold, fontSize: 26, color: colors.mistWhite,
-    textAlign: 'center', marginBottom: 6,
+    textAlign: 'center',
   },
   patientSub: {
     fontFamily: fonts.regular, fontSize: 14,
     color: 'rgba(255,255,255,0.6)', textAlign: 'center',
-    marginBottom: 36,
   },
 
-  timerContainer: { alignItems: 'center', gap: 10 },
-  timerRingTrack: {
-    width: 100, height: 100, borderRadius: 50,
-    borderWidth: 4, borderColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.05)',
+  paymentBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(56,161,105,0.15)',
+    borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8,
+    borderWidth: 1, borderColor: 'rgba(56,161,105,0.3)',
   },
-  timerNumber: { fontFamily: fonts.bold, fontSize: 34 },
-  timerSec: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: -4 },
-  timerHint: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.35)' },
+  paymentBadgeText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.success },
+
+  infoCard: {
+    width: '100%',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 14, padding: 14,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+  },
+  infoRow:     { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 },
+  infoLabel:   { flex: 1, fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.5)' },
+  infoValue:   { fontFamily: fonts.semiBold, fontSize: 13, color: colors.mistWhite },
+  infoDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.07)' },
 
   actions: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -263,9 +331,7 @@ const styles = StyleSheet.create({
   acceptWrap: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden' },
   acceptBtn: {
     flex: 1, alignItems: 'center', justifyContent: 'center', gap: 4,
-    shadowColor: colors.tealGreen,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 12, elevation: 8,
+    ...shadow(colors.tealGreen, 0, 4, 12, 0.5, 8),
   },
   acceptLabel: { fontFamily: fonts.bold, fontSize: 14, color: colors.mistWhite },
 })

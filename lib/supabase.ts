@@ -1,5 +1,4 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { getClerkInstance } from '@clerk/clerk-expo'
 import { createClient } from '@supabase/supabase-js'
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? ''
@@ -17,24 +16,49 @@ export const supabaseEmailAuth = createClient(supabaseUrl, supabaseAnonKey, {
   },
 })
 
+// Set by useClerkTokenSync() in AppInitializer as soon as Clerk is ready.
+// Clerk.session is not reliably accessible outside a ClerkProvider on web,
+// so we inject getToken() via this ref instead of importing it at module level.
+type TokenGetter = () => Promise<string | null>
+let _clerkTokenGetter: TokenGetter | null = null
+
+export function setClerkTokenGetter(fn: TokenGetter | null) {
+  _clerkTokenGetter = fn
+}
+
 // Unified client for all database queries throughout the app.
-// - Clerk OAuth users (Google/Facebook): uses Clerk JWT as bearer token.
-// - Email+password users: falls back to the persisted Supabase Auth JWT.
+// - Clerk users (email OTP / Google / Facebook): Clerk JWT via _clerkTokenGetter.
+// - Email+password (Supabase-native) users: falls back to the persisted Supabase Auth JWT.
 // RLS works for both because both JWTs carry a `sub` claim stored as `clerk_id`.
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   accessToken: async () => {
-    const clerkToken = await getClerkInstance().session?.getToken()
-    if (clerkToken) return clerkToken
+    if (_clerkTokenGetter) {
+      const token = await _clerkTokenGetter()
+      if (token) return token
+    }
     const { data: { session } } = await supabaseEmailAuth.auth.getSession()
     return session?.access_token ?? null
   },
 })
 
+const TOKEN_TTL_MS = 5 * 60 * 1000
+const _authClientCache = new Map<string, { client: ReturnType<typeof createClient>; ts: number }>()
+
 export function getAuthClient(clerkToken: string) {
-  return createClient(supabaseUrl, supabaseAnonKey, {
+  const entry = _authClientCache.get(clerkToken)
+  if (entry && Date.now() - entry.ts < TOKEN_TTL_MS) return entry.client
+  const client = createClient(supabaseUrl, supabaseAnonKey, {
     auth: { persistSession: false },
     global: { headers: { Authorization: `Bearer ${clerkToken}` } },
   })
+  _authClientCache.set(clerkToken, { client, ts: Date.now() })
+  if (_authClientCache.size > 20) {
+    const now = Date.now()
+    for (const [key, val] of _authClientCache) {
+      if (now - val.ts >= TOKEN_TTL_MS) _authClientCache.delete(key)
+    }
+  }
+  return client
 }
 
 const ALLOWED_FILE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']

@@ -4,17 +4,25 @@ import { useState, useEffect, useCallback } from 'react'
 import { useAuth, useSignUp } from '@clerk/nextjs'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Mail, Lock, User, Eye, EyeOff, MailOpen } from 'lucide-react'
+import { Mail, Lock, Eye, EyeOff, User } from 'lucide-react'
 import { AuthCard } from '@/components/ui/AuthCard'
-import { supabaseEmailAuth } from '@/lib/supabase'
 
 function isValidEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
 }
 
+function Spinner() {
+  return (
+    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  )
+}
+
 export default function SignUpPage() {
   const { isSignedIn } = useAuth()
-  const { isLoaded, signUp } = useSignUp()
+  const { isLoaded: suLoaded, signUp } = useSignUp()
   const router = useRouter()
 
   useEffect(() => {
@@ -22,199 +30,209 @@ export default function SignUpPage() {
   }, [isSignedIn, router])
 
   const [fullName, setFullName] = useState('')
+  const [fullNameError, setFullNameError] = useState('')
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [showConfirm, setShowConfirm] = useState(false)
-
-  const [nameError, setNameError] = useState('')
   const [emailError, setEmailError] = useState('')
+  const [password, setPassword] = useState('')
   const [passwordError, setPasswordError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [confirmError, setConfirmError] = useState('')
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [globalError, setGlobalError] = useState('')
-  const [signUpSuccess, setSignUpSuccess] = useState(false)
-
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
   const [facebookLoading, setFacebookLoading] = useState(false)
 
+  const oauthLoading = googleLoading || facebookLoading
   const isFormReady =
-    fullName.trim().length > 0 &&
+    fullName.trim().length > 1 &&
     isValidEmail(email) &&
     password.length >= 8 &&
     password === confirmPassword
 
-  function validate(): boolean {
-    let ok = true
-    setNameError(''); setEmailError(''); setPasswordError(''); setConfirmError(''); setGlobalError('')
-    if (!fullName.trim()) { setNameError('Please enter your full name'); ok = false }
-    if (!email.trim()) { setEmailError('Please enter your email'); ok = false }
-    else if (!isValidEmail(email)) { setEmailError('Please enter a valid email address'); ok = false }
-    if (!password) { setPasswordError('Please enter a password'); ok = false }
-    else if (password.length < 8) { setPasswordError('Password must be at least 8 characters'); ok = false }
-    if (!confirmPassword) { setConfirmError('Please confirm your password'); ok = false }
-    else if (password !== confirmPassword) { setConfirmError('Passwords must match'); ok = false }
-    return ok
-  }
-
-  // ── Email+password sign-up via Supabase Auth ───────────────────────────────
   async function handleContinue(e: React.FormEvent) {
     e.preventDefault()
-    if (!validate()) return
+    if (!suLoaded || loading) return
+    const normalizedEmail = email.trim().toLowerCase()
+    const trimmedName = fullName.trim()
+    let valid = true
+    setFullNameError('')
+    setEmailError('')
+    setPasswordError('')
+    setConfirmError('')
+    setGlobalError('')
+
+    if (!trimmedName || trimmedName.length < 2) {
+      setFullNameError('Please enter your full name.')
+      valid = false
+    }
+    if (!isValidEmail(normalizedEmail)) {
+      setEmailError('Please enter a valid email address.')
+      valid = false
+    }
+    if (password.length < 8) {
+      setPasswordError('Password must be at least 8 characters.')
+      valid = false
+    }
+    if (password !== confirmPassword) {
+      setConfirmError('Passwords do not match.')
+      valid = false
+    }
+    if (!valid) return
+
     setLoading(true)
     try {
-      const { data: { session }, error } = await supabaseEmailAuth.auth.signUp({
-        email: email.trim().toLowerCase(),
+      const nameParts = trimmedName.split(/\s+/)
+      const firstName = nameParts[0]
+      const lastName = nameParts.slice(1).join(' ') || undefined
+      await signUp!.create({
+        emailAddress: normalizedEmail,
         password,
-        options: { data: { full_name: fullName.trim() } },
+        firstName,
+        lastName,
       })
-
-      if (error) {
-        const msg = error.message?.toLowerCase() ?? ''
-        if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('user already')) {
-          setEmailError('This email is already registered. Please sign in instead.')
-        } else if (msg.includes('password')) {
-          setPasswordError(error.message)
-        } else {
-          setGlobalError(error.message ?? 'Something went wrong. Please try again.')
-        }
-        return
-      }
-
-      if (session) {
-        // Email confirmation disabled — session is active immediately
-        router.replace('/role')
+      await signUp!.prepareEmailAddressVerification({ strategy: 'email_code' })
+      router.push(`/verify?email=${encodeURIComponent(normalizedEmail)}&type=signup`)
+    } catch (err: any) {
+      const code: string = err?.errors?.[0]?.code ?? ''
+      const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
+      if (code === 'form_identifier_exists') {
+        setEmailError('An account with this email already exists. Please sign in instead.')
+      } else if (code?.includes('password')) {
+        setPasswordError(msg || 'Please choose a stronger password (min. 8 characters).')
       } else {
-        // Email confirmation required — show confirmation screen
-        setSignUpSuccess(true)
+        setGlobalError(msg || 'Something went wrong. Please try again.')
       }
     } finally {
       setLoading(false)
     }
   }
 
-  // ── Google OAuth (Clerk) ───────────────────────────────────────────────────
   const handleGoogle = useCallback(async () => {
-    if (!isLoaded || googleLoading) return
+    if (!suLoaded || oauthLoading) return
     setGoogleLoading(true)
+    setGlobalError('')
     try {
-      await signUp!.authenticateWithRedirect({
+      const attempt = await signUp!.create({
         strategy: 'oauth_google',
-        redirectUrl: '/sso-callback',
-        redirectUrlComplete: '/dashboard',
+        redirectUrl: `${window.location.origin}/sso-callback`,
+        actionCompleteRedirectUrl: `${window.location.origin}/dashboard`,
       })
-    } finally {
+      const externalUrl = attempt.verifications.externalAccount.externalVerificationRedirectURL
+      if (externalUrl) {
+        const url = new URL(externalUrl.toString())
+        url.searchParams.set('prompt', 'select_account')
+        window.location.href = url.toString()
+      }
+    } catch (err: any) {
       setGoogleLoading(false)
+      const code: string = err?.errors?.[0]?.code ?? ''
+      if (code !== 'oauth_access_denied') {
+        setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
+      }
     }
-  }, [isLoaded, googleLoading, signUp])
+  }, [suLoaded, oauthLoading, signUp])
 
-  // ── Facebook OAuth (Clerk) ─────────────────────────────────────────────────
   const handleFacebook = useCallback(async () => {
-    if (!isLoaded || facebookLoading) return
+    if (!suLoaded || oauthLoading) return
     setFacebookLoading(true)
+    setGlobalError('')
     try {
       await signUp!.authenticateWithRedirect({
         strategy: 'oauth_facebook',
-        redirectUrl: '/sso-callback',
-        redirectUrlComplete: '/dashboard',
+        redirectUrl: `${window.location.origin}/sso-callback`,
+        redirectUrlComplete: `${window.location.origin}/dashboard`,
       })
-    } finally {
+    } catch (err: any) {
       setFacebookLoading(false)
+      const code: string = err?.errors?.[0]?.code ?? ''
+      if (code !== 'oauth_access_denied') {
+        setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
+      }
     }
-  }, [isLoaded, facebookLoading, signUp])
-
-  // ── Email confirmation success state ─────────────────────────────────────
-  if (signUpSuccess) {
-    return (
-      <AuthCard title="Check your email" subtitle="">
-        <div className="flex flex-col items-center gap-5 py-4">
-          <MailOpen size={64} className="text-teal-green" />
-          <p className="text-ink-black/70 text-sm text-center leading-relaxed">
-            We sent a confirmation link to<br />
-            <strong className="text-ink-black">{email.trim().toLowerCase()}</strong>
-          </p>
-          <p className="text-ink-black/50 text-xs text-center leading-relaxed">
-            Click the link in the email to activate your account, then come back to sign in.
-          </p>
-          <Link href="/sign-in" className="btn-primary w-full text-center">
-            Go to Sign In →
-          </Link>
-        </div>
-      </AuthCard>
-    )
-  }
+  }, [suLoaded, oauthLoading, signUp])
 
   return (
     <AuthCard title="Sign Up" subtitle="Create account and access all health services">
       <form onSubmit={handleContinue} className="flex flex-col gap-4">
+
         {/* Full Name */}
         <div>
           <div className="relative">
-            <User size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <User size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
             <input
               type="text"
               value={fullName}
-              onChange={e => { setFullName(e.target.value); setNameError('') }}
+              onChange={e => { setFullName(e.target.value); setFullNameError('') }}
               placeholder="Full name"
-              className={`w-full h-[52px] pl-11 pr-4 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${nameError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+              autoFocus
+              className={`w-full h-[52px] pl-7 pr-4 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${fullNameError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
           </div>
-          {nameError && <p className="text-danger text-xs mt-1.5 px-1">{nameError}</p>}
+          {fullNameError && <p className="text-danger text-xs mt-1.5">{fullNameError}</p>}
         </div>
 
         {/* Email */}
         <div>
           <div className="relative">
-            <Mail size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <Mail size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
             <input
               type="email"
               value={email}
               onChange={e => { setEmail(e.target.value); setEmailError('') }}
-              placeholder="Your email"
-              className={`w-full h-[52px] pl-11 pr-4 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${emailError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+              placeholder="Type your email"
+              className={`w-full h-[52px] pl-7 pr-4 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${emailError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
           </div>
-          {emailError && <p className="text-danger text-xs mt-1.5 px-1">{emailError}</p>}
+          {emailError && <p className="text-danger text-xs mt-1.5">{emailError}</p>}
         </div>
 
         {/* Password */}
         <div>
           <div className="relative">
-            <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <Lock size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
             <input
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={e => { setPassword(e.target.value); setPasswordError('') }}
-              placeholder="Password (min 8 characters)"
-              className={`w-full h-[52px] pl-11 pr-12 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${passwordError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+              placeholder="Password (min. 8 characters)"
+              className={`w-full h-[52px] pl-7 pr-10 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${passwordError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
-            <button type="button" onClick={() => setShowPassword(p => !p)} className="absolute right-4 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70 transition-colors">
+            <button
+              type="button"
+              onClick={() => setShowPassword(p => !p)}
+              className="absolute right-1 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70"
+            >
               {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
-          {passwordError && <p className="text-danger text-xs mt-1.5 px-1">{passwordError}</p>}
+          {passwordError && <p className="text-danger text-xs mt-1.5">{passwordError}</p>}
         </div>
 
         {/* Confirm Password */}
         <div>
           <div className="relative">
-            <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <Lock size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
             <input
-              type={showConfirm ? 'text' : 'password'}
+              type={showConfirmPassword ? 'text' : 'password'}
               value={confirmPassword}
               onChange={e => { setConfirmPassword(e.target.value); setConfirmError('') }}
-              placeholder="Confirm password"
-              className={`w-full h-[52px] pl-11 pr-12 rounded-2xl border bg-cloud-grey font-montserrat text-sm text-ink-black placeholder:text-ink-black/40 focus:outline-none transition-colors ${confirmError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
+              placeholder="Confirm Password"
+              className={`w-full h-[52px] pl-7 pr-10 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${confirmError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
-            <button type="button" onClick={() => setShowConfirm(p => !p)} className="absolute right-4 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70 transition-colors">
-              {showConfirm ? <EyeOff size={18} /> : <Eye size={18} />}
+            <button
+              type="button"
+              onClick={() => setShowConfirmPassword(p => !p)}
+              className="absolute right-1 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70"
+            >
+              {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
-          {confirmError && <p className="text-danger text-xs mt-1.5 px-1">{confirmError}</p>}
+          {confirmError && <p className="text-danger text-xs mt-1.5">{confirmError}</p>}
         </div>
 
-        {globalError && <p className="text-danger text-xs font-medium px-1">{globalError}</p>}
+        {globalError && <p className="text-danger text-xs font-medium">{globalError}</p>}
 
         <button
           type="submit"
@@ -232,20 +250,36 @@ export default function SignUpPage() {
       </div>
 
       <div className="flex flex-col gap-3">
-        <button onClick={handleGoogle} disabled={googleLoading} className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-50">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-            <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
-            <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-            <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-          </svg>
-          {googleLoading ? 'Redirecting…' : 'Continue with Google'}
+        <button
+          onClick={handleGoogle}
+          disabled={oauthLoading}
+          className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-60"
+        >
+          {googleLoading ? (
+            <Spinner />
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+              <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
+              <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
+              <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+            </svg>
+          )}
+          Continue with Google
         </button>
-        <button onClick={handleFacebook} disabled={facebookLoading} className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-50">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M18 9a9 9 0 10-10.406 8.891V11.6H5.309V9h2.285V7.023c0-2.256 1.343-3.503 3.4-3.503.984 0 2.014.176 2.014.176V5.9h-1.135c-1.117 0-1.466.694-1.466 1.406V9h2.494l-.399 2.6h-2.095v6.291A9 9 0 0018 9z" fill="#1877F2"/>
-          </svg>
-          {facebookLoading ? 'Redirecting…' : 'Continue with Facebook'}
+        <button
+          onClick={handleFacebook}
+          disabled={oauthLoading}
+          className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-60"
+        >
+          {facebookLoading ? (
+            <Spinner />
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M18 9a9 9 0 10-10.406 8.891V11.6H5.309V9h2.285V7.023c0-2.256 1.343-3.503 3.4-3.503.984 0 2.014.176 2.014.176V5.9h-1.135c-1.117 0-1.466.694-1.466 1.406V9h2.494l-.399 2.6h-2.095v6.291A9 9 0 0018 9z" fill="#1877F2"/>
+            </svg>
+          )}
+          Continue with Facebook
         </button>
       </div>
 

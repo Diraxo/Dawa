@@ -1,15 +1,17 @@
-import { useUser } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -18,7 +20,10 @@ import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { supabase } from '@/lib/supabase'
+import { shadow } from '@/lib/shadow'
+import { getAuthClient } from '@/lib/supabase'
+import { useDoctorStore } from '@/store/doctorStore'
+import { useTranslation } from 'react-i18next'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,25 +73,137 @@ function formatApptDate(iso: string): { date: string; time: string } {
   return { date, time }
 }
 
+// ─── Time picker helpers ──────────────────────────────────────────────────────
+
+function parseTime(t12: string): { hour: number; minute: number; period: 'AM' | 'PM' } {
+  const [time, period] = t12.split(' ')
+  const [h, m] = time.split(':').map(Number)
+  return { hour: h, minute: m, period: (period ?? 'AM') as 'AM' | 'PM' }
+}
+
+function formatTime(hour: number, minute: number, period: 'AM' | 'PM'): string {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${period}`
+}
+
+const HOURS = Array.from({ length: 12 }, (_, i) => i + 1)
+const MINUTES = [0, 15, 30, 45]
+
+function TimePickerModal({
+  visible,
+  initial,
+  label,
+  onConfirm,
+  onCancel,
+}: {
+  visible: boolean
+  initial: string
+  label: string
+  onConfirm: (time: string) => void
+  onCancel: () => void
+}) {
+  const parsed = parseTime(initial)
+  const [hour, setHour] = useState(parsed.hour)
+  const [minute, setMinute] = useState(parsed.minute)
+  const [period, setPeriod] = useState<'AM' | 'PM'>(parsed.period)
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <View style={tpStyles.overlay}>
+        <Pressable style={tpStyles.backdrop} onPress={onCancel} />
+        <View style={tpStyles.sheet}>
+          <View style={tpStyles.handle} />
+          <Text style={tpStyles.title}>{label}</Text>
+          <View style={tpStyles.pickerRow}>
+            {/* Hours */}
+            <View style={tpStyles.col}>
+              <Text style={tpStyles.colLabel}>Hour</Text>
+              <ScrollView style={tpStyles.colScroll} showsVerticalScrollIndicator={false}>
+                {HOURS.map(h => (
+                  <Pressable key={h} onPress={() => setHour(h)} style={[tpStyles.item, hour === h && tpStyles.itemSelected]}>
+                    <Text style={[tpStyles.itemText, hour === h && tpStyles.itemTextSelected]}>{String(h).padStart(2, '0')}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+            <Text style={tpStyles.colon}>:</Text>
+            {/* Minutes */}
+            <View style={tpStyles.col}>
+              <Text style={tpStyles.colLabel}>Min</Text>
+              <ScrollView style={tpStyles.colScroll} showsVerticalScrollIndicator={false}>
+                {MINUTES.map(m => (
+                  <Pressable key={m} onPress={() => setMinute(m)} style={[tpStyles.item, minute === m && tpStyles.itemSelected]}>
+                    <Text style={[tpStyles.itemText, minute === m && tpStyles.itemTextSelected]}>{String(m).padStart(2, '0')}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+            {/* AM/PM */}
+            <View style={[tpStyles.col, { gap: 8 }]}>
+              <Text style={tpStyles.colLabel}>Period</Text>
+              {(['AM', 'PM'] as const).map(p => (
+                <Pressable key={p} onPress={() => setPeriod(p)} style={[tpStyles.item, period === p && tpStyles.itemSelected]}>
+                  <Text style={[tpStyles.itemText, period === p && tpStyles.itemTextSelected]}>{p}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          <Pressable
+            onPress={() => onConfirm(formatTime(hour, minute, period))}
+            style={tpStyles.confirmBtn}
+          >
+            <Text style={tpStyles.confirmText}>Confirm</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  )
+}
+
+const tpStyles = StyleSheet.create({
+  overlay: { flex: 1, justifyContent: 'flex-end' },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
+  sheet: {
+    backgroundColor: colors.mistWhite,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 24, paddingBottom: 32,
+  },
+  handle: { width: 40, height: 4, backgroundColor: colors.steelGrey, borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
+  title: { fontFamily: fonts.semiBold, fontSize: 16, color: colors.inkBlack, marginBottom: 16 },
+  pickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 20 },
+  col: { alignItems: 'center', minWidth: 70 },
+  colLabel: { fontFamily: fonts.medium, fontSize: 12, color: '#9CA3AF', marginBottom: 8 },
+  colScroll: { maxHeight: 180 },
+  colon: { fontFamily: fonts.bold, fontSize: 24, color: colors.inkBlack, marginTop: 28 },
+  item: { paddingVertical: 12, paddingHorizontal: 16, borderRadius: 10, marginBottom: 4, alignItems: 'center' },
+  itemSelected: { backgroundColor: colors.tealGreen },
+  itemText: { fontFamily: fonts.semiBold, fontSize: 16, color: colors.inkBlack },
+  itemTextSelected: { color: colors.mistWhite },
+  confirmBtn: {
+    backgroundColor: colors.careBlue, borderRadius: 14,
+    paddingVertical: 14, alignItems: 'center',
+  },
+  confirmText: { fontFamily: fonts.bold, fontSize: 16, color: colors.mistWhite },
+})
+
 // ─── Weekly calendar strip ────────────────────────────────────────────────────
 
-function WeekStrip() {
+function WeekStrip({ onDaySelect }: { onDaySelect: (weekday: number, date: Date) => void }) {
   const today = new Date()
-  const [selectedDay, setSelectedDay] = useState(today.getDay())
+  const [selectedDay, setSelectedDay] = useState(today.getDay() || 7)
 
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today)
-    d.setDate(today.getDate() - today.getDay() + i + 1)
-    return { dayName: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i], date: d.getDate(), weekday: i + 1 }
+    d.setDate(today.getDate() - (today.getDay() || 7) + i + 1)
+    return { dayName: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i], date: d.getDate(), weekday: i + 1, dateObj: d }
   })
 
   return (
     <View style={weekStyles.strip}>
       {days.map((d) => {
         const isSelected = selectedDay === d.weekday
-        const isToday = d.weekday === today.getDay() || (today.getDay() === 0 && d.weekday === 7)
+        const isToday = d.dateObj.toDateString() === today.toDateString()
         return (
-          <Pressable key={d.dayName} onPress={() => setSelectedDay(d.weekday)} style={weekStyles.dayWrap}>
+          <Pressable key={d.dayName} onPress={() => { setSelectedDay(d.weekday); onDaySelect(d.weekday, d.dateObj) }} style={weekStyles.dayWrap}>
             {isSelected ? (
               <LinearGradient colors={gradients.interactive} start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={weekStyles.dayPill}>
                 <Text style={[weekStyles.dayName, weekStyles.dayNameSelected]}>{d.dayName}</Text>
@@ -108,33 +225,54 @@ function WeekStrip() {
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
+const PENDING_MSG = 'Your account is under review. You cannot modify your schedule until admin approves you.'
+
 export default function ScheduleScreen() {
+  const { t } = useTranslation()
   const { user } = useUser()
+  const { getToken } = useAuth()
+  const { doctorStatus } = useDoctorStore()
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
-  const [acceptScheduled, setAcceptScheduled] = useState(true)
-  const [onDemandOnly, setOnDemandOnly] = useState(false)
+  const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [savingAvailability, setSavingAvailability] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loadingAppts, setLoadingAppts] = useState(true)
+  const [timePicker, setTimePicker] = useState<{ day: DayKey; field: 'startTime' | 'endTime' } | null>(null)
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date())
+  const [showBlockPicker, setShowBlockPicker] = useState(false)
+  const [blockPickerDate, setBlockPickerDate] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() + 1)
+    return d.toISOString().split('T')[0]
+  })
 
   useEffect(() => {
     if (!user?.id) return
     ;(async () => {
       try {
-        const { data: profile } = await supabase
+        const token = await getToken()
+        if (!token) return
+        const client = getAuthClient(token)
+
+        const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!me) return
+
+        const { data: profile } = await client
           .from('doctor_profiles')
-          .select('id, availability, user:users!inner(clerk_id)')
-          .eq('users.clerk_id', user.id)
+          .select('id, availability')
+          .eq('user_id', (me as any).id)
           .maybeSingle()
         if (!profile) return
         setProfileId(profile.id)
         if (profile.availability) {
-          const saved = profile.availability as Record<string, DayAvailability>
-          setAvailability((prev) => ({ ...prev, ...saved }))
+          const saved = profile.availability as Record<string, any>
+          const { blocked_dates, ...dayAvail } = saved
+          setAvailability((prev) => ({ ...prev, ...dayAvail }))
+          if (Array.isArray(blocked_dates)) setBlockedDates(blocked_dates)
         }
 
-        const { data: appts } = await supabase
+        const { data: appts } = await client
           .from('consultations')
           .select('id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)')
           .eq('doctor_id', profile.id)
@@ -153,6 +291,7 @@ export default function ScheduleScreen() {
         setLoadingAppts(false)
       }
     })()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
 
   const toggleDay = (day: DayKey) =>
@@ -160,12 +299,33 @@ export default function ScheduleScreen() {
 
   const handleSaveAvailability = async () => {
     if (savingAvailability) return
+    if (doctorStatus && doctorStatus !== 'approved') {
+      Alert.alert('Account Under Review', PENDING_MSG)
+      return
+    }
+
+    // Validate startTime < endTime for all enabled days
+    for (const day of DAYS) {
+      const avail = availability[day]
+      if (!avail.enabled) continue
+      const start = parseTime(avail.startTime)
+      const end = parseTime(avail.endTime)
+      const startMins = (start.period === 'PM' && start.hour !== 12 ? start.hour + 12 : start.period === 'AM' && start.hour === 12 ? 0 : start.hour) * 60 + start.minute
+      const endMins = (end.period === 'PM' && end.hour !== 12 ? end.hour + 12 : end.period === 'AM' && end.hour === 12 ? 0 : end.hour) * 60 + end.minute
+      if (startMins >= endMins) {
+        Alert.alert('Invalid Time', `${day}: Start time must be before end time.`)
+        return
+      }
+    }
+
     setSavingAvailability(true)
     try {
       if (!profileId) throw new Error('Doctor profile not found.')
-      const { error } = await supabase
+      const token = await getToken()
+      if (!token) throw new Error('Not authenticated.')
+      const { error } = await getAuthClient(token)
         .from('doctor_profiles')
-        .update({ availability })
+        .update({ availability: { ...availability, blocked_dates: blockedDates } })
         .eq('id', profileId)
       if (error) throw error
       Alert.alert('Saved', 'Your availability has been updated.')
@@ -179,46 +339,33 @@ export default function ScheduleScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.header}>
-        <Text style={styles.headerTitle}>My Schedule</Text>
+        <Text style={styles.headerTitle}>{t('myAvailability')}</Text>
       </LinearGradient>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-        {/* Mode toggles */}
-        <View style={styles.modeCard}>
-          <View style={styles.modeRow}>
-            <View style={styles.modeLeft}>
-              <Ionicons name="calendar-outline" size={18} color={colors.careBlue} />
-              <Text style={styles.modeLabel}>Accept Scheduled Appointments</Text>
-            </View>
-            <Switch
-              value={acceptScheduled}
-              onValueChange={setAcceptScheduled}
-              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
-              thumbColor={colors.mistWhite}
-            />
-          </View>
-          <View style={styles.modeDivider} />
-          <View style={styles.modeRow}>
-            <View style={styles.modeLeft}>
-              <Ionicons name="flash-outline" size={18} color={colors.interactiveBlue} />
-              <Text style={styles.modeLabel}>On-Demand Only</Text>
-            </View>
-            <Switch
-              value={onDemandOnly}
-              onValueChange={setOnDemandOnly}
-              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
-              thumbColor={colors.mistWhite}
-            />
-          </View>
-        </View>
+      {timePicker && (
+        <TimePickerModal
+          visible
+          label={timePicker.field === 'startTime' ? `${timePicker.day} — Start Time` : `${timePicker.day} — End Time`}
+          initial={availability[timePicker.day][timePicker.field]}
+          onConfirm={(time) => {
+            setAvailability(prev => ({
+              ...prev,
+              [timePicker.day]: { ...prev[timePicker.day], [timePicker.field]: time },
+            }))
+            setTimePicker(null)
+          }}
+          onCancel={() => setTimePicker(null)}
+        />
+      )}
 
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
         {/* Weekly strip */}
-        <Text style={styles.sectionTitle}>This Week</Text>
-        <WeekStrip />
+        <Text style={styles.sectionTitle}>{t('thisWeek')}</Text>
+        <WeekStrip onDaySelect={(_, date) => setSelectedDate(date)} />
 
         {/* Availability settings */}
         <View style={styles.availabilityCard}>
-          <Text style={styles.availabilityTitle}>Set Your Available Hours</Text>
+          <Text style={styles.availabilityTitle}>{t('setAvailableHours')}</Text>
           {DAYS.map((day) => {
             const avail = availability[day]
             return (
@@ -232,9 +379,17 @@ export default function ScheduleScreen() {
                 />
                 <Text style={[styles.dayName, !avail.enabled && styles.dayNameDisabled]}>{day}</Text>
                 {avail.enabled ? (
-                  <Text style={styles.dayHours}>{avail.startTime} → {avail.endTime}</Text>
+                  <View style={styles.dayTimesRow}>
+                    <Pressable onPress={() => setTimePicker({ day, field: 'startTime' })} style={styles.timeChip}>
+                      <Text style={styles.timeChipText}>{avail.startTime}</Text>
+                    </Pressable>
+                    <Text style={styles.timeSep}>→</Text>
+                    <Pressable onPress={() => setTimePicker({ day, field: 'endTime' })} style={styles.timeChip}>
+                      <Text style={styles.timeChipText}>{avail.endTime}</Text>
+                    </Pressable>
+                  </View>
                 ) : (
-                  <Text style={styles.dayOff}>Off</Text>
+                  <Text style={styles.dayOff}>{t('off')}</Text>
                 )}
               </View>
             )
@@ -243,22 +398,37 @@ export default function ScheduleScreen() {
 
         {/* Save availability */}
         <GradientButton
-          label={savingAvailability ? 'Saving...' : 'Save Availability'}
+          label={savingAvailability ? t('saving') : t('saveAvailability')}
           onPress={handleSaveAvailability}
           disabled={savingAvailability}
         />
 
-        {/* Upcoming appointments */}
-        <Text style={[styles.sectionTitle, styles.mt8]}>Upcoming Appointments</Text>
+        {/* Upcoming appointments — filtered to selected day */}
+        <Text style={[styles.sectionTitle, styles.mt8]}>{t('upcomingAppts')}</Text>
         {loadingAppts ? (
           <ActivityIndicator color={colors.careBlue} style={{ marginVertical: 20 }} />
-        ) : appointments.length === 0 ? (
+        ) : appointments.filter(a => {
+            // Re-parse the formatted date to compare with selectedDate
+            const selectedStr = selectedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+            return a.date === 'Today'
+              ? selectedDate.toDateString() === new Date().toDateString()
+              : a.date === 'Tomorrow'
+              ? selectedDate.toDateString() === (() => { const t = new Date(); t.setDate(t.getDate() + 1); return t.toDateString() })()
+              : a.date === selectedStr
+          }).length === 0 ? (
           <View style={styles.emptyCard}>
             <Ionicons name="calendar-clear-outline" size={28} color={colors.steelGrey} />
-            <Text style={styles.emptyText}>No upcoming appointments</Text>
+            <Text style={styles.emptyText}>{t('noScheduledAppts')}</Text>
           </View>
         ) : (
-          appointments.map((appt) => (
+          appointments.filter(a => {
+            const selectedStr = selectedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+            return a.date === 'Today'
+              ? selectedDate.toDateString() === new Date().toDateString()
+              : a.date === 'Tomorrow'
+              ? selectedDate.toDateString() === (() => { const t = new Date(); t.setDate(t.getDate() + 1); return t.toDateString() })()
+              : a.date === selectedStr
+          }).map((appt) => (
             <View key={appt.id} style={styles.apptCard}>
               <View style={styles.apptLeft}>
                 <Text style={styles.apptIcon}>{TYPE_ICONS[appt.type]}</Text>
@@ -274,11 +444,105 @@ export default function ScheduleScreen() {
           ))
         )}
 
-        {/* Block time */}
-        <Pressable style={styles.blockTimeBtn}>
-          <Ionicons name="ban-outline" size={18} color={colors.error} />
-          <Text style={styles.blockTimeBtnText}>Block Time Slot</Text>
-        </Pressable>
+        {/* Block dates section */}
+        <Text style={[styles.sectionTitle, styles.mt8]}>{t('blockedDates')}</Text>
+        <View style={styles.availabilityCard}>
+          <Text style={styles.blockDatesSub}>Patients cannot book you on blocked dates.</Text>
+
+          {blockedDates.length > 0 && (
+            <View style={{ gap: 8, marginBottom: 12 }}>
+              {blockedDates.sort().map(dateStr => (
+                <View key={dateStr} style={styles.blockedDateRow}>
+                  <Text style={styles.blockedDateText}>
+                    {new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                  </Text>
+                  <Pressable
+                    onPress={() => setBlockedDates(prev => prev.filter(d => d !== dateStr))}
+                    hitSlop={8}
+                    style={({ pressed }) => [styles.removeDateBtn, pressed && { opacity: 0.6 }]}
+                  >
+                    <Ionicons name="close-circle" size={20} color={colors.error} />
+                  </Pressable>
+                </View>
+              ))}
+              <Pressable
+                onPress={handleSaveAvailability}
+                disabled={savingAvailability}
+                style={({ pressed }) => [styles.saveBlockedBtn, pressed && { opacity: 0.8 }]}
+              >
+                <Text style={styles.saveBlockedText}>{savingAvailability ? t('saving') : 'Save Changes'}</Text>
+              </Pressable>
+            </View>
+          )}
+
+          <Pressable
+            style={({ pressed }) => [styles.blockTimeBtn, pressed && { opacity: 0.85 }]}
+            onPress={() => {
+              if (doctorStatus && doctorStatus !== 'approved') {
+                Alert.alert('Account Under Review', PENDING_MSG)
+              } else {
+                setShowBlockPicker(true)
+              }
+            }}
+          >
+            <Ionicons name="ban-outline" size={18} color={colors.error} />
+            <Text style={styles.blockTimeBtnText}>Block a Date</Text>
+          </Pressable>
+        </View>
+
+        {/* Block date picker modal */}
+        <Modal visible={showBlockPicker} transparent animationType="slide" onRequestClose={() => setShowBlockPicker(false)}>
+          <View style={tpStyles.overlay}>
+            <Pressable style={tpStyles.backdrop} onPress={() => setShowBlockPicker(false)} />
+            <View style={tpStyles.sheet}>
+              <View style={tpStyles.handle} />
+              <Text style={tpStyles.title}>Block a Date</Text>
+              <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
+                Enter a date to make unavailable for patient bookings.
+              </Text>
+              <TextInput
+                style={{
+                  height: 48, borderRadius: 12, borderWidth: 1.5, borderColor: colors.steelGrey,
+                  paddingHorizontal: 14, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack,
+                  backgroundColor: colors.cloudGrey, marginBottom: 20,
+                }}
+                value={blockPickerDate}
+                onChangeText={setBlockPickerDate}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="#9CA3AF"
+                keyboardType="numeric"
+                maxLength={10}
+              />
+              <Pressable
+                onPress={() => {
+                  const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+                  if (!dateRegex.test(blockPickerDate)) {
+                    Alert.alert('Invalid Date', 'Please enter a date in YYYY-MM-DD format.')
+                    return
+                  }
+                  const d = new Date(blockPickerDate + 'T12:00:00')
+                  if (isNaN(d.getTime())) { Alert.alert('Invalid Date', 'That date is not valid.'); return }
+                  if (d < new Date(new Date().setHours(0,0,0,0))) { Alert.alert('Past Date', 'You can only block future dates.'); return }
+                  if (!blockedDates.includes(blockPickerDate)) {
+                    const updated = [...blockedDates, blockPickerDate]
+                    setBlockedDates(updated)
+                    getToken().then(async token => {
+                      if (!token || !profileId) return
+                      await getAuthClient(token)
+                        .from('doctor_profiles')
+                        .update({ availability: { ...availability, blocked_dates: updated } })
+                        .eq('id', profileId)
+                    })
+                  }
+                  setShowBlockPicker(false)
+                }}
+                style={tpStyles.confirmBtn}
+              >
+                <Text style={tpStyles.confirmText}>Block This Date</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
 
         <View style={{ height: 24 }} />
       </ScrollView>
@@ -306,16 +570,10 @@ const styles = StyleSheet.create({
 
   scroll: { paddingHorizontal: 16, paddingTop: 16 },
 
-  modeCard: { backgroundColor: colors.mistWhite, borderRadius: 16, padding: 16, marginBottom: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 1 },
-  modeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  modeLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  modeLabel: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack, flex: 1 },
-  modeDivider: { height: 1, backgroundColor: colors.cloudGrey, marginVertical: 12 },
-
   sectionTitle: { fontFamily: fonts.semiBold, fontSize: 17, color: colors.inkBlack, marginBottom: 12 },
   mt8: { marginTop: 8 },
 
-  availabilityCard: { backgroundColor: colors.mistWhite, borderRadius: 16, padding: 16, marginBottom: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 1 },
+  availabilityCard: { backgroundColor: colors.mistWhite, borderRadius: 16, padding: 16, marginBottom: 20, ...shadow('#000', 0, 1, 4, 0.05, 1) },
   availabilityTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack, marginBottom: 12 },
   dayRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey, gap: 12 },
   daySwitch: { transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] },
@@ -323,11 +581,19 @@ const styles = StyleSheet.create({
   dayNameDisabled: { color: '#9CA3AF' },
   dayHours: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', flex: 1 },
   dayOff: { fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF', flex: 1 },
+  dayTimesRow: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 6 },
+  timeChip: {
+    borderWidth: 1, borderColor: colors.steelGrey,
+    borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4,
+    backgroundColor: colors.cloudGrey,
+  },
+  timeChipText: { fontFamily: fonts.medium, fontSize: 12, color: colors.inkBlack },
+  timeSep: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF' },
 
   apptCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: colors.mistWhite, borderRadius: 14, padding: 14, marginBottom: 10,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
   apptLeft: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center' },
   apptIcon: { fontSize: 20 },
@@ -346,7 +612,18 @@ const styles = StyleSheet.create({
   blockTimeBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     borderWidth: 1.5, borderColor: colors.error, borderRadius: 16, paddingVertical: 14,
-    backgroundColor: '#FFF5F5', marginTop: 8,
+    backgroundColor: '#FFF5F5', marginTop: 4,
   },
   blockTimeBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.error },
+  blockDatesSub: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 12 },
+  blockedDateRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#FFF5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+  },
+  blockedDateText: { fontFamily: fonts.medium, fontSize: 14, color: colors.error },
+  removeDateBtn: { padding: 2 },
+  saveBlockedBtn: {
+    backgroundColor: colors.careBlue, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 4,
+  },
+  saveBlockedText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.mistWhite },
 })

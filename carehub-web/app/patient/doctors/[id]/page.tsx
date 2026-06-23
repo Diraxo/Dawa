@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import Link from 'next/link'
+import { stripDrPrefix } from '@/lib/utils'
 
 interface DoctorProfile {
   id: string
@@ -41,6 +42,7 @@ export default function DoctorProfilePage() {
   const [reviews, setReviews] = useState<Review[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedType, setSelectedType] = useState<string | null>(null)
+  const [imageFullscreen, setImageFullscreen] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -53,7 +55,7 @@ export default function DoctorProfilePage() {
           .single(),
         supabase
           .from('reviews')
-          .select('id, rating, comment, created_at, patient:users(full_name)')
+          .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
           .eq('doctor_id', id)
           .order('created_at', { ascending: false })
           .limit(10),
@@ -97,6 +99,28 @@ export default function DoctorProfilePage() {
 
   return (
     <div className="p-8 max-w-6xl">
+      {/* Fullscreen image overlay */}
+      {imageFullscreen && doctor.user?.profile_photo_url && (
+        <div
+          className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center"
+          onClick={() => setImageFullscreen(false)}
+        >
+          <button
+            onClick={() => setImageFullscreen(false)}
+            className="absolute top-6 right-6 w-11 h-11 rounded-full bg-white/15 flex items-center justify-center text-white hover:bg-white/25 transition-colors text-2xl font-bold"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+          <img
+            src={doctor.user.profile_photo_url}
+            alt={doctor.user.full_name ?? ''}
+            className="max-w-full max-h-[85vh] object-contain rounded-2xl"
+            onClick={e => e.stopPropagation()}
+          />
+        </div>
+      )}
+
       {/* Back */}
       <Link href="/patient/doctors" className="inline-flex items-center gap-2 text-ink-black/50 hover:text-ink-black text-sm mb-6 transition-colors">
         ← Back to Doctors
@@ -107,16 +131,30 @@ export default function DoctorProfilePage() {
         <div className="lg:col-span-1">
           <div className="card p-6 flex flex-col items-center text-center gap-4">
             <div className="relative">
-              <div className="w-24 h-24 rounded-3xl bg-gradient-hero flex items-center justify-center text-white font-black text-3xl">
-                {doctor.user?.full_name?.charAt(0) ?? '?'}
-              </div>
+              {doctor.user?.profile_photo_url ? (
+                <button
+                  onClick={() => setImageFullscreen(true)}
+                  className="focus:outline-none"
+                  title="View full image"
+                >
+                  <img
+                    src={doctor.user.profile_photo_url}
+                    alt={doctor.user.full_name ?? ''}
+                    className="w-24 h-24 rounded-3xl object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                  />
+                </button>
+              ) : (
+                <div className="w-24 h-24 rounded-3xl bg-gradient-hero flex items-center justify-center text-white font-black text-3xl">
+                  {stripDrPrefix(doctor.user?.full_name ?? '?').charAt(0)}
+                </div>
+              )}
               {doctor.is_online && (
                 <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-success border-2 border-white" />
               )}
             </div>
 
             <div>
-              <h1 className="font-montserrat font-black text-xl text-ink-black">Dr. {doctor.user?.full_name}</h1>
+              <h1 className="font-montserrat font-black text-xl text-ink-black">Dr. {stripDrPrefix(doctor.user?.full_name ?? '')}</h1>
               <p className="text-int-blue font-semibold text-sm mt-0.5">{doctor.specialty}</p>
               <p className="text-ink-black/50 text-xs mt-1">{doctor.hospital_name}</p>
             </div>

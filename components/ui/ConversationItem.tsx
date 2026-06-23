@@ -11,6 +11,7 @@ import {
 } from 'react-native'
 
 import { colors } from '@/constants/colors'
+import { shadow } from '@/lib/shadow'
 import { fonts } from '@/constants/fonts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -345,11 +346,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingVertical: 8,
     width: '100%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 10,
+    ...shadow('#000', 0, 8, 20, 0.15, 10),
   },
   menuHeader: {
     fontFamily: fonts.semiBold,

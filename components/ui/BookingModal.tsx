@@ -2,6 +2,8 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import * as Linking from 'expo-linking'
+import * as WebBrowser from 'expo-web-browser'
 import { useRef, useEffect, useState } from 'react'
 import {
   ActivityIndicator,
@@ -24,6 +26,11 @@ import { getAuthClient } from '@/lib/supabase'
 type ConsultationType = 'chat' | 'phone' | 'video'
 type TimingType = 'now' | 'schedule'
 
+interface ActiveCredit {
+  creditConsultationId: string
+  creditAmount:         number
+}
+
 type Props = {
   visible: boolean
   doctor: Doctor | null
@@ -36,17 +43,56 @@ const CONSULT_TYPES: { id: ConsultationType; label: string; icon: string; color:
   { id: 'video', label: 'Video Call', icon: 'videocam', color: '#7C3AED' },
 ]
 
-const TIME_SLOTS = ['09:00 AM', '10:00 AM', '11:00 AM', '02:00 PM', '03:00 PM', '04:00 PM']
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-function getNextDays(count: number) {
+function parseTimeMins(t: string): number {
+  const [timePart, meridiem] = t.split(' ')
+  const [h, m] = timePart.split(':').map(Number)
+  let hour = h
+  if (meridiem === 'PM' && h !== 12) hour += 12
+  if (meridiem === 'AM' && h === 12) hour = 0
+  return hour * 60 + m
+}
+
+function formatTimeMins(totalMins: number): string {
+  const h24 = Math.floor(totalMins / 60)
+  const m = totalMins % 60
+  const meridiem = h24 >= 12 ? 'PM' : 'AM'
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
+  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
+}
+
+function getAvailableSlots(
+  availability: Doctor['availability'],
+  dayValue: string
+): string[] {
+  if (!availability) return []
+  const dayName = DAY_NAMES[new Date(dayValue + 'T12:00:00').getDay()]
+  const cfg = availability[dayName]
+  if (!cfg?.enabled || !cfg.startTime || !cfg.endTime) return []
+  const blocked: string[] = (availability as any).blocked_dates ?? []
+  if (blocked.includes(dayValue)) return []
+  const start = parseTimeMins(cfg.startTime)
+  const end = parseTimeMins(cfg.endTime)
+  const slots: string[] = []
+  for (let t = start; t < end; t += 60) slots.push(formatTimeMins(t))
+  return slots
+}
+
+function getNextDays(count: number, availability?: Doctor['availability']) {
   const days = []
   const now = new Date()
   for (let i = 0; i < count; i++) {
     const d = new Date(now)
     d.setDate(now.getDate() + i)
+    const value = d.toISOString().split('T')[0]
+    if (availability) {
+      const slots = getAvailableSlots(availability, value)
+      if (slots.length === 0) continue
+    }
     days.push({
       label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
-      value: d.toISOString().split('T')[0],
+      value,
     })
   }
   return days
@@ -62,6 +108,7 @@ function parseScheduledAt(dayValue: string, timeSlot: string): string {
   return `${dayValue}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`
 }
 
+
 export function BookingModal({ visible, doctor, onClose }: Props) {
   const router = useRouter()
   const { getToken } = useAuth()
@@ -73,7 +120,10 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const [selectedDay, setSelectedDay] = useState(0)
   const [selectedTime, setSelectedTime] = useState('')
   const [confirming, setConfirming] = useState(false)
-  const days = getNextDays(7)
+  const [paying, setPaying] = useState(false)
+  const [activeCredit, setActiveCredit] = useState<ActiveCredit | null>(null)
+  const [creditLoading, setCreditLoading] = useState(false)
+  const days = getNextDays(14, doctor?.availability ?? undefined)
 
   useEffect(() => {
     if (visible) {
@@ -83,11 +133,56 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       setSelectedDay(0)
       setSelectedTime('')
       setConfirming(false)
+      setPaying(false)
+      setActiveCredit(null)
+      setCreditLoading(false)
       Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start()
     } else {
       Animated.timing(slideAnim, { toValue: 300, duration: 220, useNativeDriver: true }).start()
     }
   }, [visible])
+
+  // Check for active consultation credit when patient reaches the review step
+  useEffect(() => {
+    if (step !== 3 || !user) return
+    let cancelled = false
+    setCreditLoading(true)
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || cancelled) return
+        const client = getAuthClient(token)
+
+        const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!userData || cancelled) return
+
+        const { data: credits } = await client
+          .from('consultations')
+          .select('id, credit_amount')
+          .eq('patient_id', userData.id)
+          .eq('consultation_credit', true)
+          .eq('credit_used', false)
+          .order('created_at', { ascending: false })
+          .limit(1)
+
+        if (cancelled) return
+        if (credits && credits.length > 0) {
+          setActiveCredit({
+            creditConsultationId: credits[0].id,
+            creditAmount:         Number(credits[0].credit_amount ?? 0),
+          })
+        } else {
+          setActiveCredit(null)
+        }
+      } catch {
+        // credit check is best-effort
+      } finally {
+        if (!cancelled) setCreditLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step])
 
   if (!doctor) return null
 
@@ -98,16 +193,75 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   }
 
   const selectedType = CONSULT_TYPES.find(t => t.id === consultType)!
+  const newFee = getPrice(consultType)
+  const creditCoversAll = activeCredit !== null && newFee <= activeCredit.creditAmount
+  const additionalRequired = activeCredit ? Math.max(0, newFee - activeCredit.creditAmount) : newFee
 
-  const handleConfirm = async () => {
-    setConfirming(true)
+  // ── Apply full credit (no Chapa needed) ──────────────────────────────────
+  const applyFullCredit = async (consultationId: string, creditConsultationId: string) => {
+    const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
+    const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey':        supabaseAnonKey,
+      },
+      body: JSON.stringify({
+        patient_clerk_id:       user?.id ?? '',
+        credit_consultation_id: creditConsultationId,
+        new_consultation_id:    consultationId,
+      }),
+    })
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data?.error ?? 'Failed to apply credit')
+    return data
+  }
+
+  const initiateChapaPayment = async () => {
+    setPaying(true)
+    let consultationId: string | null = null
+    const chargeAmount = creditCoversAll ? 0 : additionalRequired
+
+    // Set up Linking listener BEFORE opening the browser so we catch the
+    // carehub:// deep link even when Chapa's flow goes through an external
+    // banking app (CBE Birr, Telebirr, etc.) that breaks the
+    // ASWebAuthenticationSession context.
+    const deepLinkReturn = 'carehub://payment/return'
+    let capturedLinkingUrl: string | null = null
+    let resolveLinking: (url: string) => void = () => {}
+    const linkingPromise = new Promise<string>(res => { resolveLinking = res })
+    const linkingSub = Linking.addEventListener('url', ({ url }) => {
+      if (url.startsWith(deepLinkReturn)) {
+        capturedLinkingUrl = url
+        resolveLinking(url)
+      }
+    })
+
+    const navigateToReturn = (chapaStatus: string, id: string, scheduledAt: string) => {
+      onClose()
+      router.push({
+        pathname: '/(patient)/payment-return',
+        params: {
+          consultationId:   id,
+          doctorId:         doctor.id,
+          doctorName:       doctor.name,
+          consultationType: consultType,
+          chapaStatus,
+          timing,
+          scheduledAt: timing !== 'now' ? scheduledAt : '',
+        },
+      })
+    }
+
     try {
       const token = await getToken()
       if (!token || !user) throw new Error('Not authenticated')
 
       const client = getAuthClient(token)
 
-      // Resolve the patient's users.id from their Clerk ID
       const { data: userData, error: userErr } = await client
         .from('users')
         .select('id')
@@ -126,59 +280,177 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
         .from('consultations')
         .insert({
           patient_id: userData.id,
-          doctor_id: doctor.id,
-          type: consultType,
-          status: 'pending',
-          scheduled_at: scheduledAt,
-          patient_amount: price,
-          doctor_amount: Math.round(price * 0.8),
+          doctor_id:  doctor.id,
+          type:       consultType,
+          status:     'pending_payment',
+          scheduled_at:    scheduledAt,
+          patient_amount:  price,
+          doctor_amount:   Math.round(price * 0.8),
           platform_amount: Math.round(price * 0.2),
-          payment_status: 'pending',
+          payment_status:  'pending',
         })
         .select('id')
         .single()
 
-      if (consultErr || !consultation) throw new Error('Failed to create consultation. Please try again.')
+      if (consultErr || !consultation) throw new Error('Failed to create booking. Please try again.')
+      consultationId = consultation.id
 
-      onClose()
-      if (timing === 'now') {
+      const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
+      const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+
+      // ── Full credit coverage — skip Chapa entirely ───────────────────────
+      if (creditCoversAll && activeCredit) {
+        await applyFullCredit(consultation.id, activeCredit.creditConsultationId)
+        onClose()
         router.push({
           pathname: '/(patient)/waiting-room',
           params: {
-            consultationId: consultation.id,
-            doctorId: doctor.id,
-            doctorName: doctor.name,
+            consultationId:   consultation.id,
+            doctorId:         doctor.id,
+            doctorName:       doctor.name,
             consultationType: consultType,
           },
         })
-      } else {
-        Alert.alert(
-          'Appointment Scheduled',
-          `Your ${selectedType.label} consultation with ${doctor.name} has been scheduled for ${days[selectedDay].label} at ${selectedTime}.`,
-          [{ text: 'OK' }]
-        )
+        return
       }
+
+      // ── Partial credit — call apply-credit first (stores credit_source_id) ─
+      if (activeCredit) {
+        await applyFullCredit(consultation.id, activeCredit.creditConsultationId)
+          .catch(() => { /* partial credit already stored even if marking fails */ })
+      }
+
+      // Chapa requires an https:// return_url and strips all custom query params it
+      // didn't add — so we use the bare edge function URL with no extra params.
+      // The edge function always 302-redirects to carehub://payment/return which
+      // ASWebAuthenticationSession intercepts (matching deepLinkReturn sentinel below).
+      const chapaReturnUrl = `${supabaseUrl}/functions/v1/payment-redirect`
+
+      const controller = new AbortController()
+      const timeoutId  = setTimeout(() => controller.abort(), 30_000)
+
+      let payResp: Response
+      try {
+        payResp = await fetch(`${supabaseUrl}/functions/v1/initialize-payment`, {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${supabaseAnonKey}`,
+            'apikey':        supabaseAnonKey,
+          },
+          body: JSON.stringify({
+            consultation_id:  consultation.id,
+            amount:           chargeAmount > 0 ? chargeAmount : price,
+            email:            user.primaryEmailAddress?.emailAddress ?? '',
+            first_name:       user.firstName  ?? 'Patient',
+            last_name:        user.lastName   ?? user.firstName ?? 'User',
+            type:             consultType,
+            doctor_name:      doctor.name,
+            return_url:       chapaReturnUrl,
+            ...(activeCredit ? { credit_source_id: activeCredit.creditConsultationId } : {}),
+          }),
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
+
+      let payData: any
+      try { payData = await payResp.json() } catch { payData = {} }
+
+      if (!payResp.ok || !payData?.checkout_url) {
+        const raw = payData?.error
+        const msg = typeof raw === 'string' && raw.length
+          ? raw
+          : typeof raw === 'object' && raw !== null
+            ? JSON.stringify(raw)
+            : `Payment initialization failed (HTTP ${payResp.status}). Please try again.`
+        throw new Error(msg)
+      }
+
+      // Open Chapa checkout. deepLinkReturn is the sentinel: when the web
+      // return page does window.location.replace('carehub://...'), the
+      // in-app browser catches it and resolves with type:'success'.
+      const result = await WebBrowser.openAuthSessionAsync(payData.checkout_url, deepLinkReturn)
+
+      // ── Success: deep-link caught inside ASWebAuthenticationSession ────────
+      if (result.type === 'success') {
+        let chapaStatus = 'unknown'
+        try {
+          const urlObj = new URL(result.url ?? '')
+          chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
+        } catch {}
+        navigateToReturn(chapaStatus, consultation.id, scheduledAt)
+        return
+      }
+
+      // ── Dismiss: browser closed ────────────────────────────────────────────
+      // When Chapa's flow opens an external banking app (CBE Birr, Telebirr…),
+      // ASWebAuthenticationSession breaks and returns 'dismiss'. The bank app
+      // completes the payment then iOS fires the carehub:// deep link via
+      // Linking. We wait up to 4 s for that event before assuming cancellation.
+      if (!capturedLinkingUrl) {
+        await Promise.race([
+          linkingPromise,
+          new Promise<void>(res => setTimeout(res, 4000)),
+        ])
+      }
+
+      if (capturedLinkingUrl) {
+        let chapaStatus = 'unknown'
+        try {
+          const urlObj = new URL(capturedLinkingUrl)
+          chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
+        } catch {}
+        navigateToReturn(chapaStatus, consultation.id, scheduledAt)
+        return
+      }
+
+      // No deep link. The user may have paid and hit X on the receipt, or may
+      // have cancelled without paying. We don't know here, so we hand off to
+      // payment-return which polls the DB for up to 60 s and cancels only after
+      // confirming the webhook never arrived. The verifying screen also has a
+      // manual "I didn't pay" button for users who genuinely cancelled.
+      navigateToReturn('unknown', consultation.id, scheduledAt)
     } catch (err: any) {
-      Alert.alert('Booking Failed', err?.message ?? 'Something went wrong. Please try again.')
+      if (consultationId) {
+        const token = await getToken().catch(() => null)
+        if (token) {
+          getAuthClient(token)
+            .from('consultations')
+            .update({ status: 'cancelled' })
+            .eq('id', consultationId)
+            .then(() => {})
+        }
+      }
+      Alert.alert(
+        'Payment Failed',
+        err?.message ?? 'Something went wrong. Please try again.',
+        [{ text: 'OK' }],
+      )
     } finally {
-      setConfirming(false)
+      linkingSub.remove()
+      setPaying(false)
     }
   }
 
   const canGoNext = () => {
-    if (step === 2 && timing === 'schedule') return selectedTime !== ''
+    if (step === 2 && timing === 'schedule') {
+      if (days.length === 0) return false
+      return selectedTime !== ''
+    }
     return true
   }
 
   const handleNext = () => {
     if (step === 1) setStep(2)
     else if (step === 2) setStep(3)
-    else handleConfirm()
+    else initiateChapaPayment()
   }
 
   return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} />
+    <Modal visible={visible} transparent animationType="none" onRequestClose={paying ? undefined : onClose}>
+      <Pressable style={styles.backdrop} onPress={paying ? undefined : onClose} />
       <Animated.View style={[styles.sheet, { transform: [{ translateY: slideAnim }] }]}>
         {/* Handle */}
         <View style={styles.handle} />
@@ -189,7 +461,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
             <Text style={styles.title}>Book Consultation</Text>
             <Text style={styles.doctorName}>{doctor.name}</Text>
           </View>
-          <Pressable onPress={onClose} style={styles.closeBtn}>
+          <Pressable onPress={paying ? undefined : onClose} style={styles.closeBtn}>
             <Ionicons name="close" size={22} color="#6B7280" />
           </Pressable>
         </View>
@@ -253,59 +525,111 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
               {timing === 'schedule' && (
                 <>
                   <Text style={styles.pickerLabel}>Select Date</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dayScroll}>
-                    {days.map((day, idx) => (
-                      <Pressable
-                        key={day.value}
-                        onPress={() => setSelectedDay(idx)}
-                        style={[styles.dayChip, selectedDay === idx && styles.dayChipSelected]}
-                      >
-                        <Text style={[styles.dayText, selectedDay === idx && styles.dayTextSelected]}>
-                          {day.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
+                  {days.length === 0 ? (
+                    <View style={styles.noSlotsWrap}>
+                      <Text style={styles.noSlotsText}>No available dates in the next two weeks.</Text>
+                    </View>
+                  ) : (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dayScroll}>
+                      {days.map((day, idx) => (
+                        <Pressable
+                          key={day.value}
+                          onPress={() => { setSelectedDay(idx); setSelectedTime('') }}
+                          style={[styles.dayChip, selectedDay === idx && styles.dayChipSelected]}
+                        >
+                          <Text style={[styles.dayText, selectedDay === idx && styles.dayTextSelected]}>
+                            {day.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  )}
 
-                  <Text style={styles.pickerLabel}>Select Time</Text>
-                  <View style={styles.timeGrid}>
-                    {TIME_SLOTS.map(slot => (
-                      <Pressable
-                        key={slot}
-                        onPress={() => setSelectedTime(slot)}
-                        style={[styles.timeChip, selectedTime === slot && styles.timeChipSelected]}
-                      >
-                        <Text style={[styles.timeText, selectedTime === slot && styles.timeTextSelected]}>
-                          {slot}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                  {days.length > 0 && (() => {
+                    const slots = getAvailableSlots(doctor?.availability ?? null, days[selectedDay]?.value ?? '')
+                    return (
+                      <>
+                        <Text style={styles.pickerLabel}>Select Time</Text>
+                        {slots.length === 0 ? (
+                          <View style={styles.noSlotsWrap}>
+                            <Text style={styles.noSlotsText}>No time slots available for this day.</Text>
+                          </View>
+                        ) : (
+                          <View style={styles.timeGrid}>
+                            {slots.map(slot => (
+                              <Pressable
+                                key={slot}
+                                onPress={() => setSelectedTime(slot)}
+                                style={[styles.timeChip, selectedTime === slot && styles.timeChipSelected]}
+                              >
+                                <Text style={[styles.timeText, selectedTime === slot && styles.timeTextSelected]}>
+                                  {slot}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        )}
+                      </>
+                    )
+                  })()}
                 </>
               )}
             </View>
           )}
 
-          {/* ── Step 3: Confirm ── */}
+          {/* ── Step 3: Review & Payment ── */}
           {step === 3 && (
             <View style={styles.stepContent}>
-              <Text style={styles.stepLabel}>Review & Confirm</Text>
+              <Text style={styles.stepLabel}>Review & Pay</Text>
               <View style={styles.summaryCard}>
                 <Row label="Doctor" value={doctor.name} />
                 <Row label="Type" value={selectedType.label} />
                 <Row label="Timing" value={timing === 'now' ? 'On-Demand (Now)' : `${days[selectedDay].label} at ${selectedTime}`} />
                 <View style={styles.summaryDivider} />
-                <Row label="Consultation Fee" value={`ETB ${getPrice(consultType)}`} bold />
-                <Row label="Platform Fee" value="ETB 10" />
+                <Row label="Consultation Fee" value={`ETB ${newFee}`} bold />
+                {activeCredit && (
+                  <>
+                    <Row label="Consultation Credit" value={`-ETB ${activeCredit.creditAmount}`} bold />
+                  </>
+                )}
                 <View style={styles.summaryDivider} />
-                <Row label="Total" value={`ETB ${getPrice(consultType) + 10}`} bold teal />
+                {activeCredit ? (
+                  creditCoversAll
+                    ? <Row label="Total Due" value="ETB 0 (Credit Applied)" bold teal />
+                    : <Row label="Additional Payment" value={`ETB ${additionalRequired}`} bold teal />
+                ) : (
+                  <Row label="Total" value={`ETB ${newFee}`} bold teal />
+                )}
               </View>
-              <View style={styles.noticeCard}>
-                <Ionicons name="information-circle" size={18} color={colors.information} />
-                <Text style={styles.noticeText}>
-                  Payment integration is coming soon. Your booking will be confirmed once payment is available.
-                </Text>
-              </View>
+
+              {/* Credit banner */}
+              {activeCredit && !creditLoading && (
+                <View style={styles.creditBanner}>
+                  <Ionicons name="wallet-outline" size={16} color="#059669" />
+                  <Text style={styles.creditBannerText}>
+                    {creditCoversAll
+                      ? 'Your consultation credit covers the full amount. No payment required.'
+                      : `Your ETB ${activeCredit.creditAmount} credit is applied. Pay only ETB ${additionalRequired} via Chapa.`}
+                  </Text>
+                </View>
+              )}
+
+              {/* Chapa payment methods — only when payment needed */}
+              {!creditCoversAll && (
+                <View style={styles.chapaCard}>
+                  <Text style={styles.chapaTitle}>Pay securely with Chapa</Text>
+                  <View style={styles.chapaMethodsRow}>
+                    {['CBE Birr', 'Telebirr', 'Awash', 'HelloCash'].map(m => (
+                      <View key={m} style={styles.chapaMethod}>
+                        <Text style={styles.chapaMethodText}>{m}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={styles.chapaNote}>
+                    You will be redirected to Chapa to complete your payment. Your booking is confirmed only after successful payment.
+                  </Text>
+                </View>
+              )}
             </View>
           )}
         </ScrollView>
@@ -323,8 +647,8 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
           )}
           <Pressable
             onPress={handleNext}
-            disabled={!canGoNext() || confirming}
-            style={({ pressed }) => [styles.nextBtnWrap, pressed && { opacity: 0.88 }, (!canGoNext() || confirming) && styles.btnDisabled]}
+            disabled={!canGoNext() || paying}
+            style={({ pressed }) => [styles.nextBtnWrap, pressed && { opacity: 0.88 }, (!canGoNext() || paying) && styles.btnDisabled]}
           >
             <LinearGradient
               colors={gradients.interactive}
@@ -332,11 +656,17 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
               end={{ x: 1, y: 0 }}
               style={styles.nextBtn}
             >
-              {confirming ? (
+              {paying ? (
                 <ActivityIndicator color={colors.mistWhite} />
               ) : (
                 <Text style={styles.nextBtnText}>
-                  {step === 3 ? (timing === 'now' ? 'Confirm & Find Doctor' : 'Schedule Appointment') : 'Continue →'}
+                  {step === 3
+                    ? creditCoversAll
+                      ? 'Confirm Booking (Free with Credit)'
+                      : activeCredit
+                        ? `Pay ETB ${additionalRequired} with Chapa`
+                        : `Pay ETB ${newFee} with Chapa`
+                    : 'Continue →'}
                 </Text>
               )}
             </LinearGradient>
@@ -426,6 +756,8 @@ const styles = StyleSheet.create({
   // Schedule pickers
   pickerLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 10 },
   dayScroll: { marginBottom: 20 },
+  noSlotsWrap: { paddingVertical: 14, paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.cloudGrey, marginBottom: 16 },
+  noSlotsText: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', textAlign: 'center' },
   dayChip: {
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
     borderWidth: 1.5, borderColor: colors.steelGrey,
@@ -455,12 +787,31 @@ const styles = StyleSheet.create({
   summaryTeal: { color: colors.tealGreen },
   summaryDivider: { height: 1, backgroundColor: colors.cloudGrey },
 
-  // Notice
-  noticeCard: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
-    backgroundColor: '#EFF6FF', borderRadius: 12, padding: 14,
+  // Credit banner (step 3)
+  creditBanner: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 8,
+    borderRadius: 12, padding: 14, marginBottom: 14,
+    backgroundColor: 'rgba(5,150,105,0.1)',
+    borderWidth: 1, borderColor: 'rgba(5,150,105,0.3)',
   },
-  noticeText: { flex: 1, fontFamily: fonts.regular, fontSize: 13, color: '#1E40AF', lineHeight: 20 },
+  creditBannerText: {
+    flex: 1, fontFamily: fonts.regular, fontSize: 13, color: '#059669', lineHeight: 18,
+  },
+
+  // Chapa payment section
+  chapaCard: {
+    borderRadius: 14, borderWidth: 1, borderColor: colors.steelGrey,
+    padding: 16, gap: 12, marginBottom: 14,
+    backgroundColor: '#F0FDFB',
+  },
+  chapaTitle: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
+  chapaMethodsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chapaMethod: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+    backgroundColor: colors.mistWhite, borderWidth: 1, borderColor: colors.steelGrey,
+  },
+  chapaMethodText: { fontFamily: fonts.medium, fontSize: 12, color: '#374151' },
+  chapaNote: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', lineHeight: 18 },
 
   // Footer
   footer: { flexDirection: 'row', gap: 10, paddingHorizontal: 20, paddingTop: 16 },

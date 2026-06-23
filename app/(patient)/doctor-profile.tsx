@@ -4,8 +4,10 @@ import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
 import {
   Image,
+  Modal,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -16,31 +18,34 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
+import { useTranslation } from 'react-i18next'
 
-const CONSULT_OPTIONS = [
-  { id: 'chat' as const, label: 'Chat', icon: 'chatbubble-ellipses', color: colors.tealGreen, desc: 'Text-based consultation' },
-  { id: 'phone' as const, label: 'Phone Call', icon: 'call', color: colors.careBlue, desc: 'Audio-only call' },
-  { id: 'video' as const, label: 'Video Call', icon: 'videocam', color: '#7C3AED', desc: 'Face-to-face video call' },
-]
-
-const AVAILABILITY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const AVAILABLE_DAYS = [0, 1, 2, 3, 4] // Mon–Fri by default
 
 interface DoctorData {
   id: string; name: string; subtitle?: string; specialty: string
   rating_average: number; review_count: number; years_experience?: number
   bio?: string; chat_price: number; phone_price: number; video_price: number
   is_online: boolean; profile_photo_url?: string | null
+  availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
 }
 interface ReviewData {
   id: string; patientName: string; rating: number; comment: string; date: string
 }
 
 export default function DoctorProfileScreen() {
+  const { t } = useTranslation()
   const { id } = useLocalSearchParams<{ id: string }>()
   const router = useRouter()
+
+  const CONSULT_OPTIONS = [
+    { id: 'chat' as const, label: t('chat'), icon: 'chatbubble-ellipses', color: colors.tealGreen, desc: t('textBasedConsultation') },
+    { id: 'phone' as const, label: t('phoneCall'), icon: 'call', color: colors.careBlue, desc: t('audioOnlyCall') },
+    { id: 'video' as const, label: t('videoCall'), icon: 'videocam', color: '#7C3AED', desc: t('faceToFaceVideo') },
+  ]
   const [bookingVisible, setBookingVisible] = useState(false)
+  const [imageFullscreen, setImageFullscreen] = useState(false)
   const [doctor, setDoctor] = useState<DoctorData | null>(null)
   const [reviews, setReviews] = useState<ReviewData[]>([])
   const [loading, setLoading] = useState(true)
@@ -55,7 +60,7 @@ export default function DoctorProfileScreen() {
         .single(),
       supabase
         .from('reviews')
-        .select('*, patient:patient_id(full_name)')
+        .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
         .eq('doctor_id', id)
         .order('created_at', { ascending: false })
         .limit(10),
@@ -75,6 +80,7 @@ export default function DoctorProfileScreen() {
           video_price: Number(dp.video_price) ?? 0,
           is_online: dp.is_online ?? false,
           profile_photo_url: (dp as any).users?.profile_photo_url ?? null,
+          availability: (dp as any).availability ?? null,
         })
         if (rv) {
           setReviews(
@@ -104,7 +110,7 @@ export default function DoctorProfileScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <Text style={{ fontFamily: fonts.regular, color: '#6B7280' }}>Loading...</Text>
+          <Text style={{ fontFamily: fonts.regular, color: '#6B7280' }}>{t('loading')}</Text>
         </View>
       </SafeAreaView>
     )
@@ -117,8 +123,15 @@ export default function DoctorProfileScreen() {
         <Pressable onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="arrow-back" size={22} color={colors.inkBlack} />
         </Pressable>
-        <Text style={styles.navTitle}>Doctor Profile</Text>
-        <Pressable style={styles.shareBtn}>
+        <Text style={styles.navTitle}>{t('doctorProfile')}</Text>
+        <Pressable
+          style={styles.shareBtn}
+          onPress={() =>
+            Share.share({
+              message: `${doctor?.name ?? 'Doctor'} — ${doctor?.specialty ?? 'Specialist'} on Dawa`,
+            })
+          }
+        >
           <Ionicons name="share-outline" size={22} color={colors.inkBlack} />
         </Pressable>
       </View>
@@ -132,7 +145,9 @@ export default function DoctorProfileScreen() {
         >
           <View style={styles.photoWrap}>
             {doctor.profile_photo_url ? (
-              <Image source={{ uri: doctor.profile_photo_url }} style={styles.photo} />
+              <Pressable onPress={() => setImageFullscreen(true)}>
+                <Image source={{ uri: doctor.profile_photo_url }} style={styles.photo} />
+              </Pressable>
             ) : (
               <View style={styles.photoPlaceholder}>
                 <Ionicons name="person" size={52} color={colors.steelGrey} />
@@ -141,7 +156,7 @@ export default function DoctorProfileScreen() {
             {doctor.is_online && (
               <View style={styles.onlineBadge}>
                 <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>Online</Text>
+                <Text style={styles.onlineText}>{t('online')}</Text>
               </View>
             )}
           </View>
@@ -160,32 +175,32 @@ export default function DoctorProfileScreen() {
             <View style={styles.stat}>
               <Ionicons name="star" size={16} color={colors.warning} />
               <Text style={styles.statValue}>{doctor.rating_average.toFixed(1)}</Text>
-              <Text style={styles.statLabel}>Rating</Text>
+              <Text style={styles.statLabel}>{t('rating')}</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.stat}>
               <Ionicons name="people-outline" size={16} color={colors.tealGreen} />
               <Text style={styles.statValue}>{doctor.review_count}</Text>
-              <Text style={styles.statLabel}>Reviews</Text>
+              <Text style={styles.statLabel}>{t('reviews')}</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.stat}>
               <Ionicons name="time-outline" size={16} color={colors.careBlue} />
               <Text style={styles.statValue}>{doctor.years_experience ?? '—'}</Text>
-              <Text style={styles.statLabel}>Yrs Exp</Text>
+              <Text style={styles.statLabel}>{t('yrsExp')}</Text>
             </View>
           </View>
         </LinearGradient>
 
         {/* ── About ── */}
         {doctor.bio ? (
-          <Section title="About">
+          <Section title={t('about')}>
             <Text style={styles.bioText}>{doctor.bio}</Text>
           </Section>
         ) : null}
 
         {/* ── Consultation Options ── */}
-        <Section title="Consultation Options">
+        <Section title={t('consultationOptions')}>
           {CONSULT_OPTIONS.map(opt => (
             <View key={opt.id} style={styles.consultCard}>
               <View style={[styles.consultIconWrap, { backgroundColor: `${opt.color}18` }]}>
@@ -201,26 +216,36 @@ export default function DoctorProfileScreen() {
         </Section>
 
         {/* ── Availability ── */}
-        <Section title="Weekly Availability">
-          <View style={styles.availRow}>
-            {AVAILABILITY.map((day, idx) => (
-              <View key={day} style={styles.dayWrap}>
-                <View style={[styles.dayCircle, AVAILABLE_DAYS.includes(idx) && styles.dayCircleActive]}>
-                  <Text style={[styles.dayText, AVAILABLE_DAYS.includes(idx) && styles.dayTextActive]}>
-                    {day}
-                  </Text>
-                </View>
-              </View>
-            ))}
-          </View>
-          <Text style={styles.availNote}>Available 9:00 AM – 5:00 PM on marked days</Text>
+        <Section title={t('weeklyAvailability')}>
+          {doctor?.availability ? (
+            Object.entries(doctor.availability)
+              .filter(([, v]) => v.enabled)
+              .length === 0 ? (
+              <Text style={styles.availInfoText}>No availability set</Text>
+            ) : (
+              Object.entries(doctor.availability)
+                .filter(([, v]) => v.enabled)
+                .map(([day, v]) => (
+                  <View key={day} style={styles.availInfoRow}>
+                    <Ionicons name="calendar-outline" size={16} color={colors.tealGreen} />
+                    <Text style={styles.availInfoText}>{day}: {v.startTime} – {v.endTime}</Text>
+                  </View>
+                ))
+            )
+          ) : (
+            <View style={styles.availInfoRow}>
+              <Ionicons name="calendar-outline" size={18} color={colors.tealGreen} />
+              <Text style={styles.availInfoText}>Contact doctor to schedule</Text>
+            </View>
+          )}
+          <Text style={styles.availNote}>{t('availableHoursNote')}</Text>
         </Section>
 
         {/* ── Reviews ── */}
-        <Section title={`Patient Reviews (${reviews.length})`}>
+        <Section title={`${t('patientReviews')} (${reviews.length})`}>
           {reviews.length === 0 ? (
             <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' }}>
-              No reviews yet.
+              {t('noReviewsYet')}
             </Text>
           ) : reviews.map(review => (
             <View key={review.id} style={styles.reviewCard}>
@@ -258,7 +283,7 @@ export default function DoctorProfileScreen() {
             style={styles.bookBtn}
           >
             <Ionicons name="calendar-outline" size={20} color={colors.mistWhite} />
-            <Text style={styles.bookBtnText}>Book Consultation</Text>
+            <Text style={styles.bookBtnText}>{t('bookConsultation')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -268,6 +293,30 @@ export default function DoctorProfileScreen() {
         doctor={doctor as any}
         onClose={() => setBookingVisible(false)}
       />
+
+      {/* Fullscreen image viewer */}
+      <Modal
+        visible={imageFullscreen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setImageFullscreen(false)}
+      >
+        <View style={styles.fsOverlay}>
+          <Pressable
+            style={styles.fsCloseBtn}
+            onPress={() => setImageFullscreen(false)}
+          >
+            <Ionicons name="close" size={28} color={colors.mistWhite} />
+          </Pressable>
+          {doctor.profile_photo_url && (
+            <Image
+              source={{ uri: doctor.profile_photo_url }}
+              style={styles.fsImage}
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
     </SafeAreaView>
   )
 }
@@ -315,8 +364,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: colors.mistWhite, borderRadius: 12,
     paddingHorizontal: 8, paddingVertical: 4,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1, shadowRadius: 4, elevation: 2,
+    ...shadow('#000', 0, 1, 4, 0.1, 2),
   },
   onlineDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
   onlineText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.success },
@@ -345,16 +393,8 @@ const styles = StyleSheet.create({
   consultPrice: { fontFamily: fonts.bold, fontSize: 15, color: colors.careBlue },
 
   // Availability
-  availRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  dayWrap: { alignItems: 'center' },
-  dayCircle: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: colors.cloudGrey,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  dayCircleActive: { backgroundColor: colors.tealGreen },
-  dayText: { fontFamily: fonts.semiBold, fontSize: 11, color: '#9CA3AF' },
-  dayTextActive: { color: colors.mistWhite },
+  availInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  availInfoText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
   availNote: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginTop: 10, textAlign: 'center' },
 
   // Reviews
@@ -371,6 +411,20 @@ const styles = StyleSheet.create({
   starsRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginTop: 2 },
   reviewDate: { fontFamily: fonts.regular, fontSize: 11, color: '#9CA3AF', marginLeft: 6 },
   reviewComment: { fontFamily: fonts.regular, fontSize: 13, color: '#374151', lineHeight: 20 },
+
+  // Fullscreen image
+  fsOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.95)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  fsCloseBtn: {
+    position: 'absolute', top: 56, right: 20,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+    zIndex: 10,
+  },
+  fsImage: { width: '100%', height: '80%' },
 
   // Bottom bar
   bottomBar: {

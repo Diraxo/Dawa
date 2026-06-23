@@ -1,269 +1,441 @@
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
+  Animated,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import {
-  ClientRoleType,
-  IRtcEngineEventHandler,
-  RtcSurfaceView,
-  VideoSourceType,
-} from 'react-native-agora'
-import * as ScreenCapture from 'expo-screen-capture'
 
-import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
+import { EndConsultationSheet, type ConsultationSummaryData } from '@/components/doctor/EndConsultationSheet'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
-import { useAuthStore } from '@/store/authStore'
+import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
+import { streamClient, markConsultationCompleted } from '@/lib/stream'
+import { getAuthClient } from '@/lib/supabase'
+import { logger } from '@/lib/logger'
+
+// Lazy-load Stream Chat and react-native-agora video view
+let Chat: any = null
+let ChannelView: any = null
+let MessageComposer: any = null
+let MessageList: any = null
+let RtcSurfaceView: any = null
+let VideoSourceType: any = null
+try {
+  const sc = require('stream-chat-expo')
+  Chat = sc.Chat
+  ChannelView = sc.Channel
+  MessageComposer = sc.MessageComposer
+  MessageList = sc.MessageList
+} catch {}
+try {
+  const rna = require('react-native-agora')
+  RtcSurfaceView = rna.RtcSurfaceView
+  VideoSourceType = rna.VideoSourceType
+} catch {}
+
+type CallStatus = 'connecting' | 'waiting' | 'connected' | 'error'
+
+function formatDuration(secs: number) {
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function CtrlBtn({
+  icon, label, active = false, danger = false, onPress,
+}: {
+  icon: string; label: string; active?: boolean; danger?: boolean; onPress: () => void
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.ctrlBtn,
+        active && styles.ctrlBtnActive,
+        danger && styles.ctrlBtnDanger,
+        pressed && { opacity: 0.8 },
+      ]}
+      onPress={onPress}
+    >
+      <Ionicons
+        name={icon as any}
+        size={danger ? 28 : 22}
+        color={danger ? colors.mistWhite : active ? colors.tealGreen : 'rgba(255,255,255,0.9)'}
+      />
+      <Text style={[styles.ctrlLabel, active && { color: colors.tealGreen }]}>{label}</Text>
+    </Pressable>
+  )
+}
 
 export default function DoctorVideoConsultationScreen() {
-  const { patientName, consultationId } = useLocalSearchParams<{
-    patientName?: string
-    consultationId?: string
-  }>()
   const router = useRouter()
-  const { userId } = useAuthStore()
-  const displayName = patientName ?? 'Patient'
+  const { consultationId, patientName } = useLocalSearchParams<{
+    consultationId: string; patientName: string
+  }>()
+  const { getToken } = useAuth()
+  const { user } = useUser()
 
-  // Prevent screenshots and screen recording during video calls
-  ScreenCapture.usePreventScreenCapture()
-
-  const [seconds, setSeconds] = useState(0)
-  const [muted, setMuted] = useState(false)
-  const [camOff, setCamOff] = useState(false)
-  const [speakerOn, setSpeakerOn] = useState(true)
+  const [isMuted, setIsMuted] = useState(false)
+  const [isCameraOff, setIsCameraOff] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
   const [showEndSheet, setShowEndSheet] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [duration, setDuration] = useState(0)
+  const [callStatus, setCallStatus] = useState<CallStatus>('connecting')
   const [remoteUid, setRemoteUid] = useState<number | null>(null)
-  const [joined, setJoined] = useState(false)
+  const [activeChannel, setActiveChannel] = useState<any>(null)
+  const [channelLoading, setChannelLoading] = useState(false)
 
-  const channelName = consultationId ?? `consult-demo`
-  const localUid = useMemo(() => userId ? uidFromString(userId) : 2, [userId])
-  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName
-  const remoteUidRef = useRef<number | null>(null)
+  const chatSlide = useRef(new Animated.Value(0)).current
+  const engineRef = useRef<any>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Timer
+  // Agora video call
   useEffect(() => {
-    const t = setInterval(() => setSeconds(s => s + 1), 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  // Agora engine — video call
-  useEffect(() => {
-    if (!agoraReady) return
-
+    const appId = process.env.EXPO_PUBLIC_AGORA_APP_ID
+    if (!appId || !consultationId || !user) return
     let mounted = true
-    let engine: ReturnType<typeof getAgoraEngine> | null = null
 
-    try {
-      engine = getAgoraEngine()
-    } catch {
-      return
+    async function joinCall() {
+      try {
+        const clerkToken = await getToken()
+        if (!clerkToken || !mounted) return
+
+        const uid = uidFromString(user!.id)
+        const channelName = consultationId as string
+
+        const engine = getAgoraEngine()
+        engineRef.current = engine
+
+        const { ClientRoleType } = require('react-native-agora')
+
+        engine.registerEventHandler({
+          onJoinChannelSuccess: () => {
+            if (mounted) setCallStatus('waiting')
+          },
+          onUserJoined: (_connection: any, rUid: number) => {
+            if (mounted) {
+              setRemoteUid(rUid)
+              setCallStatus('connected')
+              if (!timerRef.current) {
+                timerRef.current = setInterval(() => setDuration(d => d + 1), 1000)
+              }
+              // Mark consultation in_progress once both parties are connected
+              getToken().then(tok => {
+                if (!tok || !consultationId) return
+                getAuthClient(tok)
+                  .from('consultations')
+                  .update({ status: 'in_progress' })
+                  .eq('id', consultationId)
+                  .in('status', ['accepted', 'active'])
+                  .then(() => {})
+              })
+            }
+          },
+          onUserOffline: () => {
+            if (mounted) { setRemoteUid(null); setCallStatus('waiting') }
+          },
+          onError: (err: any) => {
+            logger.error('[Agora] Video call error:', err)
+            if (mounted) setCallStatus('error')
+          },
+        })
+
+        engine.enableVideo()
+        engine.enableAudio()
+        engine.startPreview()
+
+        const agoraToken = await fetchAgoraToken(channelName, uid, clerkToken)
+        if (!mounted) return
+
+        await engine.joinChannel(agoraToken, channelName, uid, {
+          clientRoleType: ClientRoleType.ClientRoleBroadcaster,
+          publishMicrophoneTrack: true,
+          publishCameraTrack: true,
+          autoSubscribeAudio: true,
+          autoSubscribeVideo: true,
+        })
+      } catch (err) {
+        logger.error('[Agora] Doctor video join error:', err)
+        if (mounted) setCallStatus('error')
+      }
     }
 
-    const handler: IRtcEngineEventHandler = {
-      onJoinChannelSuccess: () => {
-        if (mounted) setJoined(true)
-      },
-      onUserJoined: (_conn, uid) => {
-        if (!mounted) return
-        remoteUidRef.current = uid
-        setRemoteUid(uid)
-      },
-      onUserOffline: (_conn, uid) => {
-        if (!mounted) return
-        if (uid === remoteUidRef.current) {
-          remoteUidRef.current = null
-          setRemoteUid(null)
-        }
-      },
-    }
-
-    engine.registerEventHandler(handler)
-    engine.enableAudio()
-    engine.enableVideo()
-    engine.setEnableSpeakerphone(true)
-    engine.startPreview()
-    engine.joinChannel('', channelName, localUid, {
-      clientRoleType: ClientRoleType.ClientRoleBroadcaster,
-    })
+    joinCall()
 
     return () => {
       mounted = false
-      engine?.unregisterEventHandler(handler)
-      engine?.stopPreview()
-      engine?.leaveChannel()
-      releaseAgoraEngine()
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+      try {
+        engineRef.current?.leaveChannel()
+        engineRef.current?.stopPreview()
+        releaseAgoraEngine()
+        engineRef.current = null
+      } catch {}
     }
-  }, [agoraReady, channelName, localUid])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consultationId, user])
 
   // Sync mute
   useEffect(() => {
-    if (!agoraReady) return
-    try { getAgoraEngine().muteLocalAudioStream(muted) } catch {}
-  }, [muted, agoraReady])
+    try { engineRef.current?.muteLocalAudioStream(isMuted) } catch {}
+  }, [isMuted])
 
-  // Sync camera
+  // Sync camera — enableLocalVideo(false) stops capture, muteLocalVideoStream only hides it
   useEffect(() => {
-    if (!agoraReady) return
-    try { getAgoraEngine().muteLocalVideoStream(camOff) } catch {}
-  }, [camOff, agoraReady])
+    try { engineRef.current?.enableLocalVideo(!isCameraOff) } catch {}
+  }, [isCameraOff])
 
-  // Sync speaker
-  useEffect(() => {
-    if (!agoraReady) return
-    try { getAgoraEngine().setEnableSpeakerphone(speakerOn) } catch {}
-  }, [speakerOn, agoraReady])
+  const openChat = () => {
+    if (!activeChannel && consultationId && Chat) {
+      setChannelLoading(true)
+      const ch = streamClient.channel('messaging', consultationId)
+      ch.watch()
+        .then(() => setActiveChannel(ch))
+        .catch(err => logger.error('[DoctorVideoChat] watch failed:', err))
+        .finally(() => setChannelLoading(false))
+    }
+    Animated.spring(chatSlide, { toValue: 1, useNativeDriver: true, tension: 65, friction: 11 }).start()
+    setChatOpen(true)
+  }
 
-  const formatTime = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  const closeChat = () => {
+    Animated.timing(chatSlide, { toValue: 0, duration: 250, useNativeDriver: true }).start(() =>
+      setChatOpen(false)
+    )
+  }
+
+  const handleEndSubmit = async (data: ConsultationSummaryData) => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      const token = await getToken()
+      if (token && consultationId) {
+        const client = getAuthClient(token)
+        await client.from('consultation_summaries').insert({
+          consultation_id: consultationId,
+          chief_complaint: data.chiefComplaint,
+          diagnosis: data.diagnosis,
+          prescription: data.prescriptions.length > 0
+            ? JSON.stringify(data.prescriptions)
+            : null,
+          followup_recommendation: data.followUp || null,
+          referral_needed: data.referralNeeded,
+        })
+        await client
+          .from('consultations')
+          .update({ status: 'completed', ended_at: new Date().toISOString(), duration_minutes: Math.ceil(duration / 60) })
+          .eq('id', consultationId)
+        try { await markConsultationCompleted(consultationId) } catch (e) { logger.error('[Stream] markCompleted failed:', e) }
+      }
+    } catch (err) {
+      logger.error('[DoctorVideo] failed to save summary:', err)
+    } finally {
+      setSubmitting(false)
+    }
+    try { engineRef.current?.leaveChannel(); engineRef.current?.stopPreview(); releaseAgoraEngine(); engineRef.current = null } catch {}
+    setShowEndSheet(false)
+    router.replace('/(doctor)/(tabs)/home' as any)
+  }
+
+  const handleEnd = () => {
+    Alert.alert('End Video Call', 'End this video consultation?', [
+      { text: 'Stay', style: 'cancel' },
+      { text: 'End Call', style: 'destructive', onPress: () => setShowEndSheet(true) },
+    ])
+  }
+
+  const chatTranslateY = chatSlide.interpolate({ inputRange: [0, 1], outputRange: [600, 0] })
+  const myUid = user ? uidFromString(user.id) : 0
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+    <View style={styles.root}>
       {showEndSheet && (
         <EndConsultationSheet
           consultationId={consultationId ?? ''}
-          patientName={displayName}
-          onSubmit={() => { setShowEndSheet(false); router.replace('/(doctor)/(tabs)/consultations') }}
-          onClose={() => setShowEndSheet(false)}
+          patientName={patientName ?? 'Patient'}
+          onSubmit={handleEndSubmit}
+          onClose={() => !submitting && setShowEndSheet(false)}
         />
       )}
 
-      {/* Patient video (full screen) */}
-      <View style={styles.mainVideo}>
-        {agoraReady && remoteUid ? (
+      {/* ── Video feed area ── */}
+      <View style={styles.videoArea}>
+        {/* Remote video — patient */}
+        {RtcSurfaceView && remoteUid !== null ? (
           <RtcSurfaceView
-            canvas={{ uid: remoteUid }}
-            style={styles.fullFill}
+            style={styles.remoteVideo}
+            canvas={{ uid: remoteUid, sourceType: VideoSourceType?.VideoSourceRemote }}
           />
         ) : (
-          <View style={styles.patientVideoPlaceholder}>
-            <Ionicons name="person" size={80} color="rgba(255,255,255,0.15)" />
-            <Text style={styles.patientVideoName}>{displayName}</Text>
-            <Text style={styles.patientVideoSub}>
-              {joined ? 'Waiting for patient...' : 'Connecting...'}
+          <View style={styles.videoPlaceholder}>
+            <View style={styles.patientAvatarCircle}>
+              <Ionicons name="person" size={52} color="rgba(255,255,255,0.3)" />
+            </View>
+            <Text style={styles.videoStatusText}>
+              {callStatus === 'connecting' ? 'Connecting…' :
+               callStatus === 'error' ? 'Connection failed' :
+               callStatus === 'waiting' ? 'Waiting for patient…' : ''}
             </Text>
+            <Text style={styles.videoPatientName}>{patientName ?? 'Patient'}</Text>
           </View>
         )}
 
-        {/* Timer overlay */}
-        <View style={styles.timerOverlay}>
-          <View style={styles.timerBadge}>
-            <View style={styles.liveDot} />
-            <Text style={styles.timerText}>{formatTime(seconds)}</Text>
-          </View>
-        </View>
-
-        {/* Doctor self-view (top-right) */}
+        {/* Self-view bubble — local video */}
         <View style={styles.selfView}>
-          {agoraReady && !camOff ? (
+          {RtcSurfaceView && !isCameraOff ? (
             <RtcSurfaceView
-              canvas={{ uid: 0, sourceType: VideoSourceType.VideoSourceCamera }}
-              style={styles.selfViewFill}
+              style={StyleSheet.absoluteFillObject}
+              canvas={{ uid: myUid, sourceType: VideoSourceType?.VideoSourceCamera }}
             />
           ) : (
-            <View style={styles.selfViewOff}>
-              <Ionicons
-                name={camOff ? 'videocam-off' : 'person'}
-                size={22}
-                color="rgba(255,255,255,0.5)"
-              />
+            <View style={styles.selfViewFallback}>
+              <Ionicons name={isCameraOff ? 'videocam-off' : 'person'} size={20} color="rgba(255,255,255,0.5)" />
             </View>
           )}
           <Text style={styles.selfLabel}>You</Text>
         </View>
 
-        {/* Screen share badge */}
-        <View style={styles.screenShareBadge}>
-          <Ionicons name="desktop-outline" size={13} color="rgba(255,255,255,0.5)" />
-          <Text style={styles.screenShareText}>Screen share — coming soon</Text>
-        </View>
+        {/* Overlay header */}
+        <SafeAreaView style={styles.videoOverlay} edges={['top']}>
+          <View style={styles.overlayRow}>
+            <View style={styles.badge}>
+              <Ionicons name="videocam" size={13} color="#7C3AED" />
+              <Text style={[styles.badgeText, { color: '#7C3AED' }]}>Video Call</Text>
+            </View>
+            <Text style={styles.timerText}>{formatDuration(duration)}</Text>
+          </View>
+          <Text style={styles.patientNameOverlay}>{patientName ?? 'Patient'}</Text>
+        </SafeAreaView>
       </View>
 
-      {/* Controls */}
-      <View style={styles.controls}>
-        <View style={styles.controlsRow}>
-          <Pressable
-            style={[styles.controlBtn, muted && styles.controlBtnActive]}
-            onPress={() => setMuted(m => !m)}
-          >
-            <Ionicons name={muted ? 'mic-off' : 'mic'} size={22} color={muted ? colors.mistWhite : colors.inkBlack} />
-            <Text style={[styles.controlLabel, muted && styles.controlLabelActive]}>{muted ? 'Unmute' : 'Mute'}</Text>
-          </Pressable>
+      {/* ── Controls bar ── */}
+      <SafeAreaView style={styles.controls} edges={['bottom']}>
+        <CtrlBtn icon={isMuted ? 'mic-off' : 'mic'} label={isMuted ? 'Unmute' : 'Mute'} active={isMuted} onPress={() => setIsMuted(m => !m)} />
+        <CtrlBtn icon={isCameraOff ? 'videocam-off' : 'videocam'} label={isCameraOff ? 'Cam On' : 'Camera'} active={isCameraOff} onPress={() => setIsCameraOff(c => !c)} />
+        <CtrlBtn icon="chatbubble-ellipses" label="Chat" active={chatOpen} onPress={chatOpen ? closeChat : openChat} />
+        <CtrlBtn icon="call" label="End" danger onPress={handleEnd} />
+      </SafeAreaView>
 
-          <Pressable
-            style={[styles.controlBtn, camOff && styles.controlBtnActive]}
-            onPress={() => setCamOff(c => !c)}
-          >
-            <Ionicons name={camOff ? 'videocam-off' : 'videocam'} size={22} color={camOff ? colors.mistWhite : colors.inkBlack} />
-            <Text style={[styles.controlLabel, camOff && styles.controlLabelActive]}>{camOff ? 'Cam On' : 'Cam Off'}</Text>
-          </Pressable>
-
-          <Pressable style={styles.endBtn} onPress={() => setShowEndSheet(true)}>
-            <Ionicons name="call" size={26} color={colors.mistWhite} />
-          </Pressable>
-
-          <Pressable
-            style={[styles.controlBtn, speakerOn && styles.controlBtnActive]}
-            onPress={() => setSpeakerOn(s => !s)}
-          >
-            <Ionicons name={speakerOn ? 'volume-high' : 'volume-mute'} size={22} color={speakerOn ? colors.mistWhite : colors.inkBlack} />
-            <Text style={[styles.controlLabel, speakerOn && styles.controlLabelActive]}>Speaker</Text>
-          </Pressable>
-
-          <Pressable
-            style={styles.controlBtn}
-            onPress={() => Alert.alert('Coming Soon', 'Screen sharing will be available in a future update.')}
-          >
-            <Ionicons name="desktop-outline" size={22} color={colors.inkBlack} />
-            <Text style={styles.controlLabel}>Share</Text>
-          </Pressable>
-        </View>
-      </View>
-    </SafeAreaView>
+      {/* ── Slide-up chat panel ── */}
+      {chatOpen && (
+        <Animated.View style={[styles.chatPanel, { transform: [{ translateY: chatTranslateY }] }]}>
+          <View style={styles.panelHandle} />
+          <View style={styles.panelHeader}>
+            <Text style={styles.panelTitle}>Chat — share notes or images</Text>
+            <Pressable onPress={closeChat} hitSlop={12}>
+              <Ionicons name="chevron-down" size={22} color={colors.inkBlack} />
+            </Pressable>
+          </View>
+          {!Chat ? (
+            <View style={styles.panelEmpty}>
+              <Ionicons name="chatbubble-ellipses-outline" size={40} color={colors.steelGrey} />
+              <Text style={styles.panelEmptyText}>Chat not available in Expo Go</Text>
+              <Text style={styles.panelEmptyHint}>Use a development build to enable chat</Text>
+            </View>
+          ) : channelLoading || !activeChannel ? (
+            <View style={styles.panelEmpty}>
+              <ActivityIndicator color={colors.careBlue} size="large" />
+            </View>
+          ) : (
+            <View style={{ flex: 1 }}>
+              <Chat client={streamClient}>
+                <ChannelView channel={activeChannel}>
+                  <MessageList />
+                  <MessageComposer />
+                </ChannelView>
+              </Chat>
+            </View>
+          )}
+        </Animated.View>
+      )}
+    </View>
   )
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#070E27' },
-  fullFill: { flex: 1 },
+  root: { flex: 1, backgroundColor: '#070E27' },
 
-  mainVideo: { flex: 1, position: 'relative' },
-  patientVideoPlaceholder: {
-    flex: 1, backgroundColor: '#0D1A3A',
-    alignItems: 'center', justifyContent: 'center', gap: 12,
-  },
-  patientVideoName: { fontFamily: fonts.bold, fontSize: 22, color: 'rgba(255,255,255,0.6)' },
-  patientVideoSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.3)' },
-
-  timerOverlay: { position: 'absolute', top: 16, left: 0, right: 0, alignItems: 'center' },
-  timerBadge: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7 },
-  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.error },
-  timerText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.mistWhite },
-
-  selfView: { position: 'absolute', top: 70, right: 16, alignItems: 'center', gap: 4 },
-  selfViewFill: { width: 90, height: 120, borderRadius: 14, overflow: 'hidden', borderWidth: 2, borderColor: 'rgba(255,255,255,0.2)' },
-  selfViewOff: {
-    width: 90, height: 120, borderRadius: 14,
-    backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center',
+  videoArea: { flex: 1, position: 'relative', backgroundColor: '#000' },
+  remoteVideo: { flex: 1 },
+  videoPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+  patientAvatarCircle: {
+    width: 120, height: 120, borderRadius: 60,
+    backgroundColor: '#1A2744', alignItems: 'center', justifyContent: 'center',
     borderWidth: 2, borderColor: 'rgba(255,255,255,0.1)',
   },
-  selfLabel: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.6)' },
+  videoStatusText: { fontFamily: fonts.regular, fontSize: 14, color: 'rgba(255,255,255,0.4)' },
+  videoPatientName: { fontFamily: fonts.semiBold, fontSize: 18, color: 'rgba(255,255,255,0.7)' },
 
-  screenShareBadge: { position: 'absolute', bottom: 10, left: 0, right: 0, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 6 },
-  screenShareText: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.35)', fontStyle: 'italic' },
+  selfView: {
+    position: 'absolute', top: 90, right: 16,
+    width: 80, height: 110, borderRadius: 14,
+    backgroundColor: '#1A2744', overflow: 'hidden',
+    borderWidth: 2, borderColor: colors.tealGreen,
+  },
+  selfViewFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  selfLabel: {
+    position: 'absolute', bottom: 4, left: 0, right: 0,
+    textAlign: 'center', fontFamily: fonts.regular,
+    fontSize: 9, color: 'rgba(255,255,255,0.6)',
+  },
 
-  controls: { paddingHorizontal: 20, paddingBottom: 32, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
-  controlsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  controlBtn: { alignItems: 'center', gap: 6, width: 58, height: 58, borderRadius: 30, backgroundColor: 'rgba(255,255,255,0.15)', justifyContent: 'center' },
-  controlBtnActive: { backgroundColor: colors.careBlue },
-  controlLabel: { fontFamily: fonts.medium, fontSize: 10, color: 'rgba(255,255,255,0.7)' },
-  controlLabelActive: { color: colors.mistWhite },
-  endBtn: { width: 64, height: 64, borderRadius: 32, backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center', shadowColor: colors.error, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 12, elevation: 6, transform: [{ rotate: '135deg' }] },
+  videoOverlay: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 16 },
+  overlayRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12 },
+  badge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(124,58,237,0.2)', borderRadius: 20,
+    paddingHorizontal: 12, paddingVertical: 6,
+  },
+  badgeText: { fontFamily: fonts.semiBold, fontSize: 13 },
+  timerText: { fontFamily: fonts.bold, fontSize: 16, color: 'rgba(255,255,255,0.8)' },
+  patientNameOverlay: {
+    fontFamily: fonts.semiBold, fontSize: 16, color: 'rgba(255,255,255,0.85)', paddingBottom: 8,
+  },
+
+  controls: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around',
+    paddingHorizontal: 16, paddingVertical: 12,
+    backgroundColor: 'rgba(7,14,39,0.95)',
+    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.06)',
+  },
+  ctrlBtn: {
+    alignItems: 'center', gap: 6, paddingVertical: 12, paddingHorizontal: 10,
+    borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.08)', minWidth: 64,
+  },
+  ctrlBtnActive: { backgroundColor: 'rgba(0,191,165,0.12)' },
+  ctrlBtnDanger: {
+    backgroundColor: colors.error, width: 68, height: 68,
+    borderRadius: 34, paddingVertical: 0,
+  },
+  ctrlLabel: { fontFamily: fonts.regular, fontSize: 10, color: 'rgba(255,255,255,0.7)' },
+
+  chatPanel: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, height: '60%',
+    backgroundColor: colors.mistWhite,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 8, elevation: 24,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.35, shadowRadius: 14,
+  },
+  panelHandle: {
+    width: 44, height: 5, borderRadius: 3, backgroundColor: colors.steelGrey,
+    alignSelf: 'center', marginBottom: 8,
+  },
+  panelHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.cloudGrey,
+  },
+  panelTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  panelEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
+  panelEmptyText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  panelEmptyHint: { fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' },
 })

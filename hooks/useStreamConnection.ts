@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 
 import { streamClient } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
+import { logger } from '@/lib/logger'
 
 export function useStreamConnection() {
   const { isSignedIn, getToken } = useAuth()
@@ -50,7 +51,7 @@ export function useStreamConnection() {
 
         await connectStream(token)
       } catch (err) {
-        console.error('[Stream] connection failed:', err)
+        logger.error('[Stream] connection failed:', err)
       } finally {
         connectingRef.current = false
       }

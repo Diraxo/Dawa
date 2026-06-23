@@ -56,7 +56,7 @@ export default function ForDoctors() {
                 <span className="gradient-hero-text">Your Way.</span>
               </h2>
               <p className="text-ink-black/60 text-lg leading-relaxed mb-8">
-                Join hundreds of doctors already using CareHub to deliver exceptional care — without the overhead of a traditional clinic.
+                Join hundreds of doctors already using Dawa to deliver exceptional care — without the overhead of a traditional clinic.
               </p>
 
               {/* Process steps */}

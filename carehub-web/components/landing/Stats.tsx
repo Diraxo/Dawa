@@ -57,7 +57,7 @@ export default function Stats() {
         >
           <h2 className="font-montserrat font-black text-4xl md:text-5xl text-white mb-4">
             Why Patients{' '}
-            <span className="gradient-interactive-text">Trust CareHub</span>
+            <span className="gradient-interactive-text">Trust Dawa</span>
           </h2>
           <p className="text-white/50 text-lg">
             Quality care backed by real commitments — not marketing numbers.

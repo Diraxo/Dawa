@@ -1,8 +1,8 @@
-import { useSignIn } from '@clerk/clerk-expo'
+﻿import { useSignIn } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -21,6 +21,8 @@ import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { OTPInput } from '@/components/ui/OTPInput'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { otpLimiter } from '@/lib/otpLimiter'
+import { useTranslation } from 'react-i18next'
 
 type Step = 'email' | 'otp' | 'password'
 
@@ -29,6 +31,7 @@ function isValidEmail(e: string) {
 }
 
 export default function ForgotPasswordScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
@@ -44,6 +47,13 @@ export default function ForgotPasswordScreen() {
   const [error, setError] = useState('')
   const [successAlert, setSuccessAlert] = useState(false)
   const [resendAlert, setResendAlert] = useState(false)
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current)
+    }
+  }, [])
 
   const otpComplete = otp.join('').length === 6
 
@@ -79,14 +89,15 @@ export default function ForgotPasswordScreen() {
   }
 
   // Step 2 – verify OTP
-  const handleVerifyOTP = async () => {
-    if (!isLoaded || !otpComplete) return
+  const handleVerifyOTP = async (codeOverride?: string) => {
+    const code = codeOverride ?? otp.join('')
+    if (!isLoaded || code.length !== 6) return
     setLoading(true)
     setError('')
     try {
       const result = await signIn.attemptFirstFactor({
         strategy: 'reset_password_email_code',
-        code: otp.join(''),
+        code,
       })
       if (result.status === 'needs_new_password') {
         setStep('password')
@@ -127,6 +138,10 @@ export default function ForgotPasswordScreen() {
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive({ session: result.createdSessionId })
         setSuccessAlert(true)
+        successTimerRef.current = setTimeout(() => {
+          setSuccessAlert(false)
+          router.replace('/(auth)/role' as never)
+        }, 2000)
       } else {
         setError('Failed to reset password. Please try again.')
       }
@@ -141,15 +156,28 @@ export default function ForgotPasswordScreen() {
     }
   }
 
+  const handleOTPChange = (newOtp: string[]) => {
+    setOtp(newOtp)
+    setError('')
+    if (newOtp.every((d) => d !== '')) handleVerifyOTP(newOtp.join(''))
+  }
+
   const handleResend = async () => {
     if (!isLoaded) return
+    const normalizedEmail = email.trim().toLowerCase()
+    const check = await otpLimiter.canRequest(normalizedEmail)
+    if (!check.allowed) {
+      setError(check.message ?? 'Please wait before requesting another code.')
+      return
+    }
     setOtp(['', '', '', '', '', ''])
     setError('')
     try {
       await signIn.create({
         strategy: 'reset_password_email_code',
-        identifier: email.trim().toLowerCase(),
+        identifier: normalizedEmail,
       })
+      await otpLimiter.recordRequest(normalizedEmail)
       setResendAlert(true)
     } catch {
       setError('Failed to resend code. Please try again.')
@@ -162,13 +190,14 @@ export default function ForgotPasswordScreen() {
       <CareHubAlert
         visible={successAlert}
         variant="success"
-        title="Password Reset!"
-        message="Your password has been reset successfully. You're all set to continue."
+        title={t('passwordResetSuccess')}
+        message={t('passwordResetMsg')}
         buttons={[
           {
-            text: 'Continue',
+            text: t('continue'),
             style: 'primary',
             onPress: () => {
+              if (successTimerRef.current) clearTimeout(successTimerRef.current)
               setSuccessAlert(false)
               router.replace('/(auth)/role' as never)
             },
@@ -180,11 +209,11 @@ export default function ForgotPasswordScreen() {
       <CareHubAlert
         visible={resendAlert}
         variant="info"
-        title="Code Resent"
-        message="A new verification code has been sent to your email. Check your spam folder if needed."
+        title={t('codeResent')}
+        message={t('codeResentMsg')}
         buttons={[
           {
-            text: 'Got it',
+            text: t('gotIt'),
             style: 'primary',
             onPress: () => setResendAlert(false),
           },
@@ -205,33 +234,31 @@ export default function ForgotPasswordScreen() {
       >
         {/* Top nav */}
         <View style={styles.topNav}>
-          <Pressable onPress={() => (step === 'email' ? router.back() : setStep(step === 'otp' ? 'email' : 'otp'))} hitSlop={8}>
+          <Pressable onPress={() => (step === 'email' ? (router.canGoBack() ? router.back() : router.replace('/(auth)/sign-in' as never)) : setStep(step === 'otp' ? 'email' : 'otp'))} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
           </Pressable>
         </View>
 
         {/* Logo */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={68} />
+          <CareHubLogo size={68} variant="dark" />
           <Text style={styles.brandName}>
-            CARE<Text style={styles.brandHub}>HUB</Text>
+            DA<Text style={styles.brandHub}>WA</Text>
           </Text>
         </View>
 
         {/* ── Step: Email ── */}
         {step === 'email' && (
           <>
-            <Text style={styles.title}>Forgot Password?</Text>
-            <Text style={styles.subtitle}>
-              Enter your account email and we{'’'}ll send you a reset code.
-            </Text>
+            <Text style={styles.title}>{t('forgotPassword')}</Text>
+            <Text style={styles.subtitle}>{t('forgotPasswordSubtitle')}</Text>
 
             <View style={styles.form}>
               <View style={[styles.inputRow, !!error && styles.inputRowError]}>
                 <Ionicons name="mail-outline" size={20} color="#9CA3AF" style={styles.icon} />
                 <TextInput
                   style={styles.input}
-                  placeholder="Type your email"
+                  placeholder={t('typeEmail')}
                   placeholderTextColor="#9CA3AF"
                   value={email}
                   onChangeText={(v) => { setEmail(v); setError('') }}
@@ -258,7 +285,7 @@ export default function ForgotPasswordScreen() {
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.btnText}>Send Reset Code</Text>
+                    <Text style={styles.btnText}>{t('sendResetCode')}</Text>
                   )}
                 </LinearGradient>
               </Pressable>
@@ -269,16 +296,14 @@ export default function ForgotPasswordScreen() {
         {/* ── Step: OTP ── */}
         {step === 'otp' && (
           <>
-            <Text style={styles.title}>Check Your Email</Text>
-            <Text style={styles.subtitle}>
-              We sent a 6-digit code to
-            </Text>
+            <Text style={styles.title}>{t('checkYourEmail')}</Text>
+            <Text style={styles.subtitle}>{t('weSentCodeTo')}</Text>
             <Text style={styles.emailBold}>{email}</Text>
 
             <View style={styles.form}>
               <OTPInput
                 value={otp}
-                onChange={setOtp}
+                onChange={handleOTPChange}
                 hasError={!!error}
                 autoFocus
               />
@@ -287,9 +312,7 @@ export default function ForgotPasswordScreen() {
               {/* Info card */}
               <View style={styles.infoCard}>
                 <Ionicons name="information-circle" size={18} color="#2962FF" />
-                <Text style={styles.infoText}>
-                  Check your spam folder if you didn{'’'}t receive the email.
-                </Text>
+                <Text style={styles.infoText}>{t('spamNote')}</Text>
               </View>
 
               <Pressable
@@ -306,14 +329,14 @@ export default function ForgotPasswordScreen() {
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.btnText}>Verify Code →</Text>
+                    <Text style={styles.btnText}>{t('verifyCode')} →</Text>
                   )}
                 </LinearGradient>
               </Pressable>
 
               <Pressable onPress={handleResend} style={styles.resendRow}>
-                <Text style={styles.resendText}>Didn{'’'}t receive the code? </Text>
-                <Text style={styles.resendLink}>Resend</Text>
+                <Text style={styles.resendText}>{"Didn't receive the code? "}</Text>
+                <Text style={styles.resendLink}>{t('resendCode')}</Text>
               </Pressable>
             </View>
           </>
@@ -322,10 +345,8 @@ export default function ForgotPasswordScreen() {
         {/* ── Step: New Password ── */}
         {step === 'password' && (
           <>
-            <Text style={styles.title}>Set New Password</Text>
-            <Text style={styles.subtitle}>
-              Create a strong password for your account.
-            </Text>
+            <Text style={styles.title}>{t('newPassword')}</Text>
+            <Text style={styles.subtitle}>Enter and confirm your new password.</Text>
 
             <View style={styles.form}>
               {/* New password */}
@@ -334,7 +355,7 @@ export default function ForgotPasswordScreen() {
                   <Ionicons name="lock-closed-outline" size={20} color="#9CA3AF" style={styles.icon} />
                   <TextInput
                     style={[styles.input, styles.inputFlex]}
-                    placeholder="New password"
+                    placeholder={t('newPassword')}
                     placeholderTextColor="#9CA3AF"
                     value={password}
                     onChangeText={(v) => { setPassword(v); setError('') }}
@@ -359,7 +380,7 @@ export default function ForgotPasswordScreen() {
                   <Ionicons name="lock-closed-outline" size={20} color="#9CA3AF" style={styles.icon} />
                   <TextInput
                     style={[styles.input, styles.inputFlex]}
-                    placeholder="Confirm new password"
+                    placeholder={t('confirmPassword')}
                     placeholderTextColor="#9CA3AF"
                     value={confirmPassword}
                     onChangeText={(v) => { setConfirmPassword(v); setError('') }}
@@ -394,7 +415,7 @@ export default function ForgotPasswordScreen() {
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
-                    <Text style={styles.btnText}>Reset Password</Text>
+                    <Text style={styles.btnText}>{t('resetPassword')}</Text>
                   )}
                 </LinearGradient>
               </Pressable>

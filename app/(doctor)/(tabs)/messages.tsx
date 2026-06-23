@@ -16,8 +16,11 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
+import { logger } from '@/lib/logger'
+import { useTranslation } from 'react-i18next'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +52,7 @@ function formatTime(date: string | Date | null | undefined): string {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function DoctorMessagesScreen() {
+  const { t } = useTranslation()
   const router = useRouter()
   const { isStreamConnected, userId } = useAuthStore()
 
@@ -98,7 +102,7 @@ export default function DoctorMessagesScreen() {
         })
         setConversations(convos)
       } catch (err) {
-        console.error('[DoctorMessages] queryChannels error:', err)
+        logger.error('[DoctorMessages] queryChannels error:', err)
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -135,9 +139,16 @@ export default function DoctorMessagesScreen() {
     setConversations((prev) =>
       prev.map((c) => (c.id === conv.id ? { ...c, unreadCount: 0 } : c))
     )
+    // Mark as read so the badge clears server-side too
+    try {
+      const channels = streamClient.activeChannels
+      const ch = Object.values(channels).find((c: any) => c.id === conv.id)
+      ch?.markRead().catch(() => {})
+    } catch {}
     router.push({
       pathname: '/(doctor)/chat-consultation',
-      params: { channelId: conv.id, patientName: conv.patientName },
+      // channelId = consultationId (Stream channel uses consultation UUID)
+      params: { channelId: conv.id, consultationId: conv.id, patientName: conv.patientName },
     })
   }
 
@@ -147,8 +158,8 @@ export default function DoctorMessagesScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={['top']}>
         <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.header}>
-          <Text style={styles.headerTitle}>Messages</Text>
-          <Text style={styles.headerSub}>Your patient conversations</Text>
+          <Text style={styles.headerTitle}>{t('messages')}</Text>
+          <Text style={styles.headerSub}>{t('noMessagesDesc')}</Text>
         </LinearGradient>
         <View style={styles.centerWrap}>
           <ActivityIndicator color={colors.careBlue} size="large" />
@@ -165,8 +176,8 @@ export default function DoctorMessagesScreen() {
       <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.header}>
         <View style={styles.headerRow}>
           <View>
-            <Text style={styles.headerTitle}>Messages</Text>
-            <Text style={styles.headerSub}>Your patient conversations</Text>
+            <Text style={styles.headerTitle}>{t('messages')}</Text>
+            <Text style={styles.headerSub}>{t('yourPatientConversations')}</Text>
           </View>
           {totalUnread > 0 && (
             <View style={styles.headerBadge}>
@@ -181,7 +192,7 @@ export default function DoctorMessagesScreen() {
         <Ionicons name="search-outline" size={16} color="#9CA3AF" />
         <TextInput
           style={styles.searchInput}
-          placeholder="Search conversations..."
+          placeholder={t('searchConversations')}
           placeholderTextColor="#9CA3AF"
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -197,19 +208,19 @@ export default function DoctorMessagesScreen() {
       {!isStreamConnected ? (
         <View style={styles.emptyWrap}>
           <Ionicons name="wifi-outline" size={52} color={colors.steelGrey} />
-          <Text style={styles.emptyTitle}>Not connected</Text>
-          <Text style={styles.emptyText}>Sign in to see your patient conversations</Text>
+          <Text style={styles.emptyTitle}>{t('notConnected')}</Text>
+          <Text style={styles.emptyText}>{t('signInToSeeConversations')}</Text>
         </View>
       ) : filtered.length === 0 ? (
         <View style={styles.emptyWrap}>
           <Ionicons name="chatbubbles-outline" size={52} color={colors.steelGrey} />
           <Text style={styles.emptyTitle}>
-            {searchQuery ? 'No results found' : 'No messages yet'}
+            {searchQuery ? t('noResultsFound') : t('noMessages')}
           </Text>
           <Text style={styles.emptyText}>
             {searchQuery
               ? `No conversations match "${searchQuery}"`
-              : 'Patient conversations will appear here once you start consultations'}
+              : t('noMessagesDesc')}
           </Text>
         </View>
       ) : (
@@ -276,7 +287,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.mistWhite, margin: 16, borderRadius: 14,
     paddingHorizontal: 14, paddingVertical: 12,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 1,
+    ...shadow('#000', 0, 1, 4, 0.05, 1),
   },
   searchInput: { flex: 1, fontFamily: fonts.regular, fontSize: 14, color: colors.inkBlack, padding: 0 },
 

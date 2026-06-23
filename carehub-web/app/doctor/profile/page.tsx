@@ -3,26 +3,59 @@
 import { useUser, useAuth } from '@clerk/nextjs'
 import { useEffect, useState } from 'react'
 import { getAuthClient } from '@/lib/supabase'
-import { getInitials } from '@/lib/utils'
+import { stripDrPrefix } from '@/lib/utils'
 
 interface DoctorProfile {
   specialty: string
-  years_experience: number
-  hospital_name: string
-  bio: string
+  years_experience: number | null
+  hospital_name: string | null
+  license_number: string | null
+  bio: string | null
   chat_price: number
   phone_price: number
   video_price: number
   status: string
   rating_average: number
   total_consultations: number
+  license_doc_url: string | null
+  id_doc_url: string | null
 }
+
+interface DocEntry { label: string; path: string }
 
 const STATUS_STYLES: Record<string, string> = {
   approved: 'bg-success/10 text-success',
   pending: 'bg-warning/10 text-warning',
   rejected: 'bg-danger/10 text-danger',
   suspended: 'bg-steel-grey text-ink-black/60',
+}
+
+function parseDocuments(profile: DoctorProfile): DocEntry[] {
+  const docs: DocEntry[] = []
+  if (profile.license_doc_url) {
+    try {
+      const paths: string[] = JSON.parse(profile.license_doc_url)
+      paths.forEach((_, i) => docs.push({ label: `License Document ${i + 1}`, path: '' }))
+    } catch {
+      docs.push({ label: 'License Document', path: '' })
+    }
+  }
+  if (profile.id_doc_url) {
+    try {
+      const parsed = JSON.parse(profile.id_doc_url)
+      if (parsed.type === 'national_id') {
+        if (parsed.front) docs.push({ label: 'National ID — Front', path: '' })
+        if (parsed.back) docs.push({ label: 'National ID — Back', path: '' })
+      } else if (parsed.type === 'passport') {
+        if (parsed.file ?? parsed.front) docs.push({ label: 'Passport', path: '' })
+      } else {
+        docs.push({ label: 'ID Document', path: '' })
+      }
+    } catch {
+      docs.push({ label: 'ID Document', path: '' })
+    }
+  }
+  return docs
 }
 
 export default function DoctorProfilePage() {
@@ -33,6 +66,7 @@ export default function DoctorProfilePage() {
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) return
@@ -40,13 +74,14 @@ export default function DoctorProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      const { data: ud } = await client.from('users').select('id').eq('clerk_id', user!.id).single()
+      const { data: ud } = await client.from('users').select('id, profile_photo_url').eq('clerk_id', user!.id).single()
       if (!ud) return
-      const { data: dp } = await client.from('doctor_profiles').select('*').eq('user_id', ud.id).single()
+      setProfilePhotoUrl((ud as any).profile_photo_url || user!.imageUrl || null)
+      const { data: dp } = await client.from('doctor_profiles').select('*').eq('user_id', (ud as any).id).single()
       if (dp) {
         setProfile(dp as DoctorProfile)
         setForm(dp)
-        setProfileId(dp.id)
+        setProfileId((dp as any).id)
       }
     }
     load()
@@ -68,7 +103,9 @@ export default function DoctorProfilePage() {
     setEditing(false)
   }
 
-  const displayName = user?.fullName ?? 'Doctor'
+  const displayName = stripDrPrefix(user?.fullName ?? 'Doctor')
+  const initials = displayName.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2)
+  const docs = profile ? parseDocuments(profile) : []
 
   return (
     <div className="p-8 max-w-2xl">
@@ -77,11 +114,35 @@ export default function DoctorProfilePage() {
         <p className="text-ink-black/50 text-sm mt-1">Manage your doctor profile and pricing</p>
       </div>
 
+      {/* Pending / rejected banner */}
+      {profile && profile.status !== 'approved' && (
+        <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl mb-6 text-sm font-montserrat border
+          ${profile.status === 'rejected'
+            ? 'bg-[#FEE2E2] border-[#FECACA] text-[#991B1B]'
+            : 'bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]'}`}>
+          <span className="text-lg shrink-0 mt-0.5">{profile.status === 'rejected' ? '❌' : '⏳'}</span>
+          <div>
+            <p className="font-bold mb-0.5">
+              {profile.status === 'rejected' ? 'Application Not Approved' : 'Account Under Review'}
+            </p>
+            <p className="opacity-80">
+              {profile.status === 'rejected'
+                ? 'Your application was not approved. Please contact support@dawa.app to reapply.'
+                : 'Your account is under review. You cannot accept consultations until the admin approves you.'}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Avatar card */}
       <div className="card p-6 flex items-center gap-5 mb-6">
-        <div className="w-20 h-20 rounded-3xl bg-gradient-interactive flex items-center justify-center text-white font-black text-2xl flex-shrink-0">
-          {getInitials(displayName)}
-        </div>
+        {profilePhotoUrl ? (
+          <img src={profilePhotoUrl} alt="Profile" className="w-20 h-20 rounded-3xl object-cover flex-shrink-0" />
+        ) : (
+          <div className="w-20 h-20 rounded-3xl bg-gradient-interactive flex items-center justify-center text-white font-black text-2xl flex-shrink-0">
+            {initials}
+          </div>
+        )}
         <div className="flex-1">
           <p className="font-montserrat font-black text-xl text-ink-black">Dr. {displayName}</p>
           <p className="text-ink-black/50 text-sm">{user?.emailAddresses[0]?.emailAddress}</p>
@@ -97,8 +158,8 @@ export default function DoctorProfilePage() {
         </div>
       </div>
 
-      {/* Profile fields */}
-      <div className="card p-6">
+      {/* Practice Details */}
+      <div className="card p-6 mb-6">
         <div className="flex items-center justify-between mb-5">
           <h2 className="font-montserrat font-bold text-lg text-ink-black">Practice Details</h2>
           {!editing ? (
@@ -118,10 +179,11 @@ export default function DoctorProfilePage() {
             { key: 'specialty', label: 'Specialty' },
             { key: 'years_experience', label: 'Years of Experience', type: 'number' },
             { key: 'hospital_name', label: 'Hospital / Clinic' },
+            { key: 'license_number', label: 'License Number', readonly: true },
           ].map(field => (
             <div key={field.key}>
               <label className="block text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">{field.label}</label>
-              {editing ? (
+              {editing && !field.readonly ? (
                 <input
                   type={field.type ?? 'text'}
                   value={(form[field.key as keyof DoctorProfile] as string | number) ?? ''}
@@ -179,6 +241,32 @@ export default function DoctorProfilePage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Documents (read-only) */}
+      <div className="card p-6">
+        <h2 className="font-montserrat font-bold text-lg text-ink-black mb-4">My Documents</h2>
+        {docs.length === 0 ? (
+          <p className="text-sm text-ink-black/40">No documents uploaded yet.</p>
+        ) : (
+          <div className="divide-y divide-cloud-grey">
+            {docs.map((doc, i) => (
+              <div key={i} className="flex items-center gap-3 py-3">
+                <div className="w-9 h-9 rounded-xl bg-[#EFF6FF] flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1A4598" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                </div>
+                <span className="text-sm font-medium text-ink-black">{doc.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-ink-black/40 mt-4">
+          To update your documents, please contact{' '}
+          <a href="mailto:support@dawa.app" className="text-teal-green underline">support@dawa.app</a>.
+        </p>
       </div>
     </div>
   )

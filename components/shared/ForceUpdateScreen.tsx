@@ -4,6 +4,7 @@ import Constants from 'expo-constants'
 import { colors } from '@/constants/colors'
 import { gradients } from '@/constants/gradients'
 import { GradientButton } from '@/components/ui/GradientButton'
+import { shadow } from '@/lib/shadow'
 
 interface Props {
   message?: string
@@ -12,7 +13,7 @@ interface Props {
 }
 
 export default function ForceUpdateScreen({
-  message = 'A new version of CareHub is available. Please update to continue using the app.',
+  message = 'A new version of Dawa is available. Please update to continue using the app.',
   storeUrl = Platform.OS === 'ios'
     ? 'https://apps.apple.com/app/carehub'
     : 'https://play.google.com/store/apps/details?id=com.carehub',
@@ -72,7 +73,7 @@ export default function ForceUpdateScreen({
         </View>
 
         <Text style={styles.footnote}>
-          You must update to continue using CareHub.
+          You must update to continue using Dawa.
         </Text>
       </View>
     </View>
@@ -102,11 +103,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 28,
-    shadowColor: '#2962FF',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 16,
-    elevation: 8,
+    ...shadow('#2962FF', 0, 8, 16, 0.25, 8),
   },
   iconEmoji: {
     fontSize: 44,

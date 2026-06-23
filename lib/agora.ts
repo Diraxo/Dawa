@@ -1,17 +1,25 @@
-import {
-  ChannelProfileType,
-  createAgoraRtcEngine,
-  IRtcEngine,
-} from 'react-native-agora'
+// Pre-load react-native-agora at module level so any TurboModule crash is caught
+// here rather than propagating uncaught during Expo Router's route-tree build.
+// In Expo Go or unlinked builds the native side isn't registered; _rna stays null
+// and getAgoraEngine() throws a clear error instead of crashing at startup.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+let _rna: any = null
+try { _rna = require('react-native-agora') } catch {}
 
-let _engine: IRtcEngine | null = null
+let _engine: any = null
 
-export function getAgoraEngine(): IRtcEngine {
+export function getAgoraEngine(): any {
   if (_engine) return _engine
+  if (!_rna) {
+    throw new Error(
+      '[Agora] react-native-agora is not linked — use a development build, not Expo Go'
+    )
+  }
 
   const appId = process.env.EXPO_PUBLIC_AGORA_APP_ID ?? ''
   if (!appId) throw new Error('[Agora] EXPO_PUBLIC_AGORA_APP_ID is not set')
 
+  const { createAgoraRtcEngine, ChannelProfileType } = _rna
   _engine = createAgoraRtcEngine()
   _engine.initialize({
     appId,
@@ -48,12 +56,13 @@ export async function fetchAgoraToken(
   return token as string
 }
 
-// djb2 hash → stable uint32 UID for Agora (range 1–999999)
+// djb2 hash → stable uint32 UID for Agora (full uint32 range avoids collisions)
 export function uidFromString(str: string): number {
   let h = 5381
   for (let i = 0; i < str.length; i++) {
     h = ((h << 5) + h) ^ str.charCodeAt(i)
     h = h >>> 0
   }
-  return (h % 999998) + 1
+  // Ensure non-zero (Agora treats 0 as "any user")
+  return h === 0 ? 1 : h
 }

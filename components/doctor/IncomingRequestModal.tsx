@@ -5,6 +5,7 @@ import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { shadow } from '@/lib/shadow'
 
 export interface IncomingRequestModalProps {
   visible: boolean
@@ -14,8 +15,17 @@ export interface IncomingRequestModalProps {
   price: number
   currency: string
   consultationId: string
+  waitingStartedAt?: string
   onAccept: () => void
   onDecline: (reason: string) => void
+}
+
+const WAITING_DURATION = 3 * 60
+
+function calcSecondsLeft(waitingStartedAt?: string): number {
+  if (!waitingStartedAt) return WAITING_DURATION
+  const elapsed = Math.floor((Date.now() - new Date(waitingStartedAt).getTime()) / 1000)
+  return Math.max(0, WAITING_DURATION - elapsed)
 }
 
 const DECLINE_REASONS = ['Currently busy', 'Wrong specialty', 'Technical issue', 'Other']
@@ -29,17 +39,18 @@ export function IncomingRequestModal({
   consultationType,
   price,
   currency,
+  waitingStartedAt,
   onAccept,
   onDecline,
 }: IncomingRequestModalProps) {
-  const [timeLeft, setTimeLeft] = useState(30)
+  const [timeLeft, setTimeLeft] = useState(() => calcSecondsLeft(waitingStartedAt))
   const [showDeclineSheet, setShowDeclineSheet] = useState(false)
   const bellAnim = useRef(new Animated.Value(0)).current
 
-  // Reset timer when modal becomes visible
+  // Reset timer when modal becomes visible, syncing from actual waiting start time
   useEffect(() => {
     if (visible) {
-      setTimeLeft(30)
+      setTimeLeft(calcSecondsLeft(waitingStartedAt))
       setShowDeclineSheet(false)
     }
   }, [visible])
@@ -71,7 +82,9 @@ export function IncomingRequestModal({
   }, [timeLeft, visible])
 
   const timerColor =
-    timeLeft > 20 ? colors.success : timeLeft > 10 ? colors.warning : colors.error
+    timeLeft > 60 ? colors.success : timeLeft > 30 ? colors.warning : colors.error
+  const minutes = Math.floor(timeLeft / 60)
+  const secs = timeLeft % 60
 
   const handleDecline = (reason: string) => {
     setShowDeclineSheet(false)
@@ -136,8 +149,9 @@ export function IncomingRequestModal({
 
           {/* Countdown timer */}
           <View style={[styles.timerCircle, { borderColor: timerColor }]}>
-            <Text style={[styles.timerNumber, { color: timerColor }]}>{timeLeft}</Text>
-            <Text style={styles.timerSec}>sec</Text>
+            <Text style={[styles.timerNumber, { color: timerColor }]}>
+              {String(minutes).padStart(2, '0')}:{String(secs).padStart(2, '0')}
+            </Text>
           </View>
 
           {/* Action buttons */}
@@ -194,8 +208,7 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: colors.mistWhite, borderRadius: 24, padding: 24,
     width: '100%', alignItems: 'center', gap: 12,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.15, shadowRadius: 24, elevation: 20,
+    ...shadow('#000', 0, 10, 24, 0.15, 20),
   },
 
   bellWrap: {
@@ -222,11 +235,10 @@ const styles = StyleSheet.create({
   priceAmount: { fontFamily: fonts.bold, fontSize: 28, color: colors.tealGreen },
 
   timerCircle: {
-    width: 90, height: 90, borderRadius: 45,
+    width: 110, height: 110, borderRadius: 55,
     borderWidth: 4, alignItems: 'center', justifyContent: 'center',
   },
-  timerNumber: { fontFamily: fonts.bold, fontSize: 30 },
-  timerSec: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280' },
+  timerNumber: { fontFamily: fonts.bold, fontSize: 26 },
 
   btnRow: { flexDirection: 'row', gap: 12, width: '100%' },
   declineBtn: {

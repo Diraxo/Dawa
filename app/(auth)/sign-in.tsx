@@ -1,12 +1,12 @@
-import { useAuth, useClerk, useSSO } from '@clerk/clerk-expo'
+import { useAuth, useSignIn, useSignUp, useSSO } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Linking from 'expo-linking'
-import { useRouter } from 'expo-router'
+import { useFocusEffect, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as WebBrowser from 'expo-web-browser'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   ActivityIndicator,
@@ -25,136 +25,146 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
-import { supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { LANGUAGES } from '@/constants/languages'
+import { shadow } from '@/lib/shadow'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
+import { useAuthStore } from '@/store/authStore'
 
 WebBrowser.maybeCompleteAuthSession()
-
-// ─── Languages ────────────────────────────────────────────────────────────────
-
-const LANGUAGES = [
-  { id: 'en', nativeName: 'English', englishName: 'English' },
-  { id: 'so', nativeName: 'Soomaali', englishName: 'Somali' },
-  { id: 'am', nativeName: 'አማርኛ', englishName: 'Amharic' },
-  { id: 'om', nativeName: 'Afaan Oromoo', englishName: 'Oromo' },
-  { id: 'ti', nativeName: 'ትግርኛ', englishName: 'Tigrinya' },
-  { id: 'ar', nativeName: 'العربية', englishName: 'Arabic' },
-]
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 }
 
-// ─── Screen ───────────────────────────────────────────────────────────────────
-
 export default function SignInScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
-  const { isSignedIn, userId } = useAuth()
-  const { signOut } = useClerk()
+  const { isSignedIn, userId, getToken } = useAuth()
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage } = useAppStore()
+  const { isLoaded, signIn, setActive } = useSignIn()
+  const { signUp } = useSignUp()
+  const { startSSOFlow } = useSSO()
+
+  const { userRole: localRole } = useAuthStore()
 
   const [langDropdown, setLangDropdown] = useState(false)
   const currentLang =
     LANGUAGES.find((l) => l.id === (selectedLanguage ?? 'en')) ?? LANGUAGES[0]
 
+  const [inputKey, setInputKey] = useState(0)
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-
   const [emailError, setEmailError] = useState('')
+  const [password, setPassword] = useState('')
   const [passwordError, setPasswordError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [globalError, setGlobalError] = useState('')
-
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
   const [facebookLoading, setFacebookLoading] = useState(false)
 
-  const { startSSOFlow } = useSSO()
+  const isFormReady = isValidEmail(email) && password.length > 0
 
-  // ── Auto-navigate if Supabase email session already exists ────────────────
-  useEffect(() => {
-    if (isSignedIn) return // Clerk OAuth user already handled
-    supabaseEmailAuth.auth.getSession().then(async ({ data: { session } }) => {
-      if (!session?.user?.email) return
-      const { data } = await supabaseEmailAuth
-        .from('users')
-        .select('role')
-        .eq('email', session.user.email)
-        .single()
+  // ── Shared redirect state ─────────────────────────────────────────────────
+  const redirectingRef = useRef(false)
+  const intendingSignInRef = useRef(false)
+
+  // Uses getToken() directly so the Supabase query works immediately after setActive,
+  // before _layout.tsx's _clerkTokenGetter effect fires.
+  const checkRoleAndRedirect = useCallback(async (clerkId: string) => {
+    if (redirectingRef.current) return
+    redirectingRef.current = true
+    try {
+      const token = await getToken()
+      const client = token ? getAuthClient(token) : supabase
+      const { data } = await client.from('users').select('role').eq('clerk_id', clerkId).single()
       if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
       else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-    })
-  }, [])
+      else router.replace('/(auth)/role' as never)
+    } catch {
+      if (localRole === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+      else if (localRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+      else router.replace('/(auth)/role' as never)
+    } finally {
+      redirectingRef.current = false
+    }
+  }, [router, localRole, getToken])
 
-  // ── Validation ────────────────────────────────────────────────────────────
-  function validate(): boolean {
-    let ok = true
+  // Clear form every time this screen comes into focus (prevents OS autofill persistence)
+  useFocusEffect(
+    useCallback(() => {
+      setInputKey(k => k + 1)
+      setEmail('')
+      setPassword('')
+      setEmailError('')
+      setPasswordError('')
+      setGlobalError('')
+      setShowPassword(false)
+    }, [])
+  )
+
+  // ── Redirect to dashboard if user is already authenticated ──────────────────
+  useFocusEffect(
+    useCallback(() => {
+      if (isSignedIn && userId && !intendingSignInRef.current) {
+        checkRoleAndRedirect(userId)
+      }
+    }, [isSignedIn, userId, checkRoleAndRedirect])
+  )
+
+  // ── Fires after setActive completes (SSO or fallback for email sign-in) ──────────
+  useEffect(() => {
+    if (isSignedIn && userId && intendingSignInRef.current) {
+      intendingSignInRef.current = false
+      checkRoleAndRedirect(userId)
+    }
+  }, [isSignedIn, userId, checkRoleAndRedirect])
+
+  // ── Email + Password sign-in via Clerk ────────────────────────────────────
+  const handleSignIn = async () => {
+    if (!isLoaded || !isFormReady || loading) return
+    const normalizedEmail = email.trim().toLowerCase()
     setEmailError('')
     setPasswordError('')
     setGlobalError('')
-    if (!email.trim()) { setEmailError('Please enter your email address'); ok = false }
-    else if (!isValidEmail(email)) { setEmailError('Please enter a valid email address'); ok = false }
-    if (!password) { setPasswordError('Please enter your password'); ok = false }
-    return ok
-  }
-
-  // ── Navigate by role (for OAuth users — uses Clerk JWT) ───────────────────
-  const navigateByClerkEmail = useCallback(async (userEmail: string) => {
-    try {
-      const { data } = await supabase.from('users').select('role').eq('email', userEmail.toLowerCase()).single()
-      if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
-      else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(auth)/role' as never)
-    } catch {
-      router.replace('/(auth)/role' as never)
-    }
-  }, [router])
-
-  const navigateByClerkId = useCallback(async (clerkId: string | null) => {
-    if (!clerkId) { router.replace('/(auth)/role' as never); return }
-    try {
-      const { data } = await supabase.from('users').select('role').eq('clerk_id', clerkId).single()
-      if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
-      else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(auth)/role' as never)
-    } catch {
-      router.replace('/(auth)/role' as never)
-    }
-  }, [router])
-
-  // ── Email+password sign-in via Supabase Auth (no OTP, direct home) ────────
-  const handleSignIn = async () => {
-    if (!validate()) return
     setLoading(true)
+    intendingSignInRef.current = true
     try {
-      const { data: { session }, error } = await supabaseEmailAuth.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
+      const result = await signIn!.create({
+        identifier: normalizedEmail,
         password,
       })
-
-      if (error) {
-        const msg = error.message?.toLowerCase() ?? ''
-        if (msg.includes('invalid login credentials') || msg.includes('invalid credentials')) {
-          setGlobalError('Incorrect email or password. Please try again.')
-        } else if (msg.includes('email not confirmed')) {
-          setEmailError('Please confirm your email first. Check your inbox for a confirmation link.')
+      if (result.status === 'complete' && result.createdSessionId) {
+        await setActive!({ session: result.createdSessionId })
+        // Get token immediately — Clerk session is active at SDK level after setActive,
+        // so getToken() works before React re-renders.
+        const clerkId = result.createdUserId
+        const token = await getToken()
+        if (clerkId && token) {
+          await checkRoleAndRedirect(clerkId)
         } else {
-          setGlobalError(error.message ?? 'Something went wrong. Please try again.')
+          // Fallback: let useEffect handle redirect once isSignedIn/userId updates
+          intendingSignInRef.current = true
         }
-        return
+      } else {
+        setGlobalError('Incorrect email or password. Please try again.')
       }
-
-      if (session?.user?.email) {
-        const { data } = await supabaseEmailAuth
-          .from('users')
-          .select('role')
-          .eq('email', session.user.email)
-          .single()
-        if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
-        else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
+    } catch (err: any) {
+      const code: string = err?.errors?.[0]?.code ?? ''
+      const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
+      if (code === 'form_identifier_not_found') {
+        setGlobalError('No account found with this email. Please sign up first.')
+      } else if (code === 'form_password_incorrect') {
+        setPasswordError('Incorrect password. Please try again.')
+      } else if (code === 'too_many_requests') {
+        setGlobalError('Too many failed attempts. Please try again later.')
+      } else if (code === 'session_exists') {
+        // Already signed in — redirect instead of showing an error
+        if (userId) checkRoleAndRedirect(userId)
         else router.replace('/(auth)/role' as never)
+      } else {
+        setGlobalError(msg || 'Something went wrong. Please try again.')
       }
     } finally {
       setLoading(false)
@@ -164,72 +174,102 @@ export default function SignInScreen() {
   // ── Google SSO (Clerk) ────────────────────────────────────────────────────
   const handleGoogle = useCallback(async () => {
     if (googleLoading) return
-    if (isSignedIn) { await navigateByClerkId(userId ?? null); return }
     setGoogleLoading(true)
     setGlobalError('')
+    intendingSignInRef.current = true
     try {
-      const redirectUrl = Linking.createURL('/oauth-native-callback', { scheme: 'carehub' })
-      const result = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
-      const { createdSessionId, setActive: ssoSetActive } = result
-      if (createdSessionId && ssoSetActive) {
-        await ssoSetActive({ session: createdSessionId })
-        const newUserClerkId = result.signUp?.createdUserId ?? null
-        const ssoEmail = result.signIn?.identifier ?? result.signUp?.emailAddress ?? null
-        if (newUserClerkId) await navigateByClerkId(newUserClerkId)
-        else if (ssoEmail) await navigateByClerkEmail(ssoEmail)
-        else router.replace('/(auth)/role' as never)
-      } else if (ssoSetActive) {
-        await ssoSetActive({})
-        router.replace('/(auth)/role' as never)
+      if (Platform.OS === 'web') {
+        if (!signIn) return
+        const redirectUrl = window.location.origin + '/oauth-native-callback'
+        // oidcPrompt forces Google to always show the account picker
+        await (signIn as any).create({ strategy: 'oauth_google', redirectUrl, oidcPrompt: 'select_account' })
+        const authUrl = signIn.firstFactorVerification.externalVerificationRedirectURL
+        if (authUrl) { window.location.href = authUrl.toString(); return }
+        setGlobalError('Google sign-in failed. Please try again.')
+      } else {
+        if (!signIn) return
+        const redirectUrl = Linking.createURL('/oauth-native-callback')
+        // Manually implement SSO flow so we can pass oidcPrompt: 'select_account'
+        // to force Google to show the account picker instead of auto-selecting the last account
+        await (signIn as any).create({ strategy: 'oauth_google', redirectUrl, oidcPrompt: 'select_account' })
+        const { externalVerificationRedirectURL } = signIn.firstFactorVerification
+        if (!externalVerificationRedirectURL) {
+          setGlobalError('Google sign-in failed. Please try again.')
+          return
+        }
+        const authSessionResult = await WebBrowser.openAuthSessionAsync(
+          externalVerificationRedirectURL.toString(),
+          redirectUrl
+        )
+        if (authSessionResult.type !== 'success' || !authSessionResult.url) {
+          intendingSignInRef.current = false
+          return
+        }
+        const urlParams = new URL(authSessionResult.url).searchParams
+        const rotatingTokenNonce = urlParams.get('rotating_token_nonce') ?? ''
+        await signIn.reload({ rotatingTokenNonce })
+        const needsSignUp = signIn.firstFactorVerification.status === 'transferable'
+        if (needsSignUp && signUp) {
+          await signUp.create({ transfer: true })
+          if (signUp.createdSessionId && setActive) {
+            await setActive({ session: signUp.createdSessionId })
+          }
+        } else if (signIn.createdSessionId && setActive) {
+          await setActive({ session: signIn.createdSessionId })
+        }
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
-        router.replace('/(auth)/role' as never)
+        if (userId) checkRoleAndRedirect(userId)
+        else setGlobalError('Session error. Please try again.')
       } else if (code !== 'oauth_access_denied') {
-        try { await signOut() } catch {}
+        intendingSignInRef.current = false
         setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
+      } else {
+        intendingSignInRef.current = false
       }
     } finally {
       setGoogleLoading(false)
     }
-  }, [isSignedIn, userId, googleLoading, signOut, startSSOFlow, navigateByClerkId, navigateByClerkEmail, router])
+  }, [googleLoading, signIn, signUp, setActive, router, userId, checkRoleAndRedirect])
 
   // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
   const handleFacebook = useCallback(async () => {
     if (facebookLoading) return
-    if (isSignedIn) { await navigateByClerkId(userId ?? null); return }
     setFacebookLoading(true)
     setGlobalError('')
+    intendingSignInRef.current = true
     try {
-      const redirectUrl = Linking.createURL('/oauth-native-callback', { scheme: 'carehub' })
-      const result = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
-      const { createdSessionId, setActive: ssoSetActive } = result
-      if (createdSessionId && ssoSetActive) {
-        await ssoSetActive({ session: createdSessionId })
-        const newUserClerkId = result.signUp?.createdUserId ?? null
-        const ssoEmail = result.signIn?.identifier ?? result.signUp?.emailAddress ?? null
-        if (newUserClerkId) await navigateByClerkId(newUserClerkId)
-        else if (ssoEmail) await navigateByClerkEmail(ssoEmail)
-        else router.replace('/(auth)/role' as never)
-      } else if (ssoSetActive) {
-        await ssoSetActive({})
-        router.replace('/(auth)/role' as never)
+      if (Platform.OS === 'web') {
+        if (!signIn) return
+        const redirectUrl = window.location.origin + '/oauth-native-callback'
+        await signIn.create({ strategy: 'oauth_facebook', redirectUrl })
+        const authUrl = signIn.firstFactorVerification.externalVerificationRedirectURL
+        if (authUrl) { window.location.href = authUrl.toString(); return }
+        setGlobalError('Facebook sign-in failed. Please try again.')
+      } else {
+        const redirectUrl = Linking.createURL('/oauth-native-callback')
+        const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
+        if (createdSessionId && ssoSetActive) {
+          await ssoSetActive({ session: createdSessionId })
+        }
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
-        router.replace('/(auth)/role' as never)
+        if (userId) checkRoleAndRedirect(userId)
+        else setGlobalError('Session error. Please try again.')
       } else if (code !== 'oauth_access_denied') {
-        try { await signOut() } catch {}
+        intendingSignInRef.current = false
         setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
+      } else {
+        intendingSignInRef.current = false
       }
     } finally {
       setFacebookLoading(false)
     }
-  }, [isSignedIn, userId, facebookLoading, signOut, startSSOFlow, navigateByClerkId, navigateByClerkEmail, router])
-
-  // ── Render ────────────────────────────────────────────────────────────────
+  }, [facebookLoading, signIn, startSSOFlow, router, userId, checkRoleAndRedirect])
 
   return (
     <KeyboardAvoidingView
@@ -295,8 +335,8 @@ export default function SignInScreen() {
 
         {/* ── LOGO ── */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={72} />
-          <Text style={styles.brandName}>CARE<Text style={styles.brandHub}>HUB</Text></Text>
+          <CareHubLogo size={56} variant="dark" />
+          <Text style={styles.brandName}>DA<Text style={styles.brandHub}>WA</Text></Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>
 
@@ -306,11 +346,13 @@ export default function SignInScreen() {
 
         {/* ── FORM ── */}
         <View style={styles.form}>
+
           {/* Email */}
           <View style={styles.fieldGroup}>
             <View style={[styles.inputRow, !!emailError && styles.inputRowError]}>
               <Ionicons name="mail-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
+                key={`email-${inputKey}`}
                 style={styles.input}
                 placeholder={t('typeEmail')}
                 placeholderTextColor="#9CA3AF"
@@ -319,6 +361,9 @@ export default function SignInScreen() {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="next"
               />
             </View>
@@ -330,18 +375,22 @@ export default function SignInScreen() {
             <View style={[styles.inputRow, !!passwordError && styles.inputRowError]}>
               <Ionicons name="lock-closed-outline" size={20} color="#9CA3AF" style={styles.icon} />
               <TextInput
-                style={[styles.input, styles.inputFlex]}
-                placeholder={t('typePassword')}
+                key={`password-${inputKey}`}
+                style={styles.input}
+                placeholder="Password"
                 placeholderTextColor="#9CA3AF"
                 value={password}
                 onChangeText={(v) => { setPassword(v); setPasswordError('') }}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                importantForAutofill="no"
+                textContentType="none"
                 returnKeyType="done"
                 onSubmitEditing={handleSignIn}
               />
-              <Pressable onPress={() => setShowPassword((p) => !p)} hitSlop={12} style={styles.eyeBtn}>
+              <Pressable onPress={() => setShowPassword((p) => !p)} hitSlop={8}>
                 <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#9CA3AF" />
               </Pressable>
             </View>
@@ -349,21 +398,18 @@ export default function SignInScreen() {
           </View>
 
           {/* Forgot password */}
-          <Pressable
-            onPress={() => router.push('/(auth)/forgot-password' as never)}
-            style={styles.forgotRow}
-            hitSlop={8}
-          >
-            <Text style={styles.forgotText}>Forgot Password?</Text>
-          </Pressable>
+          <View style={styles.forgotRow}>
+            <Pressable onPress={() => router.push('/(auth)/forgot-password' as never)} hitSlop={8}>
+              <Text style={styles.forgotLink}>Forgot password?</Text>
+            </Pressable>
+          </View>
 
           {!!globalError && <Text style={styles.globalError}>{globalError}</Text>}
 
-          {/* Sign In button */}
           <Pressable
             onPress={handleSignIn}
-            disabled={loading}
-            style={[styles.signInWrapper, loading && styles.dimmed]}
+            disabled={!isFormReady || loading}
+            style={[styles.signInWrapper, (!isFormReady || loading) && styles.dimmed]}
           >
             <LinearGradient
               colors={['#2962FF', '#00BFA5']}
@@ -393,7 +439,7 @@ export default function SignInScreen() {
           style={[styles.socialBtn, googleLoading && styles.dimmed]}
         >
           {googleLoading
-            ? <ActivityIndicator size="small" color="#757575" />
+            ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/Google.svg')} style={styles.socialIcon} contentFit="contain" />
           }
           <Text style={styles.socialBtnText}>{t('continueWithGoogle')}</Text>
@@ -406,7 +452,7 @@ export default function SignInScreen() {
           style={[styles.socialBtn, styles.socialBtnMarginTop, facebookLoading && styles.dimmed]}
         >
           {facebookLoading
-            ? <ActivityIndicator size="small" color="#757575" />
+            ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/fb.svg.png')} style={styles.socialIcon} contentFit="contain" />
           }
           <Text style={styles.socialBtnText}>{t('continueWithFacebook')}</Text>
@@ -424,8 +470,6 @@ export default function SignInScreen() {
   )
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: '#FFFFFF' },
   scroll: { flexGrow: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 24 },
@@ -438,8 +482,8 @@ const styles = StyleSheet.create({
   modalOverlay: { flex: 1 },
   langMenu: {
     position: 'absolute', right: 24, backgroundColor: '#FFFFFF', borderRadius: 12,
-    paddingVertical: 6, minWidth: 180, elevation: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 12,
+    paddingVertical: 6, minWidth: 180,
+    ...shadow('#000', 0, 4, 12, 0.15, 8),
     borderWidth: 1, borderColor: colors.steelGrey,
   },
   langMenuItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 11 },
@@ -463,13 +507,11 @@ const styles = StyleSheet.create({
   inputRowError: { borderBottomColor: colors.error },
   icon: { marginRight: 10 },
   input: { flex: 1, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack, height: 28, paddingVertical: 0 },
-  inputFlex: { flex: 1 },
-  eyeBtn: { paddingLeft: 8, paddingVertical: 2 },
   fieldError: { fontFamily: fonts.regular, fontSize: 12, color: colors.error, marginTop: 5, marginLeft: 2, lineHeight: 16 },
   globalError: { fontFamily: fonts.regular, fontSize: 13, color: colors.error, textAlign: 'center', marginBottom: 14, lineHeight: 18 },
 
-  forgotRow: { alignSelf: 'flex-end', marginBottom: 20, marginTop: -8 },
-  forgotText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.tealGreen },
+  forgotRow: { alignItems: 'flex-end', marginTop: -10, marginBottom: 20 },
+  forgotLink: { fontFamily: fonts.medium, fontSize: 13, color: colors.interactiveBlue },
 
   signInWrapper: { borderRadius: 16, overflow: 'hidden', marginTop: 4 },
   signInBtn: { height: 52, alignItems: 'center', justifyContent: 'center' },
@@ -485,7 +527,7 @@ const styles = StyleSheet.create({
     height: 52, borderRadius: 16, borderWidth: 1.5, borderColor: colors.steelGrey, backgroundColor: '#FFFFFF', gap: 10,
   },
   socialBtnMarginTop: { marginTop: 12 },
-  socialBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: '#3C4043' },
+  socialBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   socialIcon: { width: 24, height: 24 },
 
   signUpRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 28, paddingBottom: 8 },

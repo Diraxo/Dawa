@@ -5,7 +5,7 @@ export function uidFromString(str: string): number {
     h = ((h << 5) + h) ^ str.charCodeAt(i)
     h = h >>> 0
   }
-  return (h % 999998) + 1
+  return h === 0 ? 1 : h
 }
 
 export async function fetchAgoraToken(

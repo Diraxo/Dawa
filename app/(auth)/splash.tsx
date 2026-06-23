@@ -1,19 +1,20 @@
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/clerk-expo'
+import { supabase } from '@/lib/supabase'
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, StyleSheet, Text, View } from 'react-native';
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo';
+import { images } from '@/constants/images';
 import { colors } from '@/constants/colors';
 import { useAuthStore } from '@/store/authStore';
 
 export default function SplashScreen() {
   const router = useRouter();
-  const { isSignedIn, isLoaded } = useAuth();
-  const { userRole } = useAuthStore();
+  const { isSignedIn, isLoaded, userId: clerkUserId } = useAuth()
+  const { userRole, setUserRole } = useAuthStore()
   const [timerDone, setTimerDone] = useState(false);
 
   // Always show splash for at least 2500ms
@@ -24,22 +25,67 @@ export default function SplashScreen() {
 
   // Navigate once both the timer has elapsed and Clerk has initialized
   useEffect(() => {
-    if (!timerDone || !isLoaded) return;
+    if (!timerDone || !isLoaded) return
 
-    if (isSignedIn && userRole === 'patient') {
-      router.replace('/(patient)/(tabs)/home' as never);
-    } else if (isSignedIn && userRole === 'doctor') {
-      router.replace('/(doctor)/registration/step-1' as never);
-    } else if (isSignedIn && !userRole) {
-      // Signed in but no role saved — let them pick
-      router.replace('/(auth)/role' as never);
-    } else {
-      router.replace('/(auth)/country' as never);
+    const navigate = async () => {
+      if (!isSignedIn) {
+        router.replace('/(auth)/country' as never)
+        return
+      }
+
+      // Always query Supabase for the authoritative role — don't rely on Zustand alone
+      try {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('id, role')
+          .eq('clerk_id', clerkUserId!)
+          .single()
+
+        if (userData?.role === 'patient') {
+          setUserRole('patient')
+          router.replace('/(patient)/(tabs)/home' as never)
+        } else if (userData?.role === 'doctor') {
+          setUserRole('doctor')
+          try {
+            const { data: dp } = await supabase
+              .from('doctor_profiles')
+              .select('status')
+              .eq('user_id', userData.id)
+              .single()
+
+            if (dp?.status === 'approved') {
+              router.replace('/(doctor)/(tabs)/home' as never)
+            } else if (dp?.status === 'pending') {
+              router.replace('/(doctor)/registration/under-review' as never)
+            } else if (dp?.status === 'rejected' || dp?.status === 'suspended') {
+              router.replace('/(doctor)/registration/under-review' as never)
+            } else {
+              router.replace('/(doctor)/registration/step-1' as never)
+            }
+          } catch {
+            router.replace('/(doctor)/registration/step-1' as never)
+          }
+        } else {
+          // No row or unrecognised role — new user who hasn't finished signup
+          router.replace('/(auth)/role' as never)
+        }
+      } catch {
+        // Network error — fall back to cached Zustand role
+        if (userRole === 'patient') {
+          router.replace('/(patient)/(tabs)/home' as never)
+        } else if (userRole === 'doctor') {
+          router.replace('/(doctor)/(tabs)/home' as never)
+        } else {
+          router.replace('/(auth)/country' as never)
+        }
+      }
     }
-  }, [timerDone, isLoaded, isSignedIn, userRole]);
+
+    navigate()
+  }, [timerDone, isLoaded, isSignedIn, userRole])
 
   return (
-    <View className="flex-1 bg-[#070E27]">
+    <View style={styles.root}>
       <StatusBar style="light" backgroundColor="transparent" translucent />
 
       {/* Bottom-left blue radial glow */}
@@ -79,13 +125,17 @@ export default function SplashScreen() {
       />
 
       {/* Main content — vertically centered */}
-      <View className="flex-1 items-center justify-center px-6">
-        <CareHubLogo />
+      <View style={styles.content}>
+        <Image
+          source={images.darkLogo}
+          style={styles.logoImage}
+          resizeMode="contain"
+        />
 
-        {/* CARE (white) + HUB (teal) */}
+        {/* DA (white) + WA (teal) */}
         <View className="flex-row items-baseline mt-6">
-          <Text className="font-montserrat-bold text-[42px] text-white tracking-[2px]">CARE</Text>
-          <Text className="font-montserrat-bold text-[42px] text-teal-green tracking-[2px]">HUB</Text>
+          <Text className="font-montserrat-bold text-[42px] text-white tracking-[2px]">DA</Text>
+          <Text className="font-montserrat-bold text-[42px] text-teal-green tracking-[2px]">WA</Text>
         </View>
 
         {/* Tagline */}
@@ -96,7 +146,7 @@ export default function SplashScreen() {
         {/* Spinner */}
         <ActivityIndicator
           size={40}
-          color={colors.active}
+          color={colors.tealGreen}
           className="mt-[52px]"
         />
 
@@ -110,6 +160,22 @@ export default function SplashScreen() {
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: '#070E27',
+    overflow: 'hidden',
+  },
+  content: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  logoImage: {
+    width: 130,
+    height: 130,
+    borderRadius: 28,
+  },
   glowBottomLeft: {
     position: 'absolute',
     width: 440,
