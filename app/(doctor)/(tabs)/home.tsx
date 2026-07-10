@@ -4,6 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
+  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -232,6 +233,46 @@ export default function DoctorHomeScreen() {
   // same request.
   const respondingRef = useRef(false)
 
+  // Writes status:'accepted', retrying a couple of times on failure —
+  // without this, a transient network blip or a rejected write (e.g. a
+  // trigger exception) silently strands the patient on "Waiting for Doctor"
+  // forever while the doctor is already sitting on the call screen unaware
+  // anything went wrong. Treats "0 rows matched" as success if some other
+  // path (a race with another device/tab) already moved the row past
+  // 'waiting_for_doctor'.
+  const writeAccepted = async (consultationId: string): Promise<boolean> => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const token = await getToken()
+      if (token) {
+        const client = getAuthClient(token)
+        const { data, error } = await client
+          .from('consultations')
+          .update({ status: 'accepted', started_at: new Date().toISOString() })
+          .eq('id', consultationId)
+          .eq('status', 'waiting_for_doctor')
+          .select('id')
+        if (!error && data && data.length > 0) return true
+        if (!error) {
+          const { data: row } = await client.from('consultations').select('status').eq('id', consultationId).single()
+          if (row?.status === 'accepted' || row?.status === 'in_progress') return true
+        }
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500))
+    }
+    return false
+  }
+
+  const alertAcceptFailed = (req: IncomingRequest) => {
+    Alert.alert(
+      'Connection Issue',
+      `We couldn't confirm the consultation with ${req.patientName}. They may still be waiting — retry now?`,
+      [
+        { text: 'Retry', onPress: async () => { const ok = await writeAccepted(req.id); if (!ok) alertAcceptFailed(req) } },
+        { text: 'Dismiss', style: 'cancel' },
+      ],
+    )
+  }
+
   const handleAccept = async () => {
     const req = incomingRequest
     if (!req || respondingRef.current) return
@@ -261,8 +302,6 @@ export default function DoctorHomeScreen() {
     // channel if it isn't ready yet, so the status write no longer has to
     // wait on the Stream API round-trip before the patient's redirect fires.
     ;(async () => {
-      const token = await getToken()
-
       const channelCreate = (async () => {
         try {
           const doctorUserId = userId ?? user?.id ?? ''
@@ -282,14 +321,8 @@ export default function DoctorHomeScreen() {
         }
       })()
 
-      const statusUpdate = token
-        ? getAuthClient(token)
-            .from('consultations')
-            .update({ status: 'accepted', started_at: new Date().toISOString() })
-            .eq('id', req.id)
-        : Promise.resolve()
-
-      await Promise.allSettled([channelCreate, statusUpdate])
+      const [, accepted] = await Promise.all([channelCreate, writeAccepted(req.id)])
+      if (!accepted) alertAcceptFailed(req)
     })()
   }
 
@@ -313,10 +346,6 @@ export default function DoctorHomeScreen() {
     }
     respondingRef.current = false
   }
-
-  // Heartbeat ping (last_seen_at) runs for the whole doctor session from
-  // app/(doctor)/_layout.tsx via useDoctorPresenceSession — not here — so it
-  // keeps going after navigating off this tab into a live consultation.
 
   const isPending = doctorStatus && doctorStatus !== 'approved'
 

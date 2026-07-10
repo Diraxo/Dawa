@@ -24,7 +24,14 @@ interface ConsultationData {
   } | null
 }
 
-const CANCELLABLE_STATUSES = new Set(['waiting_for_doctor', 'pending_payment'])
+// Blocklist, not allowlist: cancellable unless the doctor has genuinely
+// already engaged (accepted/in_progress/active). An allowlist silently broke
+// every time a new terminal status was introduced elsewhere (missed,
+// ended_abnormally, call_declined, ...) — those statuses fell through to the
+// default "Waiting for Doctor" badge below while Cancel refused with "the
+// doctor has already responded", stranding the patient on this page with no
+// way out.
+const ALREADY_ENGAGED_STATUSES = new Set(['accepted', 'in_progress', 'active'])
 
 export default function WaitingRoomPage() {
   const { consultationId } = useParams<{ consultationId: string }>()
@@ -36,11 +43,17 @@ export default function WaitingRoomPage() {
   const [status, setStatus] = useState<string>('waiting_for_doctor')
   const [declined, setDeclined] = useState(false)
   const [cancelled, setCancelled] = useState(false)
+  // Covers 'missed' (call rang and was never answered), 'ended_abnormally'
+  // (dropped mid-connect) and 'call_declined' (patient explicitly declined
+  // the ring on the call screen) — all reachable from this waiting-room page
+  // once the doctor has accepted, and all previously unhandled here, which
+  // left the patient stuck on the "Waiting for Doctor" badge forever with a
+  // Cancel button that refused to work.
+  const [callIssue, setCallIssue] = useState(false)
   // The waiting room stays active until the doctor accepts/declines or the
-  // patient cancels — no client-side countdown/timeout. A server-side
-  // pg_cron job (see migration 023) is the sole source of a 'doctor_missed'
-  // status; this page only reacts to that status arriving.
-  const [timedOut, setTimedOut] = useState(false)
+  // patient cancels — never a countdown/timeout. There is no server-side
+  // auto-expiry of a paid, waiting consultation; this page only reacts to a
+  // real status change (accepted/declined/cancelled).
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
@@ -69,7 +82,7 @@ export default function WaitingRoomPage() {
 
   // Polling fallback: every 3 s in case Realtime misses the status change
   useEffect(() => {
-    if (timedOut || declined || cancelled) return
+    if (declined || cancelled || callIssue) return
     const poll = async () => {
       if (navigated.current) return
       try {
@@ -90,16 +103,17 @@ export default function WaitingRoomPage() {
         } else if (s === 'cancelled') {
           navigated.current = true
           setCancelled(true)
-        } else if (s === 'doctor_missed') {
+        } else if (s === 'missed' || s === 'call_declined' || s === 'ended_abnormally') {
           navigated.current = true
-          setTimedOut(true)
+          setStatus(s)
+          setCallIssue(true)
         }
       } catch { /* network error — retry next tick */ }
     }
     const interval = setInterval(poll, 3000)
     return () => clearInterval(interval)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [consultationId, timedOut, declined])
+  }, [consultationId, declined, callIssue])
 
   useEffect(() => {
     let unmounted = false
@@ -143,6 +157,12 @@ export default function WaitingRoomPage() {
         setCancelled(true)
         return
       }
+      if (data?.status === 'missed' || data?.status === 'call_declined' || data?.status === 'ended_abnormally') {
+        navigated.current = true
+        setStatus(data.status)
+        setCallIssue(true)
+        return
+      }
 
       const channel = supabase
         .channel(`waiting-${consultationId}-${Date.now()}`)
@@ -166,9 +186,9 @@ export default function WaitingRoomPage() {
           } else if (updated.status === 'cancelled') {
             navigated.current = true
             setCancelled(true)
-          } else if (updated.status === 'doctor_missed') {
-            setTimedOut(true)
+          } else if (updated.status === 'missed' || updated.status === 'call_declined' || updated.status === 'ended_abnormally') {
             navigated.current = true
+            setCallIssue(true)
           }
         })
         .subscribe()
@@ -197,7 +217,7 @@ export default function WaitingRoomPage() {
   // state; that case is handled by the live consultation pages instead.
   async function cancelConsultation() {
     if (cancelling || navigated.current) return
-    if (!CANCELLABLE_STATUSES.has(status)) {
+    if (ALREADY_ENGAGED_STATUSES.has(status)) {
       setCancelError('This request can no longer be cancelled because the doctor has already responded.')
       return
     }
@@ -227,7 +247,15 @@ export default function WaitingRoomPage() {
     }
   }
 
-  if (timedOut) {
+  if (callIssue) {
+    const doctorName = consultation?.doctor?.user?.full_name
+      ? stripDrPrefix(consultation.doctor.user.full_name)
+      : 'the doctor'
+    const issueCopy =
+      status === 'call_declined' ? 'You declined the call.' :
+      status === 'ended_abnormally' ? 'The call was disconnected before it could connect.' :
+      `You didn't answer in time when Dr. ${doctorName} called.`
+
     return (
       <div className="p-8 flex items-center justify-center min-h-[80vh]">
         <div className="card p-10 max-w-md w-full text-center">
@@ -235,30 +263,29 @@ export default function WaitingRoomPage() {
             <Clock size={32} className="text-warning" />
           </div>
           <h1 className="font-montserrat font-black text-xl text-ink-black mb-2">
-            No Response
+            Call Not Connected
           </h1>
-          <p className="text-ink-black/50 text-sm mb-6">
-            The doctor did not respond in time. Your consultation credit has been preserved.
-          </p>
-          <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 mb-6 text-left">
-            <div className="flex items-center gap-2 mb-1">
-              <Wallet size={18} className="text-teal-600" />
-              <p className="font-montserrat font-bold text-sm text-teal-800">Credit Preserved</p>
+          <p className="text-ink-black/50 text-sm mb-6">{issueCopy}</p>
+          {consultation?.credit_amount != null && consultation.credit_amount > 0 && (
+            <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 mb-6 text-left">
+              <div className="flex items-center gap-2 mb-1">
+                <Wallet size={18} className="text-teal-600" />
+                <p className="font-montserrat font-bold text-sm text-teal-800">Credit Preserved</p>
+              </div>
+              <p className="text-teal-600 text-xs leading-relaxed">
+                No additional payment required when you book with another doctor at the same or lower fee.
+              </p>
             </div>
-            <p className="text-teal-600 text-xs leading-relaxed">
-              No additional payment required when you book with another doctor at the same or lower fee.
-            </p>
-          </div>
+          )}
           <div className="flex flex-col gap-3">
             <Link href="/patient/doctors" className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl">
               <Search size={16} /> Choose Another Doctor
             </Link>
-            <Link href="/patient/doctors" className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey">
-              <RefreshCw size={16} /> Try Again
-            </Link>
-            <Link href="/patient/help-support" className="text-ink-black/40 text-sm underline mt-1">
-              Contact Support
-            </Link>
+            {consultation?.doctor?.id && (
+              <Link href={`/patient/doctors/${consultation.doctor.id}`} className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey">
+                <RefreshCw size={16} /> Try Again
+              </Link>
+            )}
           </div>
         </div>
       </div>

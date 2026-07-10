@@ -212,6 +212,19 @@ export default function PhoneConsultationPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readyToJoin, user])
 
+  // Second, more robust path into readyToJoin: the one-shot mount `load()`
+  // fetch above can race the doctor's accept (or simply fail/lag), leaving
+  // readyToJoin false and the patient stuck on the "ringing" screen with its
+  // 60s auto-decline counting down even though the call was already
+  // accepted. useConsultationState's rawStatus is continuously kept current
+  // via Realtime + a 3s poll, so this closes that race regardless of why the
+  // mount fetch missed it.
+  useEffect(() => {
+    if (!readyToJoin && (state.rawStatus === 'accepted' || state.rawStatus === 'in_progress')) {
+      setReadyToJoin(true)
+    }
+  }, [state.rawStatus, readyToJoin])
+
   // Leave the Agora channel on unmount so a stale UID doesn't collide with a future rejoin
   useEffect(() => {
     return () => { cleanupAgora() }

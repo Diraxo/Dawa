@@ -96,5 +96,23 @@ if (Platform.OS === 'android') {
   }
 }
 
+// ── Android: Notifee background event handler ──────────────────────────────
+// Required by Notifee whenever any notification is displayed with
+// android.pressAction set (see hooks/useOngoingConsultationNotification.ts) —
+// without a registered background handler, Notifee logs a warning and press
+// events that arrive while the app is backgrounded/killed are dropped.
+// pressAction.launchActivity: 'default' already brings the app to the
+// foreground on its own; deep-linking to the right consultation screen from
+// there is handled by the foreground listener in app/_layout.tsx once the
+// app is running, so this stub only needs to exist, not act.
+if (Platform.OS === 'android') {
+  try {
+    const notifee = require('@notifee/react-native').default
+    notifee.onBackgroundEvent(async () => {})
+  } catch (e) {
+    console.warn('[Notifee] Background handler not registered:', e?.message)
+  }
+}
+
 // ── Load Expo Router (mounts the React tree) ─────────────────────────────────
 import 'expo-router/entry'

@@ -9,7 +9,7 @@ import { otpLimiter } from '@/lib/otpLimiter'
 
 function VerifyContent() {
   const { isLoaded: suLoaded, signUp, setActive: suSetActive } = useSignUp()
-  const { isLoaded: siLoaded, signIn, setActive: siSetActive } = useSignIn()
+  const { isLoaded: siLoaded, signIn } = useSignIn()
   const router = useRouter()
   const params = useSearchParams()
   const type = params.get('type') ?? 'signup'
@@ -76,14 +76,6 @@ function VerifyContent() {
         if (result.status === 'needs_new_password') {
           router.push(`/reset-password?email=${encodeURIComponent(email)}`)
         }
-      } else if (type === 'signin_2fa' && siLoaded) {
-        // See sign-in/page.tsx cast comment — email_code second factor is
-        // valid at runtime but missing from this SDK version's types.
-        const result = await signIn!.attemptSecondFactor({ strategy: 'email_code', code: otp } as any)
-        if (result.status === 'complete') {
-          await siSetActive!({ session: result.createdSessionId })
-          router.push('/dashboard')
-        }
       }
     } catch (err: unknown) {
       const anyErr = err as any
@@ -118,8 +110,6 @@ function VerifyContent() {
         await signUp!.prepareEmailAddressVerification({ strategy: 'email_code' })
       } else if (type === 'forgot' && siLoaded) {
         await signIn!.create({ strategy: 'reset_password_email_code', identifier: email })
-      } else if (type === 'signin_2fa' && siLoaded) {
-        await signIn!.prepareSecondFactor({ strategy: 'email_code' } as any)
       }
       await otpLimiter.recordRequest(email)
       setResendTimer(30)

@@ -486,6 +486,10 @@ export default function DoctorPhoneConsultationPage() {
     return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
   }
 
+  // Must be called unconditionally on every render (Rules of Hooks) — kept
+  // above the `if (loading) return` below rather than after it.
+  const patientPhotoUrl = useUserPhotoRealtime(consultation?.patient?.id, consultation?.patient?.profile_photo_url)
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#070E27] flex items-center justify-center">
@@ -495,7 +499,6 @@ export default function DoctorPhoneConsultationPage() {
   }
 
   const patientName = consultation?.patient?.full_name ?? 'Patient'
-  const patientPhotoUrl = useUserPhotoRealtime(consultation?.patient?.id, consultation?.patient?.profile_photo_url)
   const elapsed = state.elapsedSeconds ?? 0
 
   if (displayStatus === 'ended') {

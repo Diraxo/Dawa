@@ -61,17 +61,6 @@ export default function SignInPage() {
       if (result.status === 'complete') {
         await setActive!({ session: result.createdSessionId })
         router.push('/dashboard')
-      } else if (result.status === 'needs_second_factor') {
-        // Password was correct but the account has 2FA enabled — previously
-        // this branch didn't exist at all, so a valid password silently did
-        // nothing (no redirect, no error) for any 2FA-enabled account.
-        // Cast: this Clerk SDK's types only list phone_code as a second-factor
-        // strategy, but email_code is a valid second factor at the Clerk
-        // instance/account level (confirmed via the actual API response) —
-        // the TS union just hasn't caught up.
-        await signIn!.prepareSecondFactor({ strategy: 'email_code' } as any)
-        intendingSignInRef.current = false
-        router.push(`/verify?email=${encodeURIComponent(normalizedEmail)}&type=signin_2fa`)
       } else {
         intendingSignInRef.current = false
       }

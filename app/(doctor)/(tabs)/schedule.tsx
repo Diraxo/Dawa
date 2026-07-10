@@ -20,7 +20,6 @@ import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
@@ -243,12 +242,9 @@ export default function ScheduleScreen() {
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
-  const [acceptScheduled, setAcceptScheduled] = useState(true)
-  const [acceptOnDemand, setAcceptOnDemand] = useState(true)
   const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [savingAvailability, setSavingAvailability] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
-  const { isOnline, setIsOnline, toggling: togglingOnline, toggle: toggleOnline } = useDoctorOnlineToggle(profileId)
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loadingAppts, setLoadingAppts] = useState(true)
   const [timePicker, setTimePicker] = useState<{ day: DayKey; field: 'startTime' | 'endTime' } | null>(null)
@@ -289,11 +285,9 @@ export default function ScheduleScreen() {
   const applyAvailability = (availabilityJson: unknown) => {
     if (!availabilityJson) return
     const saved = availabilityJson as Record<string, any>
-    const { blocked_dates, acceptScheduled: savedAcceptScheduled, acceptOnDemand: savedAcceptOnDemand, ...dayAvail } = saved
+    const { blocked_dates, acceptScheduled: _acceptScheduled, acceptOnDemand: _acceptOnDemand, ...dayAvail } = saved
     setAvailability((prev) => ({ ...prev, ...dayAvail }))
     if (Array.isArray(blocked_dates)) setBlockedDates(blocked_dates)
-    if (typeof savedAcceptScheduled === 'boolean') setAcceptScheduled(savedAcceptScheduled)
-    if (typeof savedAcceptOnDemand === 'boolean') setAcceptOnDemand(savedAcceptOnDemand)
   }
 
   useEffect(() => {
@@ -309,12 +303,11 @@ export default function ScheduleScreen() {
 
         const { data: profile } = await client
           .from('doctor_profiles')
-          .select('id, availability, is_online')
+          .select('id, availability')
           .eq('user_id', (me as any).id)
           .maybeSingle()
         if (!profile) return
         setProfileId(profile.id)
-        setIsOnline((profile as any).is_online ?? false)
         applyAvailability(profile.availability)
 
         await loadAppointments(client, profile.id)
@@ -331,7 +324,7 @@ export default function ScheduleScreen() {
   useEffect(() => {
     if (!profileId) return
     const channel = supabase
-      .channel(`doctor-schedule-availability-${profileId}`)
+      .channel(`doctor-schedule-availability-${profileId}-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` },
@@ -349,7 +342,7 @@ export default function ScheduleScreen() {
   useEffect(() => {
     if (!profileId) return
     const channel = supabase
-      .channel(`doctor-schedule-${profileId}`)
+      .channel(`doctor-schedule-${profileId}-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
@@ -395,7 +388,7 @@ export default function ScheduleScreen() {
       if (!token) throw new Error('Not authenticated.')
       const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
-        .update({ availability: { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: blockedDates } })
+        .update({ availability: { ...availability, blocked_dates: blockedDates } })
         .eq('id', profileId)
         .select('id')
       if (error) throw error
@@ -439,51 +432,6 @@ export default function ScheduleScreen() {
         {/* Weekly strip */}
         <Text style={styles.sectionTitle}>{t('thisWeek')}</Text>
         <WeekStrip onDaySelect={() => {}} />
-
-        {/* Availability status */}
-        {!(doctorStatus && doctorStatus !== 'approved') && (
-          <View style={[styles.availabilityCard, styles.onlineRow]}>
-            <View style={styles.onlineDot}>
-              <View style={[styles.onlineDotInner, { backgroundColor: isOnline ? colors.success : colors.steelGrey }]} />
-            </View>
-            <Text style={styles.onlineLabel}>{isOnline ? 'Online · Taking Patients' : 'Offline'}</Text>
-            <Switch
-              value={isOnline}
-              onValueChange={toggleOnline}
-              disabled={togglingOnline}
-              trackColor={{ true: colors.success, false: colors.steelGrey }}
-              thumbColor={colors.mistWhite}
-            />
-          </View>
-        )}
-
-        {/* Booking mode toggles */}
-        <View style={styles.availabilityCard}>
-          <View style={styles.modeRow}>
-            <View style={styles.modeInfo}>
-              <Text style={styles.modeTitle}>Accept Scheduled Appointments</Text>
-              <Text style={styles.modeSub}>Let patients book in advance</Text>
-            </View>
-            <Switch
-              value={acceptScheduled}
-              onValueChange={setAcceptScheduled}
-              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
-              thumbColor={colors.mistWhite}
-            />
-          </View>
-          <View style={[styles.modeRow, styles.modeRowLast]}>
-            <View style={styles.modeInfo}>
-              <Text style={styles.modeTitle}>Accept On-Demand Consultations</Text>
-              <Text style={styles.modeSub}>Let patients start an instant consultation right now</Text>
-            </View>
-            <Switch
-              value={acceptOnDemand}
-              onValueChange={setAcceptOnDemand}
-              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
-              thumbColor={colors.mistWhite}
-            />
-          </View>
-        </View>
 
         {/* Availability settings */}
         <View style={styles.availabilityCard}>
@@ -639,7 +587,7 @@ export default function ScheduleScreen() {
                       if (!token || !profileId) { setBlockedDates(previous); return }
                       const { data: updatedRows, error } = await getAuthClient(token)
                         .from('doctor_profiles')
-                        .update({ availability: { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated } })
+                        .update({ availability: { ...availability, blocked_dates: updated } })
                         .eq('id', profileId)
                         .select('id')
                       if (error || !updatedRows || updatedRows.length === 0) {

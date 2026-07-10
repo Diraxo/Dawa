@@ -89,6 +89,7 @@ Deno.serve(async (req: Request) => {
     .from('consultations')
     .select(`
       id,
+      type,
       consultation_credit,
       credit_amount,
       credit_used,
@@ -134,6 +135,7 @@ Deno.serve(async (req: Request) => {
     .from('consultations')
     .select(`
       id,
+      type,
       patient_amount,
       payment_status,
       scheduled_at,
@@ -159,6 +161,17 @@ Deno.serve(async (req: Request) => {
 
   const newFee = Number((newConsult as any).patient_amount ?? 0)
 
+  // A credit is tied to the consultation TYPE it was paid for (chat/phone/
+  // video), never convertible — a declined video consultation's credit can
+  // only be applied to another video booking, so price/refund logic never
+  // has to reason about a type mismatch.
+  if ((newConsult as any).type !== (creditConsult as any).type) {
+    return new Response(
+      JSON.stringify({ error: 'Credit can only be applied to the same consultation type it was paid for' }),
+      { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } },
+    )
+  }
+
   // ── Apply credit ───────────────────────────────────────────────────────────
 
   if (newFee <= creditAmount) {
@@ -174,16 +187,27 @@ Deno.serve(async (req: Request) => {
       : Date.now()
     const isScheduled = scheduledAtMs > Date.now() + 60 * 60 * 1000
 
-    await supabase
+    // Guard the write with credit_used=false so two near-simultaneous calls
+    // for the same credit can't both succeed — only the first claims it.
+    const { data: claimed } = await supabase
       .from('consultations')
       .update({ credit_used: true, replacement_consultation_id: new_consultation_id })
       .eq('id', credit_consultation_id)
+      .eq('credit_used', false)
+      .select('id')
 
-    // waiting_started_at must be stamped here too — mark_doctor_missed_consultations()
-    // (migration 023) and the patient waiting-room countdown both key off this column;
-    // without it a credit-covered booking the doctor never answers stays in
-    // 'waiting_for_doctor' forever instead of auto-expiring to 'doctor_missed'.
-    // Scheduled bookings skip this entirely — the scheduled-time cron
+    if (!claimed || claimed.length === 0) {
+      return new Response(
+        JSON.stringify({ error: 'Credit has already been used' }),
+        { status: 409, headers: { ...CORS, 'Content-Type': 'application/json' } },
+      )
+    }
+
+    // waiting_started_at must be stamped here too — it's the sort key doctor
+    // clients queue on (earliest first) and what the patient waiting-room
+    // displays as "waiting since". The waiting room itself never expires on
+    // its own; it only ends via an explicit doctor accept/decline or patient
+    // cancel. Scheduled bookings skip this entirely — the scheduled-time cron
     // (trigger_appointment_notifications) flips 'scheduled' -> 'waiting_for_doctor'
     // and stamps waiting_started_at itself once scheduled_at arrives.
     await supabase
@@ -206,15 +230,28 @@ Deno.serve(async (req: Request) => {
   // The chapa-webhook marks credit_used=true once the difference payment is confirmed.
   const additionalRequired = newFee - creditAmount
 
+  // Same credit_used=false guard as the full-coverage path — the webhook
+  // marks credit_used=true once the difference payment confirms, so this
+  // only reserves the credit source; it must not attach to a consultation
+  // whose credit was already claimed elsewhere in the meantime.
+  const { data: reserved } = await supabase
+    .from('consultations')
+    .update({ replacement_consultation_id: new_consultation_id })
+    .eq('id', credit_consultation_id)
+    .eq('credit_used', false)
+    .select('id')
+
+  if (!reserved || reserved.length === 0) {
+    return new Response(
+      JSON.stringify({ error: 'Credit has already been used' }),
+      { status: 409, headers: { ...CORS, 'Content-Type': 'application/json' } },
+    )
+  }
+
   await supabase
     .from('consultations')
     .update({ credit_source_id: credit_consultation_id })
     .eq('id', new_consultation_id)
-
-  await supabase
-    .from('consultations')
-    .update({ replacement_consultation_id: new_consultation_id })
-    .eq('id', credit_consultation_id)
 
   return new Response(
     JSON.stringify({

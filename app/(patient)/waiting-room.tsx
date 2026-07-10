@@ -79,13 +79,18 @@ export default function WaitingRoomScreen() {
   const [creditState, setCreditState] = useState<CreditState | null>(null)
   const [cancelledState, setCancelledState] = useState<CreditState | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  // Covers 'missed' (call rang and was never answered), 'ended_abnormally'
+  // (dropped mid-connect) and 'call_declined' (patient declined the ring on
+  // the call screen) — all reachable from here once the doctor has accepted,
+  // and previously unhandled: the screen fell back to its default "Waiting
+  // for Doctor" badge forever while Cancel refused with "the doctor has
+  // already responded".
+  const [callIssueState, setCallIssueState] = useState<{ doctorName: string; reason: string } | null>(null)
 
   // The waiting room stays active until the doctor accepts/declines or the
-  // patient cancels — no client-side countdown/timeout. A server-side
-  // pg_cron job (see migration 023) is the sole source of a 'doctor_missed'
-  // status; this screen only reacts to that status arriving, it never
-  // predicts or displays a remaining-time estimate.
-  const [timedOut, setTimedOut] = useState(false)
+  // patient cancels — never a countdown/timeout. There is no server-side
+  // auto-expiry of a paid, waiting consultation; this screen only reacts to
+  // a real status change (accepted/declined/cancelled).
 
   // ── Save pending state for session recovery ──────────────────────────────
   useEffect(() => {
@@ -207,10 +212,13 @@ export default function WaitingRoomScreen() {
                   creditConsultationId: consultationId,
                 })
               })
-          } else if (newStatus === 'doctor_missed') {
+          } else if (newStatus === 'missed' || newStatus === 'call_declined' || newStatus === 'ended_abnormally') {
             navigated.current = true
             AsyncStorage.removeItem(PENDING_KEY)
-            setTimedOut(true)
+            setCallIssueState({
+              doctorName: doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+              reason: newStatus,
+            })
           }
         },
       )
@@ -270,10 +278,13 @@ export default function WaitingRoomScreen() {
               creditConsultationId: consultationId,
             })
           })
-      } else if (s === 'doctor_missed') {
+      } else if (s === 'missed' || s === 'call_declined' || s === 'ended_abnormally') {
         navigated.current = true
         AsyncStorage.removeItem(PENDING_KEY)
-        setTimedOut(true)
+        setCallIssueState({
+          doctorName: doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+          reason: s,
+        })
       }
     }
 
@@ -289,13 +300,16 @@ export default function WaitingRoomScreen() {
   }, [consultationId])
 
   // ── Cancel handler ───────────────────────────────────────────────────────
-  // Guarded to pre-acceptance statuses only — once the doctor has accepted
-  // (or the session started), cancelling from this screen would create an
-  // inconsistent state; that case is handled by the live consultation screens.
-  const CANCELLABLE_STATUSES = new Set(['waiting_for_doctor', 'pending_payment'])
+  // Blocklist, not allowlist: cancellable unless the doctor has genuinely
+  // already engaged (accepted/in_progress/active). An allowlist silently
+  // broke every time a new terminal status was introduced elsewhere (missed,
+  // ended_abnormally, call_declined, ...) — those fell through to the
+  // default "Waiting for Doctor" badge while Cancel refused with "the doctor
+  // has already responded", stranding the patient here with no way out.
+  const ALREADY_ENGAGED_STATUSES = new Set(['accepted', 'in_progress', 'active'])
   const handleCancel = () => {
     if (cancelling || navigated.current) return
-    if (!CANCELLABLE_STATUSES.has(consultStatus)) {
+    if (ALREADY_ENGAGED_STATUSES.has(consultStatus)) {
       Alert.alert('Unable to Cancel', 'This request can no longer be cancelled because the doctor has already responded.')
       return
     }
@@ -337,25 +351,20 @@ export default function WaitingRoomScreen() {
     ])
   }
 
-  // ── Doctor missed / timeout screen ──────────────────────────────────────────
-  if (timedOut) {
+  // ── Call rang but never connected (missed / declined / dropped) ────────────
+  if (callIssueState) {
+    const issueCopy =
+      callIssueState.reason === 'call_declined' ? 'You declined the call.' :
+      callIssueState.reason === 'ended_abnormally' ? 'The call was disconnected before it could connect.' :
+      `You didn't answer in time when Dr. ${callIssueState.doctorName} called.`
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           <View style={styles.creditIconWrap}>
             <Ionicons name="time-outline" size={64} color={colors.warning} />
           </View>
-          <Text style={styles.creditTitle}>No Response</Text>
-          <Text style={styles.creditSub}>
-            The doctor did not respond in time. Your credit has been preserved.
-          </Text>
-          <View style={styles.creditCard}>
-            <Ionicons name="wallet-outline" size={22} color={colors.tealGreen} />
-            <View style={styles.creditCardText}>
-              <Text style={styles.creditCardLabel}>Consultation Credit Preserved</Text>
-              <Text style={[styles.creditCardAmount, { fontSize: 15 }]}>Book another doctor with no extra charge</Text>
-            </View>
-          </View>
+          <Text style={styles.creditTitle}>Call Not Connected</Text>
+          <Text style={styles.creditSub}>{issueCopy}</Text>
           <Pressable
             style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
             onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
@@ -365,9 +374,9 @@ export default function WaitingRoomScreen() {
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
-            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
           >
-            <Ionicons name="refresh" size={18} color={colors.mistWhite} />
+            <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Try Again</Text>
           </Pressable>
           <View style={{ height: 40 }} />

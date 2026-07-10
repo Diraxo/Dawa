@@ -23,6 +23,7 @@ import NetInfo from '@react-native-community/netinfo'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { useStreamConnection } from '@/hooks/useStreamConnection'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
+import { useOngoingConsultationNotification } from '@/hooks/useOngoingConsultationNotification'
 import { useVersionCheck } from '@/hooks/useVersionCheck'
 import { streamClient } from '@/lib/stream'
 import { getAuthClient, setClerkTokenGetter, supabase } from '@/lib/supabase'
@@ -127,6 +128,34 @@ function AppInitializer() {
   }, [])
 
   usePushNotifications()
+  useOngoingConsultationNotification()
+
+  // ── Ongoing-call notification tap (Android, foreground/background-alive) ──
+  // Mirrors the 'consultation' case of the expo-notifications tap handler
+  // below, but for the Notifee-driven sticky call notification, whose press
+  // events don't go through expo-notifications at all.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return
+    let notifee: any = null
+    try { notifee = require('@notifee/react-native').default } catch { return }
+    if (!notifee?.onForegroundEvent) return
+
+    const unsubscribe = notifee.onForegroundEvent(({ type, detail }: any) => {
+      // EventType.PRESS === 1 — avoided importing the enum here so this
+      // stays safe even if @notifee/react-native isn't linked yet.
+      if (type !== 1) return
+      const data = detail?.notification?.data ?? {}
+      const consultationId   = data.consultationId as string | undefined
+      const consultationType = (data.consultationType as string | undefined) ?? 'chat'
+      if (!consultationId) return
+      const pathname =
+        userRole === 'doctor'
+          ? (consultationType === 'video' ? '/(doctor)/video-consultation' : consultationType === 'phone' ? '/(doctor)/phone-consultation' : '/(doctor)/chat-consultation')
+          : (consultationType === 'video' ? '/(patient)/video-consultation' : consultationType === 'phone' ? '/(patient)/phone-consultation' : '/(patient)/chat-consultation')
+      router.replace({ pathname: pathname as any, params: { consultationId, channelId: consultationId } })
+    })
+    return () => unsubscribe?.()
+  }, [userRole])
 
   // ── CallKeep initialisation + incoming-call wiring ───────────────────────
   // Must be inside a component so we have access to `router`.
@@ -254,7 +283,7 @@ function AppInitializer() {
         if (!token) return
         const { data } = await getAuthClient(token)
           .from('consultations')
-          .select('id, type, doctor_profiles!doctor_id(users!inner(full_name))')
+          .select('id, type, doctor_profiles!doctor_id(users!inner(full_name, profile_photo_url))')
           .in('status', ['accepted', 'in_progress'])
           .order('updated_at', { ascending: false })
           .limit(1)
@@ -269,11 +298,13 @@ function AppInitializer() {
         const consultationId: string = (data as any).id
         const type: string           = (data as any).type ?? 'chat'
         const doctorName: string     = (data as any).doctor_profiles?.users?.full_name ?? 'Doctor'
+        const doctorPhotoUrl: string | null = (data as any).doctor_profiles?.users?.profile_photo_url ?? null
 
         setActive({
           consultationId,
           type: type as 'phone' | 'video' | 'chat',
           otherPersonName: doctorName,
+          otherPersonPhotoUrl: doctorPhotoUrl,
           role: 'patient',
           elapsedSeconds: activeConsultation?.consultationId === consultationId
             ? (activeConsultation?.elapsedSeconds ?? 0)
@@ -296,11 +327,65 @@ function AppInitializer() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn, userRole])
 
-  // ── Doctor: active consultation recovery ──────────────────────────────────
   const segments = useSegments()
   const isOnConsultationScreen = segments.some(seg =>
     CONSULTATION_SEGMENTS.some(c => seg.includes(c))
   )
+  const isOnWaitingRoomScreen = segments.some(seg => seg.includes('waiting-room'))
+
+  // ── Patient: waiting-room recovery ─────────────────────────────────────────
+  // A paid consultation sitting in 'waiting_for_doctor' must survive the app
+  // being closed and reopened — the DB is the source of truth, never a
+  // client-side timer. Without this, closing the app while waiting orphaned
+  // the request: relaunching landed on Home with no sign anything was
+  // pending (AsyncStorage's PENDING_KEY in waiting-room.tsx was written but
+  // never read back anywhere).
+  const waitingRecoveredRef = useRef(false)
+  useEffect(() => {
+    if (!isSignedIn || userRole !== 'patient' || isOnWaitingRoomScreen) return
+
+    const recoverWaiting = async () => {
+      if (waitingRecoveredRef.current) return
+      try {
+        const token = await getToken()
+        if (!token) return
+        const { data } = await getAuthClient(token)
+          .from('consultations')
+          .select('id, type, doctor_id, doctor_profiles!doctor_id(users!inner(full_name, profile_photo_url))')
+          .eq('status', 'waiting_for_doctor')
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (!data) return
+        waitingRecoveredRef.current = true
+
+        const consultationId: string = (data as any).id
+        const type: string           = (data as any).type ?? 'chat'
+        const doctorId: string       = (data as any).doctor_id
+        const doctorName: string     = (data as any).doctor_profiles?.users?.full_name ?? 'Doctor'
+
+        router.replace({
+          pathname: '/(patient)/waiting-room' as any,
+          params: { consultationId, doctorId, doctorName, consultationType: type },
+        })
+      } catch {}
+    }
+
+    recoverWaiting()
+
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'background' || state === 'inactive') {
+        waitingRecoveredRef.current = false
+      } else if (state === 'active') {
+        recoverWaiting()
+      }
+    })
+    return () => sub.remove()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSignedIn, userRole, isOnWaitingRoomScreen])
+
+  // ── Doctor: active consultation recovery ──────────────────────────────────
   const doctorFetchingRef = useRef(false)
 
   useEffect(() => {
@@ -318,7 +403,7 @@ function AppInitializer() {
         if (!token) return
         const { data } = await getAuthClient(token)
           .from('consultations')
-          .select('id, type, users!consultations_patient_id_fkey(full_name)')
+          .select('id, type, users!consultations_patient_id_fkey(full_name, profile_photo_url)')
           .in('status', ['accepted', 'in_progress'])
           .order('updated_at', { ascending: false })
           .limit(1)
@@ -332,11 +417,13 @@ function AppInitializer() {
         const consultationId: string = (data as any).id
         const type: string           = (data as any).type ?? 'chat'
         const patientName: string    = (data as any).users?.full_name ?? 'Patient'
+        const patientPhotoUrl: string | null = (data as any).users?.profile_photo_url ?? null
 
         setActive({
           consultationId,
           type: type as 'phone' | 'video' | 'chat',
           otherPersonName: patientName,
+          otherPersonPhotoUrl: patientPhotoUrl,
           role: 'doctor',
           elapsedSeconds: activeConsultation?.consultationId === consultationId
             ? (activeConsultation?.elapsedSeconds ?? 0)
@@ -466,25 +553,44 @@ function AppInitializer() {
         case 'consultation': {
           if (consultationId) {
             const type = consultationType ?? 'chat'
-            const pathname =
-              type === 'video'
-                ? '/(patient)/video-consultation'
-                : type === 'phone'
-                ? '/(patient)/phone-consultation'
-                : '/(patient)/chat-consultation'
-            router.replace({
-              pathname,
-              params: {
-                consultationId,
-                channelId: consultationId,
-                doctorName:    data.doctorName ?? 'Doctor',
-                doctorId:      data.doctorId   ?? '',
-                doctorPhotoUrl: data.doctorPhotoUrl ?? '',
-                fromCallkeep:  '1',
-              },
-            })
+            if (userRole === 'doctor') {
+              const pathname =
+                type === 'video'
+                  ? '/(doctor)/video-consultation'
+                  : type === 'phone'
+                  ? '/(doctor)/phone-consultation'
+                  : '/(doctor)/chat-consultation'
+              router.replace({
+                pathname,
+                params: {
+                  consultationId,
+                  channelId: consultationId,
+                  patientName:    data.patientName    ?? 'Patient',
+                  patientId:      data.patientId      ?? '',
+                  patientPhotoUrl: data.patientPhotoUrl ?? '',
+                },
+              })
+            } else {
+              const pathname =
+                type === 'video'
+                  ? '/(patient)/video-consultation'
+                  : type === 'phone'
+                  ? '/(patient)/phone-consultation'
+                  : '/(patient)/chat-consultation'
+              router.replace({
+                pathname,
+                params: {
+                  consultationId,
+                  channelId: consultationId,
+                  doctorName:    data.doctorName ?? 'Doctor',
+                  doctorId:      data.doctorId   ?? '',
+                  doctorPhotoUrl: data.doctorPhotoUrl ?? '',
+                  fromCallkeep:  '1',
+                },
+              })
+            }
           } else {
-            router.replace('/(patient)/(tabs)/appointments')
+            router.replace(userRole === 'doctor' ? '/(doctor)/(tabs)/consultations' : '/(patient)/(tabs)/appointments')
           }
           break
         }
@@ -562,11 +668,13 @@ function AppInitializer() {
 
     const tapSub = Notifications.addNotificationResponseReceivedListener(response => {
       navigate(response.notification.request.content.data as Record<string, string>)
+      Notifications.dismissNotificationAsync(response.notification.request.identifier).catch(() => {})
     })
 
     Notifications.getLastNotificationResponseAsync().then(response => {
       if (!response) return
       navigate(response.notification.request.content.data as Record<string, string>)
+      Notifications.dismissNotificationAsync(response.notification.request.identifier).catch(() => {})
     })
 
     return () => tapSub.remove()

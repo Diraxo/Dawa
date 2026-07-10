@@ -15,6 +15,7 @@ import { ConsultationActionButtons } from '@/components/ui/ConsultationActionBut
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { shadow } from '@/lib/shadow'
 import { createConsultationChannel } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
@@ -51,7 +52,7 @@ export default function IncomingRequestScreen() {
 
   // Photo may arrive via route param (push-notification path); fall back to
   // a DB fetch when it doesn't (e.g. direct deep-link with a stale param set).
-  const [patientPhotoUrl, setPatientPhotoUrl] = useState<string | null>(patientPhotoUrlParam ?? null)
+  const [patientInitialPhotoUrl, setPatientInitialPhotoUrl] = useState<string | null>(patientPhotoUrlParam ?? null)
   useEffect(() => {
     if (patientPhotoUrlParam || !consultationId) return
     let cancelled = false
@@ -62,10 +63,18 @@ export default function IncomingRequestScreen() {
       .single()
       .then(({ data }) => {
         if (cancelled) return
-        setPatientPhotoUrl((data as any)?.patient?.profile_photo_url ?? null)
+        setPatientInitialPhotoUrl((data as any)?.patient?.profile_photo_url ?? null)
       })
     return () => { cancelled = true }
   }, [consultationId, patientPhotoUrlParam])
+  // Kept live via Realtime so a rename/photo change while this request is
+  // ringing still shows the patient's current identity on Accept.
+  const { name: livePatientName, photoUrl: patientPhotoUrl } = useUserProfileRealtime(
+    patientId ?? null,
+    patientName ?? null,
+    patientInitialPhotoUrl
+  )
+  const effectivePatientName = livePatientName ?? patientName ?? 'Patient'
 
   const TYPE_META: Record<string, { icon: string; label: string; color: string; bg: string }> = {
     chat:  { icon: 'chatbubble-ellipses', label: t('chatConsultation'),  color: colors.tealGreen, bg: 'rgba(0,191,165,0.15)' },
@@ -142,16 +151,64 @@ export default function IncomingRequestScreen() {
     return () => { supabase.removeChannel(channel) }
   }, [consultationId, responded])
 
-  const updateStatus = async (id: string, status: 'accepted' | 'declined') => {
-    try {
+  // Writes status:'accepted', retrying a couple of times on failure —
+  // without this, a transient network blip or a rejected write (e.g. a
+  // trigger exception) silently strands the patient on "Waiting for Doctor"
+  // forever while the doctor is already sitting on the call screen unaware
+  // anything went wrong. Treats "0 rows matched" as success if some other
+  // path (a race with another device/tab) already moved the row past
+  // 'waiting_for_doctor'.
+  const writeAccepted = async (id: string): Promise<'ok' | 'busy' | 'failed'> => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       const token = await getToken()
-      if (!token || !id) return
-      const update: Record<string, unknown> = { status }
-      if (status === 'accepted') update.started_at = new Date().toISOString()
-      await getAuthClient(token).from('consultations').update(update).eq('id', id)
-    } catch {
-      // best effort
+      if (token) {
+        const client = getAuthClient(token)
+        const { data, error } = await client
+          .from('consultations')
+          .update({ status: 'accepted', started_at: new Date().toISOString() })
+          .eq('id', id)
+          .eq('status', 'waiting_for_doctor')
+          .select('id')
+        if (!error && data && data.length > 0) return 'ok'
+        if (!error) {
+          const { data: row } = await client.from('consultations').select('status').eq('id', id).single()
+          if (row?.status === 'accepted' || row?.status === 'in_progress') return 'ok'
+        }
+        // DOCTOR_BUSY means the doctor already has another accepted/in_progress
+        // consultation (e.g. a scheduled appointment came due while they're on
+        // an on-demand call) — a business-rule rejection, not a transient
+        // failure, so retrying won't help; bail out immediately.
+        if (error?.message?.includes('DOCTOR_BUSY')) return 'busy'
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500))
     }
+    return 'failed'
+  }
+
+  const alertAcceptFailed = (id: string, name: string) => {
+    Alert.alert(
+      'Connection Issue',
+      `We couldn't confirm the consultation with ${name}. They may still be waiting — retry now?`,
+      [
+        { text: 'Retry', onPress: async () => { const result = await writeAccepted(id); if (result === 'busy') alertAcceptBusy(); else if (result !== 'ok') alertAcceptFailed(id, name) } },
+        { text: 'Dismiss', style: 'cancel' },
+      ],
+    )
+  }
+
+  const alertAcceptBusy = () => {
+    Alert.alert(
+      'Already In a Consultation',
+      "You're currently in another consultation. This request is still waiting — accept it once you're free.",
+      [
+        {
+          text: 'OK',
+          onPress: () => {
+            router.canGoBack() ? router.back() : router.replace('/(doctor)/(tabs)/home' as never)
+          },
+        },
+      ],
+    )
   }
 
   const declineWithReason = async (reason: string) => {
@@ -266,11 +323,26 @@ export default function IncomingRequestScreen() {
       const doctorUserId = userId ?? user?.id ?? ''
       const channelCreate = (async () => {
         try {
-          if (!patientClerkId) {
+          // Some navigation paths into this screen (the consultations list,
+          // active-consultation recovery on relaunch) don't carry the
+          // patientClerkId route param — fall back to a DB lookup rather
+          // than silently skipping channel creation and leaning on the
+          // call screens' self-heal watch({members}), which can race with
+          // this write and trip Stream's "duplicate members" check.
+          let resolvedPatientClerkId = patientClerkId
+          if (!resolvedPatientClerkId) {
+            const { data } = await supabase
+              .from('consultations')
+              .select('patient:users!patient_id(clerk_id)')
+              .eq('id', consultationId)
+              .single()
+            resolvedPatientClerkId = (data as any)?.patient?.clerk_id ?? undefined
+          }
+          if (!resolvedPatientClerkId) {
             logger.error('[Stream] patientClerkId missing — channel not created for consultation:', consultationId)
           } else if (doctorUserId) {
             await Promise.race([
-              createConsultationChannel(consultationId, patientClerkId, doctorUserId, {
+              createConsultationChannel(consultationId, resolvedPatientClerkId, doctorUserId, {
                 doctorName:     user?.fullName ?? user?.firstName ?? 'Doctor',
                 doctorSubtitle: '',
                 doctorPhotoUrl: doctorPhotoUrl ?? user?.imageUrl ?? null,
@@ -284,7 +356,9 @@ export default function IncomingRequestScreen() {
         }
       })()
 
-      await Promise.allSettled([channelCreate, updateStatus(consultationId, 'accepted')])
+      const [, result] = await Promise.all([channelCreate, writeAccepted(consultationId)])
+      if (result === 'busy') alertAcceptBusy()
+      else if (result !== 'ok') alertAcceptFailed(consultationId, patientName ?? 'Patient')
     })()
   }
 
@@ -310,7 +384,7 @@ export default function IncomingRequestScreen() {
           )}
         </View>
 
-        <Text style={styles.patientName}>{patientName ?? 'Patient'}</Text>
+        <Text style={styles.patientName}>{effectivePatientName}</Text>
         <Text style={styles.patientSub}>
           {t('wantsToStartA')} {meta.label.toLowerCase()}
         </Text>

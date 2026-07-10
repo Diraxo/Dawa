@@ -68,10 +68,7 @@ export function useDoctorOnlineToggle(doctorProfileId: string | null, opts?: { r
       if (!token) throw new Error('Not authenticated')
       const { error } = await getAuthClient(token)
         .from('doctor_profiles')
-        .update({
-          is_online: newStatus,
-          ...(newStatus ? { last_seen_at: new Date().toISOString() } : {}),
-        })
+        .update({ is_online: newStatus })
         .eq('id', doctorProfileId)
       if (error) throw error
       setIsOnline(newStatus)

@@ -8,7 +8,6 @@ import NetworkBanner from '@/components/ui/NetworkBanner'
 import ResponsiveShell from '@/components/ui/ResponsiveShell'
 import RoleGuard from '@/components/ui/RoleGuard'
 import DoctorConsultationRecovery from '@/components/doctor/DoctorConsultationRecovery'
-import DoctorPresenceSession from '@/components/doctor/DoctorPresenceSession'
 import StatusAckNotice from '@/components/doctor/StatusAckNotice'
 
 // Doctor section wrapper: role-guarded everywhere; the onboarding screens
@@ -25,7 +24,6 @@ export default function DoctorShell({ children }: { children: React.ReactNode })
         <>
           <NetworkBanner />
           <StatusAckNotice />
-          <DoctorPresenceSession />
           <DoctorConsultationRecovery />
           <ResponsiveShell sidebar={<DoctorSidebar />}>
             <IncomingRequestOverlay />

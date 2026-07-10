@@ -23,11 +23,17 @@
           "fetch",
           "processing",
           "remote-notification",
+          "voip",
+          "audio",
+          "fetch",
+          "processing",
+          "remote-notification",
           "voip"
         ],
         "NSMicrophoneUsageDescription": "Dawa needs microphone access for voice and video consultations.",
         "NSCameraUsageDescription": "Dawa needs camera access for video consultations.",
-        "UIUserInterfaceStyle": "Light"
+        "UIUserInterfaceStyle": "Light",
+        "ITSAppUsesNonExemptEncryption": false
       },
       "entitlements": {
         "aps-environment": "production",

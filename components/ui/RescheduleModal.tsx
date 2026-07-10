@@ -12,6 +12,7 @@ import {
   Text,
   View,
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -58,6 +59,7 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): P
 }
 
 export function RescheduleModal({ visible, appointment, onClose, onRescheduled }: Props) {
+  const insets = useSafeAreaInsets()
   const { getToken } = useAuth()
   const slideAnim = useRef(new Animated.Value(300)).current
   const [availability, setAvailability] = useState<Availability | null>(null)
@@ -197,13 +199,13 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
   if (!appointment) return null
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={submitting ? undefined : onClose}>
       <View style={styles.overlay}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <Animated.View style={[styles.sheet, { transform: [{ translateY: slideAnim }] }]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={submitting ? undefined : onClose} />
+        <Animated.View style={[styles.sheet, { paddingBottom: 12 + insets.bottom, transform: [{ translateY: slideAnim }] }]}>
           <View style={styles.header}>
             <Text style={styles.title}>Reschedule Appointment</Text>
-            <Pressable onPress={onClose} hitSlop={10}>
+            <Pressable onPress={submitting ? undefined : onClose} hitSlop={10} disabled={submitting}>
               <Ionicons name="close" size={24} color={colors.inkBlack} />
             </Pressable>
           </View>
@@ -313,9 +315,10 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
 
 const styles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
   sheet: {
     backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 20, maxHeight: '85%',
+    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12, maxHeight: '85%',
   },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   title: { fontFamily: fonts.bold, fontSize: 18, color: colors.inkBlack },

@@ -6,6 +6,31 @@ if (!STREAM_KEY) console.error('[Stream] EXPO_PUBLIC_STREAM_API_KEY is not set â
 
 export const streamClient = StreamChat.getInstance(STREAM_KEY || 'missing-key')
 
+// Watches a consultation's messaging channel, self-healing membership by
+// passing `members` on first watch. `streamClient.channel()` caches one
+// instance per cid, so if that first watch() 409s with Stream's "duplicate
+// members" error (membership already provisioned elsewhere), simply calling
+// `channel()` again returns the *same* cached instance â€” its `data`/`_data`
+// still carry `members` from the first call, so a naive retry resends it and
+// hits the identical error every time. Strip `members` off the cached
+// instance directly before retrying.
+export async function watchConsultationChannel(
+  channelId: string,
+  members: string[] | undefined,
+  watchOptions?: Parameters<ReturnType<typeof streamClient.channel>['watch']>[0]
+) {
+  const ch = streamClient.channel('messaging', channelId, members ? { members } : undefined)
+  try {
+    await ch.watch(watchOptions)
+  } catch (err) {
+    if (!members) throw err
+    if (ch.data) delete (ch.data as any).members
+    if ((ch as any)._data) delete (ch as any)._data.members
+    await ch.watch(watchOptions)
+  }
+  return ch
+}
+
 export async function createConsultationChannel(
   consultationId: string,
   patientId: string,

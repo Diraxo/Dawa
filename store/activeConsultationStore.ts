@@ -6,6 +6,7 @@ export interface ActiveConsultation {
   consultationId: string
   type: 'phone' | 'video' | 'chat'
   otherPersonName: string
+  otherPersonPhotoUrl?: string | null
   role: 'patient' | 'doctor'
   elapsedSeconds: number
   status: 'active' | 'reconnecting'

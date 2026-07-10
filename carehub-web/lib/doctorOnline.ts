@@ -12,9 +12,6 @@ export async function writeDoctorOnlineStatus(
 ) {
   return client
     .from('doctor_profiles')
-    .update({
-      is_online: newStatus,
-      ...(newStatus ? { last_seen_at: new Date().toISOString() } : {}),
-    })
+    .update({ is_online: newStatus })
     .eq('id', profileId)
 }

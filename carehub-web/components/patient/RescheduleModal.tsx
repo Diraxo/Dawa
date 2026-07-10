@@ -140,14 +140,21 @@ export function RescheduleModal({ appointment, onClose, onRescheduled }: Props) 
   if (!appointment) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40"
+      onClick={submitting ? undefined : onClose}
+    >
       <div
         className="bg-white rounded-t-3xl sm:rounded-2xl w-full sm:max-w-md max-h-[85vh] overflow-y-auto p-6"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
           <h2 className="font-montserrat font-bold text-lg text-ink-black">Reschedule Appointment</h2>
-          <button onClick={onClose} className="text-ink-black/50 hover:text-ink-black">
+          <button
+            onClick={submitting ? undefined : onClose}
+            disabled={submitting}
+            className="text-ink-black/50 hover:text-ink-black disabled:opacity-40"
+          >
             <X size={22} />
           </button>
         </div>

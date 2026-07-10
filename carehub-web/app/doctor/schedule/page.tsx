@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
-import { writeDoctorOnlineStatus } from '@/lib/doctorOnline'
 import { formatDateTime } from '@/lib/utils'
 import Link from 'next/link'
 import { MessageCircle, Phone, Video, CalendarDays, XCircle, Clock, Ban } from 'lucide-react'
@@ -96,12 +95,8 @@ export default function DoctorSchedulePage() {
 
   const [loading, setLoading] = useState(true)
   const [profileId, setProfileId] = useState<string | null>(null)
-  const [isOnline, setIsOnline] = useState(false)
-  const [toggling, setToggling] = useState(false)
   const [status, setStatus] = useState<string>('')
 
-  const [acceptScheduled, setAcceptScheduled] = useState(true)
-  const [acceptOnDemand, setAcceptOnDemand] = useState(true)
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
   const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [blockInput, setBlockInput] = useState('')
@@ -146,8 +141,6 @@ export default function DoctorSchedulePage() {
   function applyAvailability(availabilityJson: unknown) {
     if (!availabilityJson) return
     const avail = availabilityJson as Record<string, unknown>
-    if (typeof avail.acceptScheduled === 'boolean') setAcceptScheduled(avail.acceptScheduled)
-    if (typeof avail.acceptOnDemand === 'boolean') setAcceptOnDemand(avail.acceptOnDemand)
     const dayKeys = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
     const dayAvail: Record<string, unknown> = {}
     dayKeys.forEach(k => { if (avail[k]) dayAvail[k] = avail[k] })
@@ -168,13 +161,12 @@ export default function DoctorSchedulePage() {
 
       const { data: dp } = await client
         .from('doctor_profiles')
-        .select('id, is_online, availability, status')
+        .select('id, availability, status')
         .eq('user_id', (ud as any).id)
         .single()
       if (!dp) { setLoading(false); return }
 
       setProfileId((dp as any).id)
-      setIsOnline((dp as any).is_online ?? false)
       setStatus((dp as any).status ?? '')
       applyAvailability((dp as any).availability)
 
@@ -185,10 +177,10 @@ export default function DoctorSchedulePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  // is_online AND availability/blocked-days are shared state across Home,
-  // Schedule, mobile, and any other client — without this the toggle/save
-  // here only ever updated local state, so it silently drifted out of sync
-  // with whatever another session last wrote to the DB until reload.
+  // availability/blocked-days/status are shared state across Home, Schedule,
+  // mobile, and any other client — without this the save here only ever
+  // updated local state, so it silently drifted out of sync with whatever
+  // another session last wrote to the DB until reload.
   useEffect(() => {
     if (!profileId) return
     const channel = supabase
@@ -197,8 +189,7 @@ export default function DoctorSchedulePage() {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` },
         (payload) => {
-          const next = (payload.new as { is_online?: boolean; availability?: unknown; status?: string })
-          if (typeof next?.is_online === 'boolean') setIsOnline(next.is_online)
+          const next = (payload.new as { availability?: unknown; status?: string })
           if (next?.availability) applyAvailability(next.availability)
           if (typeof next?.status === 'string') setStatus(next.status)
         }
@@ -226,19 +217,6 @@ export default function DoctorSchedulePage() {
     return () => { supabase.removeChannel(channel) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId])
-
-  // ── Online toggle ──────────────────────────────────────────────────────────
-  async function toggleOnline() {
-    if (!profileId || isPending) return
-    setToggling(true)
-    const token = await getToken()
-    if (!token) { setToggling(false); return }
-    const client = getAuthClient(token)
-    const next = !isOnline
-    await writeDoctorOnlineStatus(client, profileId, next)
-    setIsOnline(next)
-    setToggling(false)
-  }
 
   // ── Save availability ──────────────────────────────────────────────────────
   function minutesOf(t12: string): number {
@@ -269,7 +247,7 @@ export default function DoctorSchedulePage() {
     const token = await getToken()
     if (!token) { setSavingAvail(false); return }
     const client = getAuthClient(token)
-    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: blockedDates }
+    const payload = { ...availability, blocked_dates: blockedDates }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: updatedRows, error } = await client.from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
     setSavingAvail(false)
@@ -306,7 +284,7 @@ export default function DoctorSchedulePage() {
     if (!profileId) return
     const token = await getToken()
     if (!token) { setBlockedDates(previous); return }
-    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated }
+    const payload = { ...availability, blocked_dates: updated }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: updatedRows, error } = await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
     if (error || !updatedRows || updatedRows.length === 0) {
@@ -322,7 +300,7 @@ export default function DoctorSchedulePage() {
     if (!profileId) return
     const token = await getToken()
     if (!token) { setBlockedDates(previous); return }
-    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated }
+    const payload = { ...availability, blocked_dates: updated }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: updatedRows, error } = await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
     if (error || !updatedRows || updatedRows.length === 0) {
@@ -390,69 +368,6 @@ export default function DoctorSchedulePage() {
           </div>
         </div>
       )}
-
-      {/* ── Mode toggles ── */}
-      <div className="card p-5 mb-6 divide-y divide-cloud-grey">
-        <div className="flex items-center justify-between pb-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#EFF6FF] flex items-center justify-center flex-shrink-0">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1A4598" strokeWidth="2">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-              </svg>
-            </div>
-            <div>
-              <p className="font-montserrat font-semibold text-sm text-ink-black">Accept Scheduled Appointments</p>
-              <p className="text-xs text-ink-black/40 mt-0.5">Let patients book in advance</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setAcceptScheduled(v => !v)}
-            className={`relative w-12 h-6 rounded-full transition-colors ${acceptScheduled ? 'bg-teal-green' : 'bg-steel-grey'}`}
-          >
-            <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${acceptScheduled ? 'translate-x-7' : 'translate-x-1'}`} />
-          </button>
-        </div>
-        <div className="flex items-center justify-between pt-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#EFF6FF] flex items-center justify-center flex-shrink-0">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2962FF" strokeWidth="2">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-              </svg>
-            </div>
-            <div>
-              <p className="font-montserrat font-semibold text-sm text-ink-black">Accept On-Demand Consultations</p>
-              <p className="text-xs text-ink-black/40 mt-0.5">Let patients start an instant consultation with you right now</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setAcceptOnDemand(v => !v)}
-            className={`relative w-12 h-6 rounded-full transition-colors ${acceptOnDemand ? 'bg-teal-green' : 'bg-steel-grey'}`}
-          >
-            <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${acceptOnDemand ? 'translate-x-7' : 'translate-x-1'}`} />
-          </button>
-        </div>
-      </div>
-
-      {/* ── Online status ── */}
-      <div className="card p-5 mb-6 flex items-center justify-between">
-        <div>
-          <p className="font-montserrat font-bold text-base text-ink-black mb-0.5">Availability Status</p>
-          <p className="text-ink-black/50 text-sm">
-            {isOnline ? 'You are online and visible to patients.' : 'You are offline. Patients cannot book with you.'}
-          </p>
-        </div>
-        <button
-          onClick={toggleOnline}
-          disabled={toggling || isPending}
-          title={isPending ? 'Available after admin approval' : undefined}
-          className={`flex items-center gap-2.5 px-5 py-2.5 rounded-2xl font-montserrat font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-            isOnline ? 'bg-success/10 text-success border border-success/20' : 'bg-cloud-grey text-ink-black/50 border border-steel-grey'
-          }`}
-        >
-          <div className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-success animate-pulse' : 'bg-steel-grey'}`} />
-          {toggling ? '…' : isPending ? 'Unavailable' : isOnline ? 'Online · Go Offline' : 'Go Online'}
-        </button>
-      </div>
 
       {/* ── Weekly strip ── */}
       <h2 className="font-montserrat font-bold text-lg text-ink-black mb-3">This Week</h2>

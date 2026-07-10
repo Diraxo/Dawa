@@ -5,16 +5,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   AppState,
   AppStateStatus,
   Image,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as ScreenCapture from 'expo-screen-capture'
 import * as Notifications from 'expo-notifications'
 import * as Haptics from 'expo-haptics'
@@ -30,33 +30,29 @@ try {
   RtcSurfaceView = require('react-native-agora').RtcSurfaceView
 } catch {}
 
-// Lazily require stream-chat-expo — wrapped in try/catch since the TurboModule
-// isn't available in Expo Go (matches the phone-consultation screens' pattern).
+// Only used here to gate watchConsultationChannel() on availability — the
+// actual chat UI now lives entirely in the shared InCallChatPanel.
 let Chat: any = null
-let ChannelView: any = null
-let MessageComposer: any = null
-let MessageList: any = null
 try {
-  const sc = require('stream-chat-expo')
-  Chat = sc.Chat
-  ChannelView = sc.Channel
-  MessageComposer = sc.MessageComposer
-  MessageList = sc.MessageList
+  Chat = require('stream-chat-expo').Chat
 } catch {}
 
 import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
+import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
+import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
-import { streamClient } from '@/lib/stream'
+import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
-import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 import { logger } from '@/lib/logger'
+import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 
 const GRACE_PERIOD_MS = 90_000
 const CONNECTION_TIMEOUT_MS = 90_000
@@ -65,16 +61,16 @@ const MUTE_DEBOUNCE_MS = 4_000
 type CallStatus = 'connecting' | 'waiting' | 'connected' | 'reconnecting' | 'error'
 
 export default function DoctorVideoConsultationScreen() {
+  const insets = useSafeAreaInsets()
   const { patientName, consultationId, resumeElapsed } = useLocalSearchParams<{
     patientName?: string
     consultationId?: string
     resumeElapsed?: string
   }>()
   const router = useRouter()
-  const { userId } = useAuthStore()
+  const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
   const { setActive, updateElapsed, setConnectionStatus } = useActiveConsultationStore()
-  const displayName = patientName ?? 'Patient'
 
   ScreenCapture.usePreventScreenCapture()
 
@@ -99,12 +95,16 @@ export default function DoctorVideoConsultationScreen() {
 
   const channelName = consultationId ?? `consult-demo`
   const localUid = useMemo(() => userId ? uidFromString(userId) : 2, [userId])
-  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null
 
   // Keeps the always-current mute intent so it can be re-applied the instant
   // a new engine joins (retry/reconnect), without waiting on React state.
   const mutedRef = useRef(muted)
   useEffect(() => { mutedRef.current = muted }, [muted])
+  // Cloud proxy (forced UDP relay) adds real latency/quality cost and should
+  // only be paid on networks that actually need it — start without it, and
+  // only fall back to it on the next join attempt if this one never
+  // connects.
+  const proxyFallbackRef = useRef(false)
   const toggleMute = () => {
     setMuted(m => {
       const next = !m
@@ -114,37 +114,51 @@ export default function DoctorVideoConsultationScreen() {
   }
 
   // Load any previously-chosen mute state for this consultation before the
-  // first join, so a refresh/app-restart mid-call resumes muted.
+  // first join, so a refresh/app-restart mid-call resumes muted. The join
+  // effect below waits on `muteLoaded` so the very first joinChannel already
+  // publishes with the correct mute state.
+  const [muteLoaded, setMuteLoaded] = useState(false)
+  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null && muteLoaded
   useEffect(() => {
-    if (!consultationId) return
+    if (!consultationId) { setMuteLoaded(true); return }
     let cancelled = false
     getPersistedMute(consultationId).then(persisted => {
-      if (!cancelled && persisted) setMuted(true)
+      if (cancelled) return
+      if (persisted) { mutedRef.current = true; setMuted(true) }
+      setMuteLoaded(true)
     })
     return () => { cancelled = true }
   }, [consultationId])
 
-  // Patient identity photo — fetched once, then kept live via Realtime so an
-  // upload/delete from the patient's own profile reflects here immediately.
+  // Patient identity (name + photo) — fetched once, then kept live via
+  // Realtime so a rename/upload/delete from the patient's own profile
+  // reflects here immediately, no refresh required.
   const [patientUserId, setPatientUserId] = useState<string | null>(null)
+  const [patientInitialName, setPatientInitialName] = useState<string | null>(null)
   const [patientInitialPhotoUrl, setPatientInitialPhotoUrl] = useState<string | null>(null)
   useEffect(() => {
     if (!consultationId) return
     let cancelled = false
     supabase
       .from('consultations')
-      .select('patient:users!patient_id(id, profile_photo_url)')
+      .select('patient:users!patient_id(id, full_name, profile_photo_url)')
       .eq('id', consultationId)
       .single()
       .then(({ data }) => {
         if (cancelled) return
         const patient = (data as any)?.patient
         setPatientUserId(patient?.id ?? null)
+        setPatientInitialName(patient?.full_name ?? null)
         setPatientInitialPhotoUrl(patient?.profile_photo_url ?? null)
       })
     return () => { cancelled = true }
   }, [consultationId])
-  const patientPhotoUrl = useUserPhotoRealtime(patientUserId, patientInitialPhotoUrl)
+  const { name: livePatientName, photoUrl: patientPhotoUrl } = useUserProfileRealtime(
+    patientUserId,
+    patientInitialName ?? patientName ?? null,
+    patientInitialPhotoUrl
+  )
+  const displayName = livePatientName ?? patientName ?? 'Patient'
 
   // Single source of truth for call phase/timer — derived from the DB row via
   // Realtime, never from local Agora events. See hooks/useConsultationState.
@@ -169,7 +183,6 @@ export default function DoctorVideoConsultationScreen() {
   const gracePeriodCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const userOfflineDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const endedHandledRef = useRef(false)
-  const chatSlide = useRef(new Animated.Value(0)).current
   const chatOpenRef = useRef(false)
 
   // Sends a heartbeat UPDATE to consultations.last_heartbeat_at every 30s
@@ -209,6 +222,7 @@ export default function DoctorVideoConsultationScreen() {
       consultationId,
       type: 'video',
       otherPersonName: displayName,
+      otherPersonPhotoUrl: patientPhotoUrl,
       role: 'doctor',
       elapsedSeconds: seconds,
       status: 'active',
@@ -228,24 +242,33 @@ export default function DoctorVideoConsultationScreen() {
   // surface stuck on return — release it on background, reacquire on
   // foreground (respecting whatever camera-off state the user had chosen).
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+    const sub = AppState.addEventListener('change', async (nextState: AppStateStatus) => {
       const inCall = callStatus === 'connected' || callStatus === 'reconnecting' || callStatus === 'waiting'
       if (nextState === 'background' || nextState === 'inactive') {
         if (inCall) {
-          Notifications.scheduleNotificationAsync({
-            content: {
-              title: 'Ongoing Video Consultation',
-              body: `Tap to return to your video call with ${displayName}`,
-              sound: 'default',
-              data: {
-                screen: 'consultation',
-                consultationId,
-                consultationType: 'video',
-                patientName: displayName,
+          // Android gets the persistent, real-timer Notifee notification from
+          // useOngoingConsultationNotification instead (driven globally off
+          // the active-consultation store) — only iOS needs this one-shot.
+          if (Platform.OS !== 'android') {
+            const localPhotoUri = await localizeNotificationPhoto(patientPhotoUrl)
+            Notifications.scheduleNotificationAsync({
+              content: {
+                title: `Call with ${displayName}`,
+                body: `Tap to return to your video call with ${displayName}`,
+                sound: 'default',
+                data: {
+                  screen: 'consultation',
+                  consultationId,
+                  consultationType: 'video',
+                  patientName: displayName,
+                  patientId: patientUserId ?? '',
+                  patientPhotoUrl: patientPhotoUrl ?? '',
+                },
+                ...(localPhotoUri ? { attachments: [{ identifier: 'photo', url: localPhotoUri, type: 'image' }] } : {}),
               },
-            },
-            trigger: null,
-          }).catch(() => {})
+              trigger: null,
+            }).catch(() => {})
+          }
           try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.muteLocalVideoStream(true) } catch {}
         }
       } else if (nextState === 'active' && inCall) {
@@ -256,7 +279,7 @@ export default function DoctorVideoConsultationScreen() {
       }
     })
     return () => sub.remove()
-  }, [callStatus, consultationId, displayName, camOff])
+  }, [callStatus, consultationId, displayName, camOff, patientUserId, patientPhotoUrl])
 
   // ── Fetch Agora token ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -378,13 +401,14 @@ export default function DoctorVideoConsultationScreen() {
         // whether the call is currently healthy.
         if (state === 4 && mounted) { setIsReconnecting(true) }
         if (state === 3 && mounted) { setIsReconnecting(false) }
-        if (state === 5 && mounted) { logger.error('[Video][Doctor] Connection FAILED'); setLocalError(true) }
+        if (state === 5 && mounted) { logger.error('[Video][Doctor] Connection FAILED'); proxyFallbackRef.current = true; setLocalError(true) }
         if (reason === 19 && mounted) {
           Alert.alert('Session Ended', 'You joined this consultation from another device.')
         }
       },
       onError: (errorCode: number, msg: string) => {
         logger.error(`[Video][Doctor][${Date.now()}] Agora error code:${errorCode} msg:${msg}`)
+        proxyFallbackRef.current = true
         if (mounted) setLocalError(true)
       },
       onTokenPrivilegeWillExpire: (_conn: any, _token: string) => {
@@ -418,11 +442,15 @@ export default function DoctorVideoConsultationScreen() {
 
         engine!.enableAudio()
         engine!.enableVideo()
+        // AudioProfileDefault (0) + AudioScenarioMeeting (8) — tuned for a
+        // 1:1 voice-centric consultation (vs. the SDK's generic default).
+        try { engine!.setAudioProfile(0, 8) } catch {}
+        engine!.muteLocalAudioStream(mutedRef.current)
         engine!.setEnableSpeakerphone(true)
         engine!.startPreview()
-        engine!.setCloudProxy(3) // Force UDP cloud proxy — fixes restrictive networks
+        if (proxyFallbackRef.current) engine!.setCloudProxy(3)
 
-        logger.log(`[Video][Doctor][${Date.now()}] joinChannel → channel:${channelName} uid:${localUid} tokenLen:${agoraToken?.length ?? 0}`)
+        logger.log(`[Video][Doctor][${Date.now()}] joinChannel → channel:${channelName} uid:${localUid} tokenLen:${agoraToken?.length ?? 0} proxy:${proxyFallbackRef.current}`)
         const code = engine!.joinChannel(agoraToken ?? '', channelName, localUid, {
           clientRoleType: ClientRoleBroadcaster,
           publishMicrophoneTrack: true,
@@ -433,6 +461,7 @@ export default function DoctorVideoConsultationScreen() {
         logger.log(`[Video][Doctor][${Date.now()}] joinChannel returned code:${code}`)
         if (typeof code === 'number' && code < 0) {
           logger.error('[Video][Doctor] joinChannel rejected code:', code)
+          proxyFallbackRef.current = true
           if (mounted) setLocalError(true)
           return
         }
@@ -442,11 +471,13 @@ export default function DoctorVideoConsultationScreen() {
         connectionTimeoutRef.current = setTimeout(() => {
           if (mounted && phaseRef.current !== 'on_call') {
             logger.error(`[Video][Doctor][${Date.now()}] Connection timeout — stuck in phase:${phaseRef.current}`)
+            proxyFallbackRef.current = true
             setLocalError(true)
           }
         }, CONNECTION_TIMEOUT_MS)
       } catch (e) {
         logger.error('[Video][Doctor] startCall error:', e)
+        proxyFallbackRef.current = true
         if (mounted) setLocalError(true)
       }
     }
@@ -489,7 +520,10 @@ export default function DoctorVideoConsultationScreen() {
   // exist yet when the peer's first message arrives and the unread badge
   // misses it.
   useEffect(() => {
-    if (!activeChannel && consultationId && Chat) {
+    // streamClient.channel() throws "Call connectUser..." until the Stream
+    // socket handshake (kicked off by useStreamConnection) finishes — userId
+    // is set into the auth store slightly before that resolves.
+    if (!activeChannel && consultationId && Chat && isStreamConnected) {
       let cancelled = false
       setChannelLoading(true)
       ;(async () => {
@@ -503,8 +537,7 @@ export default function DoctorVideoConsultationScreen() {
             .single()
           const patientClerkId = (data as any)?.patient?.clerk_id as string | undefined
           const members = userId && patientClerkId ? [userId, patientClerkId] : undefined
-          const ch = streamClient.channel('messaging', consultationId, members ? { members } : undefined)
-          await ch.watch()
+          const ch = await watchConsultationChannel(consultationId, members)
           if (cancelled) return
           setActiveChannel(ch)
           // Seed from Stream's own persisted unread state (not just messages
@@ -528,20 +561,18 @@ export default function DoctorVideoConsultationScreen() {
       return () => { cancelled = true }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [consultationId, userId])
+  }, [consultationId, userId, isStreamConnected])
 
   const openChat = () => {
     setUnreadCount(0)
     chatOpenRef.current = true
     activeChannel?.markRead().catch(() => {})
-    Animated.spring(chatSlide, { toValue: 1, useNativeDriver: true, tension: 65, friction: 11 }).start()
     setChatOpen(true)
   }
   const closeChat = () => {
     chatOpenRef.current = false
-    Animated.timing(chatSlide, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => setChatOpen(false))
+    setChatOpen(false)
   }
-  const chatSlideY = chatSlide.interpolate({ inputRange: [0, 1], outputRange: [700, 0] })
 
   const formatTime = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
@@ -615,7 +646,7 @@ export default function DoctorVideoConsultationScreen() {
   const netLabel = networkQuality <= 2 ? 'Excellent' : networkQuality <= 4 ? 'Good' : networkQuality > 0 ? 'Poor' : null
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+    <SafeAreaView style={styles.safe} edges={['top']}>
       {showEndSheet && (
         <EndConsultationSheet
           consultationId={consultationId ?? ''}
@@ -657,7 +688,9 @@ export default function DoctorVideoConsultationScreen() {
         <View style={styles.timerOverlay}>
           <View style={[styles.timerBadge, callStatus === 'reconnecting' && styles.timerBadgeWarning]}>
             <View style={[styles.liveDot, callStatus === 'reconnecting' && styles.liveDotWarning]} />
-            <Text style={styles.timerText}>{callStatus === 'connected' || callStatus === 'reconnecting' ? formatTime(seconds) : '--:--'}</Text>
+            <Text style={styles.timerText}>
+              {callStatus === 'connected' ? formatTime(seconds) : callStatus === 'reconnecting' ? 'Reconnecting…' : '--:--'}
+            </Text>
           </View>
           {netLabel && callStatus === 'connected' && (
             <View style={[styles.netQualityChip, netLabel === 'Poor' && styles.netQualityChipPoor]}>
@@ -696,7 +729,7 @@ export default function DoctorVideoConsultationScreen() {
       </View>
 
       {/* Controls */}
-      <View style={styles.controls}>
+      <View style={[styles.controls, { paddingBottom: 12 + insets.bottom }]}>
         <View style={styles.controlsRow}>
           <DrCtrlBtn
             icon={muted ? 'mic-off' : 'mic'}
@@ -723,10 +756,6 @@ export default function DoctorVideoConsultationScreen() {
               try { engine?.switchCamera() } catch {}
             }}
           />
-
-          <Pressable style={styles.endBtn} onPress={handleEnd}>
-            <Ionicons name="call" size={24} color={colors.mistWhite} />
-          </Pressable>
 
           <DrCtrlBtn
             icon={camOff ? 'videocam-off' : 'videocam'}
@@ -757,88 +786,36 @@ export default function DoctorVideoConsultationScreen() {
             disabled={isConnecting}
             onPress={() => setShowInfoSheet(true)}
           />
+
+          <Pressable style={styles.endBtn} onPress={handleEnd}>
+            <Ionicons name="call" size={24} color={colors.mistWhite} />
+          </Pressable>
         </View>
       </View>
 
       {/* Info bottom sheet */}
-      {showInfoSheet && (
-        <Pressable style={styles.infoSheetBackdrop} onPress={() => setShowInfoSheet(false)}>
-          <Pressable style={styles.infoSheet} onPress={e => e.stopPropagation()}>
-            <View style={styles.infoSheetHandle} />
-            <View style={styles.infoSheetHeader}>
-              <Text style={styles.infoSheetTitle}>Call Information</Text>
-              <Pressable onPress={() => setShowInfoSheet(false)}>
-                <Ionicons name="close" size={22} color="rgba(255,255,255,0.6)" />
-              </Pressable>
-            </View>
-            <View style={styles.infoSheetBody}>
-              <View style={styles.infoSheetRow}>
-                <Text style={styles.infoSheetLabel}>Patient</Text>
-                <Text style={styles.infoSheetValue}>{displayName}</Text>
-              </View>
-              <View style={styles.infoSheetRow}>
-                <Text style={styles.infoSheetLabel}>Consultation ID</Text>
-                <Text style={styles.infoSheetValue} numberOfLines={1}>{consultationId ?? '—'}</Text>
-              </View>
-              {startedAtIso && (
-                <View style={styles.infoSheetRow}>
-                  <Text style={styles.infoSheetLabel}>Started at</Text>
-                  <Text style={styles.infoSheetValue}>{new Date(startedAtIso).toLocaleTimeString()}</Text>
-                </View>
-              )}
-              <View style={styles.infoSheetRow}>
-                <Text style={styles.infoSheetLabel}>Duration</Text>
-                <Text style={styles.infoSheetValue}>{formatTime(seconds)}</Text>
-              </View>
-              <View style={styles.infoSheetRow}>
-                <Text style={styles.infoSheetLabel}>Network</Text>
-                <Text style={[styles.infoSheetValue, netLabel === 'Poor' && { color: '#F87171' }]}>{netLabel ?? 'Measuring…'}</Text>
-              </View>
-              <View style={styles.infoSheetRow}>
-                <Text style={styles.infoSheetLabel}>Encryption</Text>
-                <Text style={styles.infoSheetValue}>AES-128</Text>
-              </View>
-            </View>
-          </Pressable>
-        </Pressable>
-      )}
+      <CallInfoPanel
+        visible={showInfoSheet}
+        onClose={() => setShowInfoSheet(false)}
+        consultationId={consultationId}
+        consultationType="video"
+        counterpartLabel="Patient"
+        counterpartName={displayName}
+        counterpartPhotoUrl={patientPhotoUrl}
+        startedAtIso={startedAtIso}
+        elapsedSeconds={seconds}
+        networkQuality={networkQuality}
+      />
 
       {/* Chat bottom sheet */}
-      {chatOpen && (
-        <Animated.View style={[styles.chatPanel, { transform: [{ translateY: chatSlideY }] }]}>
-          <View style={styles.panelHandle} />
-          <View style={styles.panelHeader}>
-            <Text style={styles.panelTitle}>In-call chat</Text>
-            <View style={styles.callContinues}>
-              <Ionicons name="videocam" size={13} color={colors.tealGreen} />
-              <Text style={styles.callContinuesText}>Call continues</Text>
-            </View>
-            <Pressable onPress={closeChat} hitSlop={12}>
-              <Ionicons name="chevron-down" size={22} color="rgba(255,255,255,0.7)" />
-            </Pressable>
-          </View>
-          {!Chat ? (
-            <View style={styles.panelEmpty}>
-              <Ionicons name="chatbubble-ellipses-outline" size={40} color="rgba(255,255,255,0.2)" />
-              <Text style={styles.panelEmptyText}>Chat unavailable in Expo Go</Text>
-              <Text style={styles.panelEmptyHint}>Use a development build to enable chat</Text>
-            </View>
-          ) : channelLoading || !activeChannel ? (
-            <View style={styles.panelEmpty}>
-              <ActivityIndicator color={colors.tealGreen} size="large" />
-            </View>
-          ) : (
-            <View style={{ flex: 1 }}>
-              <Chat client={streamClient}>
-                <ChannelView channel={activeChannel}>
-                  <MessageList />
-                  <MessageComposer />
-                </ChannelView>
-              </Chat>
-            </View>
-          )}
-        </Animated.View>
-      )}
+      <InCallChatPanel
+        visible={chatOpen}
+        onClose={closeChat}
+        channel={activeChannel}
+        channelLoading={channelLoading}
+        userId={userId}
+        consultationTypeIcon="videocam"
+      />
     </SafeAreaView>
   )
 }
@@ -907,7 +884,8 @@ const styles = StyleSheet.create({
   selfViewOff: { width: 90, height: 120, borderRadius: 14, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'rgba(255,255,255,0.1)' },
   selfLabel: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.6)' },
 
-  controls: { paddingHorizontal: 12, paddingBottom: 32, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
+  // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
+  controls: { paddingHorizontal: 12, paddingBottom: 12, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
   controlsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   ctrlBtn: { alignItems: 'center', gap: 5, width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.15)', justifyContent: 'center' },
   ctrlBtnActive: { backgroundColor: colors.careBlue },
@@ -923,39 +901,4 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4, borderWidth: 1.5, borderColor: '#070E27',
   },
   unreadBadgeText: { fontFamily: fonts.bold, fontSize: 10, color: '#fff' },
-
-  chatPanel: {
-    position: 'absolute', bottom: 0, left: 0, right: 0, height: '64%',
-    backgroundColor: '#0D1A3A',
-    borderTopLeftRadius: 22, borderTopRightRadius: 22,
-    paddingTop: 8, elevation: 24,
-    shadowColor: '#000', shadowOffset: { width: 0, height: -6 },
-    shadowOpacity: 0.5, shadowRadius: 16,
-  },
-  panelHandle: {
-    width: 44, height: 5, borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignSelf: 'center', marginBottom: 8,
-  },
-  panelHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingBottom: 12,
-    borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  panelTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.mistWhite, flex: 1 },
-  callContinues: { flexDirection: 'row', alignItems: 'center', gap: 5, marginRight: 12 },
-  callContinuesText: { fontFamily: fonts.medium, fontSize: 12, color: colors.tealGreen },
-  panelEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
-  panelEmptyText: { fontFamily: fonts.semiBold, fontSize: 15, color: 'rgba(255,255,255,0.7)' },
-  panelEmptyHint: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.35)' },
-
-  infoSheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', zIndex: 50 },
-  infoSheet: { backgroundColor: '#0D1A3A', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 40 },
-  infoSheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'center', marginBottom: 16 },
-  infoSheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  infoSheetTitle: { fontFamily: fonts.semiBold, fontSize: 16, color: colors.mistWhite },
-  infoSheetBody: { gap: 12 },
-  infoSheetRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.07)' },
-  infoSheetLabel: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.5)' },
-  infoSheetValue: { fontFamily: fonts.medium, fontSize: 13, color: colors.mistWhite, maxWidth: '55%', textAlign: 'right' },
 })

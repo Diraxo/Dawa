@@ -35,6 +35,7 @@ type Step = 1 | 2 | 3 | 4
 interface ActiveCredit {
   creditConsultationId: string
   creditAmount:         number
+  type:                 ConsultType
 }
 
 const TYPE_META: Record<ConsultType, { icon: typeof MessageCircle; label: string; priceKey: keyof DoctorProfile }> = {
@@ -120,11 +121,7 @@ export default function BookingPage() {
     setDoctor(prev => prev ? { ...prev, is_online: fields.is_online, availability: fields.availability ?? prev.availability } : prev)
   }, () => { loadDoctor() })
 
-  // Doctor-configured booking modes — default to true so existing profiles
-  // that never touched these toggles keep working as before.
-  const acceptOnDemand = (doctor?.availability as any)?.acceptOnDemand !== false
-  const acceptScheduled = (doctor?.availability as any)?.acceptScheduled !== false
-  const canStartNow = Boolean(doctor?.is_online) && acceptOnDemand && !doctorBusy
+  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy
 
   // The real default before the patient makes an explicit choice — derived
   // from canStartNow on every render (not a one-time effect), so the timing
@@ -132,7 +129,7 @@ export default function BookingPage() {
   const effectiveScheduleMode: 'now' | 'schedule' = scheduleMode ?? (canStartNow ? 'now' : 'schedule')
 
   // Fall back to scheduling if "Start Now" stops being valid while this
-  // screen is open (doctor goes offline, disables on-demand, or becomes busy).
+  // screen is open (doctor goes offline, or becomes busy).
   useEffect(() => {
     if (effectiveScheduleMode === 'now' && !canStartNow) setScheduleMode('schedule')
   }, [canStartNow, effectiveScheduleMode])
@@ -202,9 +199,13 @@ export default function BookingPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctorId, selectedDay, doctor?.availability])
 
-  // Check for active credit when user reaches review/payment step
+  // Check for active credit as soon as the page loads — not just at the
+  // review step — so Step 1's type selector can be locked to the credit's
+  // original consultation type from the start. A credit is only ever
+  // redeemable against the SAME type it was paid for (never converted
+  // chat -> video, etc.), so selectedType is force-set here too.
   useEffect(() => {
-    if (step < 3 || !user) return
+    if (!user) return
     let cancelled = false
     setCreditLoading(true)
     ;(async () => {
@@ -217,7 +218,7 @@ export default function BookingPage() {
 
         const { data: credits } = await client
           .from('consultations')
-          .select('id, credit_amount')
+          .select('id, credit_amount, type')
           .eq('patient_id', userData.id)
           .eq('consultation_credit', true)
           .eq('credit_used', false)
@@ -226,10 +227,13 @@ export default function BookingPage() {
 
         if (cancelled) return
         if (credits && credits.length > 0) {
+          const creditType = (credits[0].type ?? 'chat') as ConsultType
           setActiveCredit({
             creditConsultationId: credits[0].id,
             creditAmount:         Number(credits[0].credit_amount ?? 0),
+            type:                 creditType,
           })
+          setSelectedType(creditType)
         } else {
           setActiveCredit(null)
         }
@@ -241,21 +245,15 @@ export default function BookingPage() {
     })()
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step])
+  }, [user])
 
   async function initiateChapaPayment() {
     if (effectiveScheduleMode === 'now' && !canStartNow) {
       setPayError(
         doctor && !doctor.is_online
           ? 'This doctor is currently offline. Please schedule for a later time or choose another doctor.'
-          : doctorBusy
-            ? 'Doctor is currently in another consultation. Please schedule for later or choose another doctor.'
-            : 'This doctor is not accepting on-demand consultations right now. Please schedule for a later time.'
+          : 'Doctor is currently in another consultation. Please schedule for later or choose another doctor.'
       )
-      return
-    }
-    if (effectiveScheduleMode === 'schedule' && !acceptScheduled) {
-      setPayError('This doctor is not accepting scheduled appointments right now.')
       return
     }
     setBooking(true)
@@ -515,24 +513,38 @@ export default function BookingPage() {
       {step === 1 && (
         <div className="card p-6">
           <h2 className="font-montserrat font-bold text-lg text-ink-black mb-4">Choose Consultation Type</h2>
+          {activeCredit && !creditLoading && (
+            <div className="flex items-start gap-2 bg-teal-50 border border-teal-200 rounded-xl p-4 mb-4">
+              <Wallet size={16} className="text-teal-600 shrink-0" />
+              <p className="text-teal-700 text-xs leading-relaxed">
+                You have an unused {TYPE_META[activeCredit.type].label} credit — it can only be applied to another {TYPE_META[activeCredit.type].label.toLowerCase()}.
+              </p>
+            </div>
+          )}
           <div className="flex flex-col gap-3 mb-6">
-            {(Object.entries(TYPE_META) as [ConsultType, typeof TYPE_META[ConsultType]][]).map(([key, meta]) => (
-              <button
-                key={key}
-                onClick={() => setSelectedType(key)}
-                className={`flex items-center gap-4 p-4 rounded-2xl border-2 transition-all text-left ${
-                  selectedType === key ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
-                }`}
-              >
-                <meta.icon size={24} className="text-int-blue" />
-                <div className="flex-1">
-                  <p className="font-montserrat font-bold text-sm text-ink-black">{meta.label}</p>
-                </div>
-                <span className="font-bold text-sm text-ink-black">
-                  {doctor[meta.priceKey] ? `ETB ${doctor[meta.priceKey]}` : 'Free'}
-                </span>
-              </button>
-            ))}
+            {(Object.entries(TYPE_META) as [ConsultType, typeof TYPE_META[ConsultType]][]).map(([key, meta]) => {
+              const locked = Boolean(activeCredit) && key !== activeCredit?.type
+              return (
+                <button
+                  key={key}
+                  onClick={() => { if (!locked) setSelectedType(key) }}
+                  disabled={locked}
+                  className={`flex items-center gap-4 p-4 rounded-2xl border-2 transition-all text-left ${
+                    locked
+                      ? 'border-steel-grey opacity-50 cursor-not-allowed'
+                      : selectedType === key ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
+                  }`}
+                >
+                  <meta.icon size={24} className={locked ? 'text-ink-black/30' : 'text-int-blue'} />
+                  <div className="flex-1">
+                    <p className="font-montserrat font-bold text-sm text-ink-black">{meta.label}</p>
+                  </div>
+                  <span className="font-bold text-sm text-ink-black">
+                    {doctor[meta.priceKey] ? `ETB ${doctor[meta.priceKey]}` : 'Free'}
+                  </span>
+                </button>
+              )
+            })}
           </div>
           <button onClick={() => setStep(2)} className="btn-primary w-full">Continue →</button>
         </div>
@@ -557,28 +569,22 @@ export default function BookingPage() {
                 <p className="text-ink-black/50 text-xs">
                   {!doctor?.is_online
                     ? 'Doctor is currently offline'
-                    : !acceptOnDemand
-                      ? 'Doctor is not accepting on-demand consultations'
-                      : doctorBusy
-                        ? 'Doctor is currently in another consultation'
-                        : 'Doctor will be notified immediately'}
+                    : doctorBusy
+                      ? 'Doctor is currently in another consultation'
+                      : 'Doctor will be notified immediately'}
                 </p>
               </div>
             </button>
             <button
-              onClick={() => acceptScheduled && setScheduleMode('schedule')}
-              disabled={!acceptScheduled}
+              onClick={() => setScheduleMode('schedule')}
               className={`flex items-center gap-4 p-4 rounded-2xl border-2 transition-all ${
-                !acceptScheduled ? 'border-steel-grey opacity-50 cursor-not-allowed'
-                  : effectiveScheduleMode === 'schedule' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
+                effectiveScheduleMode === 'schedule' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
               }`}
             >
               <Calendar size={22} className="text-int-blue" />
               <div>
                 <p className="font-montserrat font-bold text-sm text-ink-black">Schedule for Later</p>
-                <p className="text-ink-black/50 text-xs">
-                  {!acceptScheduled ? 'Doctor is not accepting scheduled appointments' : 'Pick a future date and time slot'}
-                </p>
+                <p className="text-ink-black/50 text-xs">Pick a future date and time slot</p>
               </div>
             </button>
           </div>

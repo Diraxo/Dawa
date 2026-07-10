@@ -17,6 +17,7 @@ import {
   Text,
   View,
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
@@ -39,6 +40,7 @@ type TimingType = 'now' | 'schedule'
 interface ActiveCredit {
   creditConsultationId: string
   creditAmount:         number
+  type:                 ConsultationType
 }
 
 type Props = {
@@ -68,6 +70,7 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): P
 }
 
 export function BookingModal({ visible, doctor, onClose }: Props) {
+  const insets = useSafeAreaInsets()
   const router = useRouter()
   const { getToken } = useAuth()
   const { user } = useUser()
@@ -86,11 +89,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const days = getNextDays(14, doctor?.availability ?? undefined)
   const selectedDayValue = days[selectedDay]?.value
 
-  // Doctor-configured booking modes — default to true so existing profiles
-  // that never touched these toggles keep working as before.
-  const acceptOnDemand = (doctor?.availability as any)?.acceptOnDemand !== false
-  const acceptScheduled = (doctor?.availability as any)?.acceptScheduled !== false
-  const canStartNow = Boolean(doctor?.is_online) && acceptOnDemand && !doctorBusy
+  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy
 
   // Doctor is BUSY when they already have an accepted/in-progress consultation.
   // Checked via RPC (not a direct table read) so a patient never needs SELECT
@@ -187,7 +186,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   }, [visible])
 
   // "Start Now" stopped being valid while the modal is open (doctor went
-  // offline, or disabled on-demand) — fall back to scheduling for later.
+  // offline) — fall back to scheduling for later.
   useEffect(() => {
     if (visible && !canStartNow && timing === 'now') {
       setTiming('schedule')
@@ -195,9 +194,13 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canStartNow, visible])
 
-  // Check for active consultation credit when patient reaches the review step
+  // Check for active consultation credit as soon as the sheet opens — not
+  // just at the review step — so Step 1's type selector can be locked to the
+  // credit's original consultation type from the start. A credit is only
+  // ever redeemable against the SAME type it was paid for (never converted
+  // chat -> video, etc.), so consultType is force-set here too.
   useEffect(() => {
-    if (step !== 3 || !user) return
+    if (!visible || !user) return
     let cancelled = false
     setCreditLoading(true)
     ;(async () => {
@@ -211,7 +214,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
 
         const { data: credits } = await client
           .from('consultations')
-          .select('id, credit_amount')
+          .select('id, credit_amount, type')
           .eq('patient_id', userData.id)
           .eq('consultation_credit', true)
           .eq('credit_used', false)
@@ -220,10 +223,13 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
 
         if (cancelled) return
         if (credits && credits.length > 0) {
+          const creditType = (credits[0].type ?? 'chat') as ConsultationType
           setActiveCredit({
             creditConsultationId: credits[0].id,
             creditAmount:         Number(credits[0].credit_amount ?? 0),
+            type:                 creditType,
           })
+          setConsultType(creditType)
         } else {
           setActiveCredit(null)
         }
@@ -235,7 +241,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
     })()
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step])
+  }, [visible])
 
   if (!doctor) return null
 
@@ -577,7 +583,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const canGoNext = () => {
     if (step === 2 && timing === 'now') return canStartNow
     if (step === 2 && timing === 'schedule') {
-      if (!acceptScheduled || days.length === 0) return false
+      if (days.length === 0) return false
       if (selectedTime === '') return false
       if (bookedTimes.has(selectedTime)) return false
       if (isSlotPast(days[selectedDay]?.value ?? '', selectedTime)) return false
@@ -595,7 +601,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   return (
     <Modal visible={visible} transparent animationType="none" onRequestClose={paying ? undefined : onClose}>
       <Pressable style={styles.backdrop} onPress={paying ? undefined : onClose} />
-      <Animated.View style={[styles.sheet, { transform: [{ translateY: slideAnim }] }]}>
+      <Animated.View style={[styles.sheet, { paddingBottom: 12 + insets.bottom, transform: [{ translateY: slideAnim }] }]}>
         {/* Handle */}
         <View style={styles.handle} />
 
@@ -622,24 +628,39 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
           {step === 1 && (
             <View style={styles.stepContent}>
               <Text style={styles.stepLabel}>Choose Consultation Type</Text>
-              {CONSULT_TYPES.map(type => (
-                <Pressable
-                  key={type.id}
-                  style={[styles.typeCard, consultType === type.id && styles.typeCardSelected]}
-                  onPress={() => setConsultType(type.id)}
-                >
-                  <View style={[styles.typeIconWrap, { backgroundColor: `${type.color}18` }]}>
-                    <Ionicons name={type.icon as any} size={26} color={type.color} />
-                  </View>
-                  <View style={styles.typeInfo}>
-                    <Text style={styles.typeLabel}>{type.label}</Text>
-                    <Text style={styles.typePrice}>ETB {getPrice(type.id)}</Text>
-                  </View>
-                  <View style={[styles.radioOuter, consultType === type.id && styles.radioSelected]}>
-                    {consultType === type.id && <View style={styles.radioInner} />}
-                  </View>
-                </Pressable>
-              ))}
+              {activeCredit && !creditLoading && (
+                <View style={styles.creditBanner}>
+                  <Ionicons name="wallet-outline" size={16} color="#059669" />
+                  <Text style={styles.creditBannerText}>
+                    You have an unused {CONSULT_TYPES.find(t => t.id === activeCredit.type)?.label ?? activeCredit.type} credit —
+                    it can only be applied to another {CONSULT_TYPES.find(t => t.id === activeCredit.type)?.label ?? activeCredit.type} consultation.
+                  </Text>
+                </View>
+              )}
+              {CONSULT_TYPES.map(type => {
+                const locked = Boolean(activeCredit) && type.id !== activeCredit?.type
+                return (
+                  <Pressable
+                    key={type.id}
+                    style={[styles.typeCard, consultType === type.id && styles.typeCardSelected, locked && styles.typeCardLocked]}
+                    onPress={() => { if (!locked) setConsultType(type.id) }}
+                    disabled={locked}
+                  >
+                    <View style={[styles.typeIconWrap, { backgroundColor: `${type.color}18` }]}>
+                      <Ionicons name={locked ? 'lock-closed' : (type.icon as any)} size={locked ? 20 : 26} color={locked ? '#9CA3AF' : type.color} />
+                    </View>
+                    <View style={styles.typeInfo}>
+                      <Text style={[styles.typeLabel, locked && styles.typeLabelLocked]}>{type.label}</Text>
+                      <Text style={styles.typePrice}>ETB {getPrice(type.id)}</Text>
+                    </View>
+                    {!locked && (
+                      <View style={[styles.radioOuter, consultType === type.id && styles.radioSelected]}>
+                        {consultType === type.id && <View style={styles.radioInner} />}
+                      </View>
+                    )}
+                  </Pressable>
+                )
+              })}
             </View>
           )}
 
@@ -660,22 +681,20 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
                   <Ionicons name="flash" size={22} color={timing === 'now' ? colors.mistWhite : colors.tealGreen} />
                   <Text style={[styles.timingLabel, timing === 'now' && styles.timingLabelSelected]}>On-Demand</Text>
                   <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>
-                    {!doctor.is_online ? 'Doctor Offline' : !acceptOnDemand ? 'Not Accepted' : doctorBusy ? 'In Another Consultation' : 'Start Now'}
+                    {!doctor.is_online ? 'Doctor Offline' : doctorBusy ? 'In Another Consultation' : 'Start Now'}
                   </Text>
                 </Pressable>
                 <Pressable
                   style={[
                     styles.timingCard,
                     timing === 'schedule' && styles.timingCardSelected,
-                    !acceptScheduled && styles.timingCardDisabled,
                   ]}
-                  disabled={!acceptScheduled}
                   onPress={() => setTiming('schedule')}
                 >
                   <Ionicons name="calendar" size={22} color={timing === 'schedule' ? colors.mistWhite : colors.careBlue} />
                   <Text style={[styles.timingLabel, timing === 'schedule' && styles.timingLabelSelected]}>Schedule</Text>
                   <Text style={[styles.timingSub, timing === 'schedule' && styles.timingSubSelected]}>
-                    {acceptScheduled ? 'Pick a time' : 'Not Accepted'}
+                    Pick a time
                   </Text>
                 </Pressable>
               </View>
@@ -874,12 +893,13 @@ function Row({ label, value, bold, teal }: { label: string; value: string; bold?
 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)' },
+  // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
   sheet: {
     backgroundColor: colors.mistWhite,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     maxHeight: '88%',
-    paddingBottom: 32,
+    paddingBottom: 12,
   },
   handle: {
     width: 40, height: 4, borderRadius: 2,
@@ -913,6 +933,8 @@ const styles = StyleSheet.create({
     padding: 14, marginBottom: 10, backgroundColor: colors.mistWhite,
   },
   typeCardSelected: { borderColor: colors.tealGreen, backgroundColor: '#F0FDFB' },
+  typeCardLocked: { opacity: 0.5 },
+  typeLabelLocked: { color: '#9CA3AF' },
   typeIconWrap: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   typeInfo: { flex: 1 },
   typeLabel: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },

@@ -211,8 +211,8 @@ export default function PaymentReturnScreen() {
       // them to waiting_for_doctor only once scheduled_at arrives.
       //
       // waiting_started_at must be stamped here too, same as the credit path
-      // in apply-credit/index.ts — mark_doctor_missed_consultations() and the
-      // waiting-room countdown both key off this column.
+      // in apply-credit/index.ts — it's the sort key doctor clients queue on
+      // and what the patient waiting room displays as "waiting since".
       try {
         const token = await getToken()
         if (token && consultationId) {

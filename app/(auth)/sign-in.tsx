@@ -149,8 +149,6 @@ export default function SignInScreen() {
           await checkRoleAndRedirect(clerkId)
         }
         // If clerkId is null, the useEffect handles redirect once isSignedIn/userId update
-      } else if (result.status === 'needs_second_factor') {
-        setGlobalError('Two-step verification is required for this account. Please sign in via the web app to complete setup.')
       } else {
         setGlobalError('Sign-in could not be completed. Please try again or use Google/Facebook sign-in.')
       }

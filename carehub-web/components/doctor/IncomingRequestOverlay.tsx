@@ -78,6 +78,15 @@ export default function IncomingRequestOverlay() {
   const [waitingLabel, setWaitingLabel] = useState('')
   const [showPermBanner, setShowPermBanner] = useState(false)
   const [showDeclineReasons, setShowDeclineReasons] = useState(false)
+  // Surfaced only if the background 'accepted' write never lands after
+  // retrying — otherwise the doctor is left staring at "Connecting…" while
+  // the patient is stuck on "Waiting for Doctor" with nothing telling either
+  // of them anything went wrong.
+  const [acceptFailure, setAcceptFailure] = useState<IncomingRequest | null>(null)
+  // DOCTOR_BUSY is a business-rule rejection (already in another consultation),
+  // not a transient failure — shown as its own non-retryable banner instead of
+  // the generic "couldn't confirm, retry" one below.
+  const [acceptBusy, setAcceptBusy] = useState(false)
 
   const profileIdRef      = useRef<string | null>(null)
   const doctorUserRowIdRef = useRef<string | null>(null)
@@ -292,6 +301,36 @@ export default function IncomingRequestOverlay() {
     setShowPermBanner(false)
   }
 
+  // Writes status:'accepted', retrying a couple of times on failure —
+  // without this, a transient network blip or a rejected write (e.g. a
+  // trigger exception) silently strands the patient on "Waiting for Doctor"
+  // forever with the doctor already sitting on the call screen unaware
+  // anything went wrong. Treats "0 rows matched" as success if some other
+  // path (a race with another device/tab) already moved the row past
+  // 'waiting_for_doctor'.
+  const writeAccepted = useCallback(async (token: string, consultationId: string): Promise<'ok' | 'busy' | 'failed'> => {
+    const client = getAuthClient(token)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { data, error } = await client
+        .from('consultations')
+        .update({ status: 'accepted', started_at: new Date().toISOString() })
+        .eq('id', consultationId)
+        .eq('status', 'waiting_for_doctor')
+        .select('id')
+      if (!error && data && data.length > 0) return 'ok'
+      if (!error) {
+        const { data: row } = await client.from('consultations').select('status').eq('id', consultationId).single()
+        if (row?.status === 'accepted' || row?.status === 'in_progress') return 'ok'
+      }
+      // DOCTOR_BUSY means the doctor already has another accepted/in_progress
+      // consultation — a business-rule rejection, not a transient failure, so
+      // retrying won't help; bail out immediately.
+      if (error?.message?.includes('DOCTOR_BUSY')) return 'busy'
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500))
+    }
+    return 'failed'
+  }, [])
+
   // ── Accept ───────────────────────────────────────────────────────────────────
   function handleAccept(req: IncomingRequest) {
     if (respondingRef.current) return
@@ -300,6 +339,7 @@ export default function IncomingRequestOverlay() {
     // Navigate immediately — no waiting on Stream or DB
     activeIdRef.current = null
     setRequest(null)
+    setAcceptFailure(null)
     router.replace(`/doctor/consultation/${req.type}/${req.id}`)
 
     // Background: create Stream channel + update DB status concurrently —
@@ -310,7 +350,7 @@ export default function IncomingRequestOverlay() {
     ;(async () => {
       try {
         const token = await getToken()
-        if (!token) return
+        if (!token) { setAcceptFailure(req); return }
 
         // Create/upsert the Stream channel with both members regardless of
         // consultation type — phone and video consultations use the same
@@ -343,13 +383,31 @@ export default function IncomingRequestOverlay() {
           }
         })()
 
-        const statusUpdate = getAuthClient(token)
-          .from('consultations')
-          .update({ status: 'accepted', started_at: new Date().toISOString() })
-          .eq('id', req.id)
+        const [, result] = await Promise.all([channelCreate, writeAccepted(token, req.id)])
+        if (result === 'busy') {
+          setAcceptBusy(true)
+          // The accept never landed — the doctor was already navigated to
+          // the consultation screen for a request that's still just
+          // 'waiting_for_doctor', which would strand them there.
+          router.replace('/doctor')
+        }
+        else if (result !== 'ok') setAcceptFailure(req)
+      } catch {
+        setAcceptFailure(req)
+      }
+    })()
+  }
 
-        await Promise.allSettled([channelCreate, statusUpdate])
-      } catch {}
+  function retryAccept() {
+    if (!acceptFailure) return
+    const req = acceptFailure
+    setAcceptFailure(null)
+    ;(async () => {
+      const token = await getToken()
+      if (!token) { setAcceptFailure(req); return }
+      const result = await writeAccepted(token, req.id)
+      if (result === 'busy') { setAcceptBusy(true); router.replace('/doctor') }
+      else if (result !== 'ok') setAcceptFailure(req)
     })()
   }
 
@@ -402,11 +460,49 @@ export default function IncomingRequestOverlay() {
     </div>
   )
 
+  const acceptFailureBanner = acceptFailure && (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-3 bg-danger text-mist-white rounded-2xl pl-4 pr-2 py-2.5 text-sm shadow-xl max-w-md w-[calc(100%-2rem)]">
+      <span className="flex-1">
+        Couldn&apos;t confirm the {acceptFailure.patientName} consultation — they may still be waiting.
+      </span>
+      <button
+        onClick={retryAccept}
+        className="shrink-0 bg-mist-white text-danger font-semibold rounded-full px-3 py-1.5 text-xs hover:opacity-90"
+      >
+        Retry
+      </button>
+      <button
+        onClick={() => setAcceptFailure(null)}
+        aria-label="Dismiss"
+        className="shrink-0 text-mist-white/70 hover:text-mist-white"
+      >
+        <X size={16} />
+      </button>
+    </div>
+  )
+
+  const acceptBusyBanner = acceptBusy && (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-3 bg-warning text-ink-black rounded-2xl pl-4 pr-2 py-2.5 text-sm shadow-xl max-w-md w-[calc(100%-2rem)]">
+      <span className="flex-1 font-semibold">
+        You&apos;re already in another consultation. This request is still waiting — accept it once you&apos;re free.
+      </span>
+      <button
+        onClick={() => setAcceptBusy(false)}
+        aria-label="Dismiss"
+        className="shrink-0 text-ink-black/70 hover:text-ink-black"
+      >
+        <X size={16} />
+      </button>
+    </div>
+  )
+
   // ── Busy badge — doctor is in a session but patients are queued ──────────────
   if (!request && queueCount > 0) {
     return (
       <>
         {permBanner}
+        {acceptFailureBanner}
+        {acceptBusyBanner}
         <div className="fixed top-4 right-4 z-50 flex items-center gap-2 bg-warning/10 border border-warning/30 text-warning rounded-2xl px-4 py-2.5 text-sm font-montserrat font-semibold shadow-lg pointer-events-none">
           <Clock size={15} />
           {queueCount} patient{queueCount > 1 ? 's' : ''} waiting
@@ -415,7 +511,7 @@ export default function IncomingRequestOverlay() {
     )
   }
 
-  if (!request) return permBanner ?? null
+  if (!request) return <>{permBanner}{acceptFailureBanner}{acceptBusyBanner}</>
 
   const meta = TYPE_META[request.type] ?? TYPE_META.chat
   const TypeIcon = meta.icon
@@ -423,6 +519,8 @@ export default function IncomingRequestOverlay() {
   return (
     <>
       {permBanner}
+      {acceptFailureBanner}
+      {acceptBusyBanner}
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div className="card p-8 max-w-sm w-full text-center">
           {/* Type badge */}

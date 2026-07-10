@@ -7,6 +7,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  AppStateStatus,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -18,6 +20,7 @@ import {
   View,
   Image,
 } from 'react-native'
+import * as Notifications from 'expo-notifications'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 import type { Channel } from 'stream-chat'
@@ -64,7 +67,10 @@ import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { logger } from '@/lib/logger'
 import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { useActiveChatStore } from '@/store/activeChatStore'
+import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,7 @@ export default function DoctorChatConsultationScreen() {
   const router = useRouter()
   const { t } = useTranslation()
   const { getToken, userId } = useAuth()
+  const isStreamConnected = useAuthStore((s) => s.isStreamConnected)
   const [showEndSheet, setShowEndSheet] = useState(false)
   // `consultationStatus` is only a fast-path hint passed from the messages list
   // (avoids a flash of "Active" before the fetch below resolves) — the effect
@@ -117,7 +124,14 @@ export default function DoctorChatConsultationScreen() {
   const [peerTyping, setPeerTyping] = useState(false)
   const [peerOnline, setPeerOnline] = useState<boolean | null>(null)
   const [peerReadAt, setPeerReadAt] = useState<string | null>(null)
-  const [patientPhotoUrl, setPatientPhotoUrl] = useState<string | null>(null)
+  const [patientInitialPhotoUrl, setPatientInitialPhotoUrl] = useState<string | null>(null)
+  // Patient identity kept live via Realtime — a rename/photo change mid-chat
+  // reflects here immediately instead of staying stuck on the fetched value.
+  const { name: livePatientName, photoUrl: patientPhotoUrl } = useUserProfileRealtime(
+    patientId ?? null,
+    patientName ?? null,
+    patientInitialPhotoUrl
+  )
 
   // ── UI State ────────────────────────────────────────────────────────────────
   const [showMoreMenu, setShowMoreMenu] = useState(false)
@@ -145,9 +159,38 @@ export default function DoctorChatConsultationScreen() {
 
   useHeartbeat(consultationId as string | undefined, !ended)
 
-  const displayName = patientName ?? 'Patient'
+  const displayName = livePatientName ?? patientName ?? 'Patient'
   const nameInitial = displayName.charAt(0).toUpperCase()
   const effectiveChannelId = channelId ?? consultationId
+
+  // ── Background notification ────────────────────────────────────────────────
+  // Mirrors the phone/video screens' "Ongoing Consultation" notification so
+  // backgrounding mid-chat also resumes directly into this same chat on tap.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (state: AppStateStatus) => {
+      if (state === 'background' && !ended && effectiveChannelId) {
+        const localPhotoUri = await localizeNotificationPhoto(patientPhotoUrl)
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: `Call with ${displayName}`,
+            body: `Tap to return to your chat with ${displayName}`,
+            sound: 'default',
+            data: {
+              screen: 'consultation',
+              consultationId: effectiveChannelId,
+              consultationType: 'chat',
+              patientName: displayName,
+              patientId: patientId ?? '',
+              patientPhotoUrl: patientPhotoUrl ?? '',
+            },
+            ...(localPhotoUri ? { attachments: [{ identifier: 'photo', url: localPhotoUri, type: 'image' }] } : {}),
+          },
+          trigger: null,
+        }).catch(() => {})
+      }
+    })
+    return () => sub.remove()
+  }, [ended, effectiveChannelId, patientId, displayName, patientPhotoUrl])
 
   const setActiveChannelId = useActiveChatStore((s) => s.setActiveChannelId)
   // Tracked so app/_layout.tsx's global message listener can tell "already
@@ -213,6 +256,9 @@ export default function DoctorChatConsultationScreen() {
   // Watch the Stream channel so messages load
   useEffect(() => {
     if (!effectiveChannelId) return
+    // streamClient.channel() throws "Call connectUser..." until the Stream
+    // socket handshake (kicked off by useStreamConnection) finishes.
+    if (!isStreamConnected) return
     let mounted = true
     let currentChannel: Channel | null = null
     let connSub: { unsubscribe: () => void } | null = null
@@ -229,11 +275,24 @@ export default function DoctorChatConsultationScreen() {
           .eq('id', effectiveChannelId)
           .single()
         const patientClerkId = (data as any)?.patient?.clerk_id as string | undefined
-        setPatientPhotoUrl((data as any)?.patient?.profile_photo_url ?? null)
+        setPatientInitialPhotoUrl((data as any)?.patient?.profile_photo_url ?? null)
         const members = userId && patientClerkId ? [userId, patientClerkId] : undefined
         const ch = streamClient.channel('messaging', effectiveChannelId, members ? { members } : undefined)
         currentChannel = ch
-        await ch.watch({ presence: true })
+        try {
+          await ch.watch({ presence: true })
+        } catch (err) {
+          if (!members) throw err
+          // Membership may already exist (added by the accept-time create
+          // or the patient's own self-heal watch) — re-sending members on
+          // an already-provisioned channel trips Stream's "duplicate
+          // members" validation. `channel()` caches one instance per cid, so
+          // calling it again here would just hand back this same `ch` with
+          // `members` still baked into its data — strip it directly instead.
+          if (ch.data) delete (ch.data as any).members
+          if ((ch as any)._data) delete (ch as any)._data.members
+          await ch.watch({ presence: true })
+        }
         if (!mounted) return
         await preloadImages(getMessageImageUrls(ch.state.messages as any[]))
         if (!mounted) return
@@ -271,7 +330,7 @@ export default function DoctorChatConsultationScreen() {
       setActiveChannel(null)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveChannelId])
+  }, [effectiveChannelId, isStreamConnected])
 
   // ── Typing indicator ──────────────────────────────────────────────────────
   // The SDK's default <TypingIndicator/> reads Stream's own channel_state,

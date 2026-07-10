@@ -6,6 +6,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  AppStateStatus,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -17,6 +19,7 @@ import {
   View,
   Image,
 } from 'react-native'
+import * as Notifications from 'expo-notifications'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 import type { Channel } from 'stream-chat'
@@ -63,6 +66,8 @@ import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { useAuth } from '@clerk/clerk-expo'
 import { logger } from '@/lib/logger'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveChatStore } from '@/store/activeChatStore'
 
@@ -158,8 +163,49 @@ export default function ChatConsultationScreen() {
   const prevStateRef = useRef<ConsultationState | null>(null)
   const [peerOnline, setPeerOnline] = useState(false)
   const [peerTyping, setPeerTyping] = useState(false)
-  const [doctorPhotoUrl, setDoctorPhotoUrl] = useState<string | null>(null)
+  const [doctorUserId, setDoctorUserId] = useState<string | null>(null)
+  const [doctorInitialName, setDoctorInitialName] = useState<string | null>(null)
+  const [doctorInitialPhotoUrl, setDoctorInitialPhotoUrl] = useState<string | null>(null)
   const doctorClerkIdRef = useRef<string>('')
+  // Doctor identity kept live via Realtime — a rename/photo change mid-chat
+  // reflects here immediately instead of staying stuck on the fetched value.
+  const { name: liveDoctorName, photoUrl: doctorPhotoUrl } = useUserProfileRealtime(
+    doctorUserId,
+    doctorInitialName ?? doctorName ?? null,
+    doctorInitialPhotoUrl
+  )
+
+  // ── Background notification ────────────────────────────────────────────────
+  // Mirrors the phone/video screens' "Ongoing Consultation" notification so
+  // backgrounding mid-chat also resumes directly into this same chat on tap,
+  // instead of relying solely on Stream's own push (which lands on the
+  // messages tab, not this consultation thread).
+  useEffect(() => {
+    const chatDisplayName = liveDoctorName ?? doctorName ?? 'Doctor'
+    const sub = AppState.addEventListener('change', async (state: AppStateStatus) => {
+      if (state === 'background' && consultationState === 'active' && channelId) {
+        const localPhotoUri = await localizeNotificationPhoto(doctorPhotoUrl)
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: `Call with ${chatDisplayName}`,
+            body: `Tap to return to your chat with ${chatDisplayName}`,
+            sound: 'default',
+            data: {
+              screen: 'consultation',
+              consultationId: channelId,
+              consultationType: 'chat',
+              doctorName: chatDisplayName,
+              doctorId: doctorId ?? '',
+              doctorPhotoUrl: doctorPhotoUrl ?? '',
+            },
+            ...(localPhotoUri ? { attachments: [{ identifier: 'photo', url: localPhotoUri, type: 'image' }] } : {}),
+          },
+          trigger: null,
+        }).catch(() => {})
+      }
+    })
+    return () => sub.remove()
+  }, [consultationState, channelId, doctorId, doctorName, liveDoctorName, doctorPhotoUrl])
 
   // ── UI State ──────────────────────────────────────────────────────────────────
   const [showMoreMenu, setShowMoreMenu] = useState(false)
@@ -354,16 +400,31 @@ export default function ChatConsultationScreen() {
         // relying solely on membership set up elsewhere at accept-time.
         const { data } = await supabase
           .from('consultations')
-          .select('doctor:doctor_profiles(user:users(clerk_id, profile_photo_url))')
+          .select('doctor:doctor_profiles(user:users(id, clerk_id, full_name, profile_photo_url))')
           .eq('id', channelId)
           .single()
         const doctorClerkId = (data as any)?.doctor?.user?.clerk_id as string | undefined
         doctorClerkIdRef.current = doctorClerkId ?? ''
-        setDoctorPhotoUrl((data as any)?.doctor?.user?.profile_photo_url ?? null)
+        setDoctorUserId((data as any)?.doctor?.user?.id ?? null)
+        setDoctorInitialName((data as any)?.doctor?.user?.full_name ?? null)
+        setDoctorInitialPhotoUrl((data as any)?.doctor?.user?.profile_photo_url ?? null)
         const members = userId && doctorClerkId ? [userId, doctorClerkId] : undefined
         const ch = streamClient.channel('messaging', channelId, members ? { members } : undefined)
         currentChannel = ch
-        await ch.watch({ presence: true } as any)
+        try {
+          await ch.watch({ presence: true } as any)
+        } catch (err) {
+          if (!members) throw err
+          // Membership may already exist (added by the accept-time create
+          // or the doctor's own self-heal watch) — re-sending members on
+          // an already-provisioned channel trips Stream's "duplicate
+          // members" validation. `channel()` caches one instance per cid, so
+          // calling it again here would just hand back this same `ch` with
+          // `members` still baked into its data — strip it directly instead.
+          if (ch.data) delete (ch.data as any).members
+          if ((ch as any)._data) delete (ch as any)._data.members
+          await ch.watch({ presence: true } as any)
+        }
         if (!mounted) return
         await preloadImages(getMessageImageUrls(ch.state.messages as any[]))
         if (!mounted) return
@@ -604,8 +665,8 @@ export default function ChatConsultationScreen() {
     )
   }
 
-  // ── Doctor info derived from name param ────────────────────────────────────
-  const displayName = doctorName ?? 'Doctor'
+  // ── Doctor info derived from name param, kept live via Realtime ────────────
+  const displayName = liveDoctorName ?? doctorName ?? 'Doctor'
   const nameInitial = displayName.charAt(0).toUpperCase()
   const isCompleted = consultationState === 'completed'
 
