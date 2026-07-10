@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
+import { Image } from 'expo-image'
 import {
   Alert,
-  Image,
   Modal,
   Pressable,
   StyleSheet,
@@ -16,12 +16,15 @@ import { fonts } from '@/constants/fonts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+// Shared by both the patient and doctor conversation lists — "peer" is
+// whichever party isn't the current user (the doctor on the patient's list,
+// the patient on the doctor's list).
 export type Conversation = {
   id: string
-  doctorId: string
-  doctorName: string
-  doctorSubtitle: string
-  doctorPhotoUrl: string | null
+  peerId: string
+  peerName: string
+  peerSubtitle: string
+  peerPhotoUrl: string | null
   lastMessage: string
   lastMessageTime: string
   unreadCount: number
@@ -44,10 +47,10 @@ type Props = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getDoctorInitial(name: string): string {
+function getPeerInitial(name: string): string {
   const parts = name.split(' ')
   const first = parts.find(p => p !== 'Dr.' && p !== 'Dr' && p.length > 0)
-  return first?.charAt(0).toUpperCase() ?? 'D'
+  return first?.charAt(0).toUpperCase() ?? '?'
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -72,11 +75,17 @@ export function ConversationItem({
       >
         {/* ── Avatar ── */}
         <View style={styles.avatarWrap}>
-          {item.doctorPhotoUrl ? (
-            <Image source={{ uri: item.doctorPhotoUrl }} style={styles.avatar} />
+          {item.peerPhotoUrl ? (
+            <Image
+              source={{ uri: item.peerPhotoUrl }}
+              style={styles.avatar}
+              contentFit="cover"
+              cachePolicy="memory-disk"
+              transition={0}
+            />
           ) : (
             <View style={styles.avatarFallback}>
-              <Text style={styles.avatarInitial}>{getDoctorInitial(item.doctorName)}</Text>
+              <Text style={styles.avatarInitial}>{getPeerInitial(item.peerName)}</Text>
             </View>
           )}
           <View
@@ -95,17 +104,19 @@ export function ConversationItem({
               {item.isPinned && (
                 <Ionicons name="pin" size={11} color={colors.tealGreen} style={styles.pinIcon} />
               )}
-              <Text style={styles.doctorName} numberOfLines={1}>
-                {item.doctorName}
+              <Text style={styles.peerName} numberOfLines={1}>
+                {item.peerName}
               </Text>
             </View>
             <Text style={styles.time}>{item.lastMessageTime}</Text>
           </View>
 
           {/* Row 2: subtitle */}
-          <Text style={styles.subtitle} numberOfLines={1}>
-            {item.doctorSubtitle}
-          </Text>
+          {!!item.peerSubtitle && (
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {item.peerSubtitle}
+            </Text>
+          )}
 
           {/* Row 3: last message + badge */}
           <View style={styles.bottomRow}>
@@ -114,14 +125,14 @@ export function ConversationItem({
                 styles.lastMessage,
                 item.unreadCount > 0 && styles.lastMessageBold,
               ]}
-              numberOfLines={2}
+              numberOfLines={1}
             >
               {item.lastMessage}
             </Text>
             {item.unreadCount > 0 ? (
               <View style={styles.badge}>
                 <Text style={styles.badgeText}>
-                  {item.unreadCount > 9 ? '9+' : item.unreadCount}
+                  {item.unreadCount > 99 ? '99+' : item.unreadCount}
                 </Text>
               </View>
             ) : null}
@@ -141,9 +152,8 @@ export function ConversationItem({
           <View style={styles.overlay}>
             <TouchableWithoutFeedback>
               <View style={styles.menu}>
-                {/* Doctor name header */}
                 <Text style={styles.menuHeader} numberOfLines={1}>
-                  {item.doctorName}
+                  {item.peerName}
                 </Text>
                 <View style={styles.divider} />
 
@@ -186,7 +196,7 @@ export function ConversationItem({
                     onMenuClose()
                     Alert.alert(
                       'Delete Chat',
-                      `Delete your conversation with ${item.doctorName}? This cannot be undone.`,
+                      `Delete your conversation with ${item.peerName}? This cannot be undone.`,
                       [
                         { text: 'Cancel', style: 'cancel' },
                         {
@@ -218,7 +228,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.mistWhite,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 10,
     gap: 12,
   },
   pressed: {
@@ -241,14 +251,14 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: '#E0E7FF',
+    backgroundColor: colors.tealGreen,
     alignItems: 'center',
     justifyContent: 'center',
   },
   avatarInitial: {
     fontFamily: fonts.bold,
     fontSize: 20,
-    color: colors.careBlue,
+    color: colors.mistWhite,
   },
   statusDot: {
     position: 'absolute',
@@ -281,7 +291,7 @@ const styles = StyleSheet.create({
   pinIcon: {
     marginTop: 1,
   },
-  doctorName: {
+  peerName: {
     fontFamily: fonts.bold,
     fontSize: 15,
     color: colors.inkBlack,

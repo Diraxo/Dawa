@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons'
-import { LinearGradient } from 'expo-linear-gradient'
 import { useEffect, useRef, useState } from 'react'
-import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Animated, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
+import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { shadow } from '@/lib/shadow'
@@ -11,46 +12,40 @@ export interface IncomingRequestModalProps {
   visible: boolean
   patientName: string
   patientAge: number
+  patientPhotoUrl?: string | null
   consultationType: 'chat' | 'phone' | 'video'
   price: number
   currency: string
   consultationId: string
-  waitingStartedAt?: string
   onAccept: () => void
   onDecline: (reason: string) => void
 }
 
-const WAITING_DURATION = 3 * 60
-
-function calcSecondsLeft(waitingStartedAt?: string): number {
-  if (!waitingStartedAt) return WAITING_DURATION
-  const elapsed = Math.floor((Date.now() - new Date(waitingStartedAt).getTime()) / 1000)
-  return Math.max(0, WAITING_DURATION - elapsed)
-}
-
 const DECLINE_REASONS = ['Currently busy', 'Wrong specialty', 'Technical issue', 'Other']
-const CONSULTATION_ICONS = { chat: '💬', phone: '📞', video: '🎥' }
+// Matches the chat/phone/video icon + color convention used across the app
+// (see BookingModal's CONSULT_TYPES) — Ionicons only, no emoji.
+const CONSULTATION_ICONS = { chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam' } as const
+const TYPE_ICON_COLOR = { chat: colors.tealGreen, phone: colors.careBlue, video: '#7C3AED' }
 const TYPE_BADGE_BG = { chat: '#EFF6FF', phone: '#F0FDF4', video: '#FFF7ED' }
 
 export function IncomingRequestModal({
   visible,
   patientName,
   patientAge,
+  patientPhotoUrl,
   consultationType,
   price,
   currency,
-  waitingStartedAt,
   onAccept,
   onDecline,
 }: IncomingRequestModalProps) {
-  const [timeLeft, setTimeLeft] = useState(() => calcSecondsLeft(waitingStartedAt))
+  const insets = useSafeAreaInsets()
   const [showDeclineSheet, setShowDeclineSheet] = useState(false)
   const bellAnim = useRef(new Animated.Value(0)).current
 
-  // Reset timer when modal becomes visible, syncing from actual waiting start time
+  // Reset decline sheet each time the modal becomes visible for a new request
   useEffect(() => {
     if (visible) {
-      setTimeLeft(calcSecondsLeft(waitingStartedAt))
       setShowDeclineSheet(false)
     }
   }, [visible])
@@ -70,22 +65,6 @@ export function IncomingRequestModal({
     return () => anim.stop()
   }, [visible])
 
-  // 30-second countdown
-  useEffect(() => {
-    if (!visible) return
-    if (timeLeft <= 0) {
-      onDecline('Timeout')
-      return
-    }
-    const t = setTimeout(() => setTimeLeft((s) => s - 1), 1000)
-    return () => clearTimeout(t)
-  }, [timeLeft, visible])
-
-  const timerColor =
-    timeLeft > 60 ? colors.success : timeLeft > 30 ? colors.warning : colors.error
-  const minutes = Math.floor(timeLeft / 60)
-  const secs = timeLeft % 60
-
   const handleDecline = (reason: string) => {
     setShowDeclineSheet(false)
     onDecline(reason)
@@ -93,7 +72,15 @@ export function IncomingRequestModal({
 
   return (
     <Modal transparent animationType="fade" visible={visible} statusBarTranslucent>
-      <View style={styles.overlay}>
+      <View
+        style={[
+          styles.overlay,
+          {
+            paddingTop: Math.max(24, insets.top + 12),
+            paddingBottom: Math.max(24, insets.bottom + 12),
+          },
+        ]}
+      >
         <View style={styles.card}>
           {/* Animated bell */}
           <Animated.View
@@ -119,15 +106,23 @@ export function IncomingRequestModal({
           {/* Patient row */}
           <View style={styles.patientRow}>
             <View style={styles.patientAvatar}>
-              <Text style={styles.patientInitial}>{patientName[0]?.toUpperCase()}</Text>
+              {patientPhotoUrl ? (
+                <Image source={{ uri: patientPhotoUrl }} style={styles.patientAvatarImage} />
+              ) : (
+                <Text style={styles.patientInitial}>{patientName[0]?.toUpperCase()}</Text>
+              )}
             </View>
             <View style={styles.patientInfo}>
               <Text style={styles.patientName}>{patientName}</Text>
               <Text style={styles.patientAge}>Age: {patientAge}</Text>
             </View>
             <View style={[styles.typeBadge, { backgroundColor: TYPE_BADGE_BG[consultationType] }]}>
-              <Text style={styles.typeBadgeText}>
-                {CONSULTATION_ICONS[consultationType]}{' '}
+              <Ionicons
+                name={CONSULTATION_ICONS[consultationType]}
+                size={16}
+                color={TYPE_ICON_COLOR[consultationType]}
+              />
+              <Text style={[styles.typeBadgeText, { color: TYPE_ICON_COLOR[consultationType] }]}>
                 {consultationType === 'chat'
                   ? 'Chat'
                   : consultationType === 'phone'
@@ -147,31 +142,12 @@ export function IncomingRequestModal({
 
           <View style={styles.divider} />
 
-          {/* Countdown timer */}
-          <View style={[styles.timerCircle, { borderColor: timerColor }]}>
-            <Text style={[styles.timerNumber, { color: timerColor }]}>
-              {String(minutes).padStart(2, '0')}:{String(secs).padStart(2, '0')}
-            </Text>
-          </View>
-
           {/* Action buttons */}
-          <View style={styles.btnRow}>
-            <Pressable
-              onPress={() => setShowDeclineSheet(true)}
-              style={styles.declineBtn}
-            >
-              <Text style={styles.declineBtnText}>Decline</Text>
-            </Pressable>
-            <Pressable onPress={onAccept} style={styles.acceptBtnWrap}>
-              <LinearGradient
-                colors={['#00CB53', '#00A843']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.acceptGrad}
-              >
-                <Text style={styles.acceptBtnText}>Accept</Text>
-              </LinearGradient>
-            </Pressable>
+          <View style={{ marginTop: 4 }}>
+            <ConsultationActionButtons
+              onDecline={() => setShowDeclineSheet(true)}
+              onAccept={onAccept}
+            />
           </View>
         </View>
 
@@ -179,7 +155,7 @@ export function IncomingRequestModal({
         {showDeclineSheet && (
           <View style={styles.sheetBackdrop}>
             <Pressable style={{ flex: 1 }} onPress={() => setShowDeclineSheet(false)} />
-            <View style={styles.sheet}>
+            <View style={[styles.sheet, { paddingBottom: Math.max(24, insets.bottom + 12) }]}>
               <View style={styles.sheetHandle} />
               <Text style={styles.sheetTitle}>Why are you declining?</Text>
               {DECLINE_REASONS.map((r) => (
@@ -222,33 +198,22 @@ const styles = StyleSheet.create({
   patientAvatar: {
     width: 46, height: 46, borderRadius: 23,
     backgroundColor: colors.careBlue, alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
   },
+  patientAvatarImage: { width: '100%', height: '100%', borderRadius: 23 },
   patientInitial: { fontFamily: fonts.bold, fontSize: 20, color: colors.mistWhite },
   patientInfo: { flex: 1 },
   patientName: { fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack },
   patientAge: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginTop: 2 },
-  typeBadge: { borderRadius: 99, paddingHorizontal: 12, paddingVertical: 6 },
-  typeBadgeText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.inkBlack },
+  typeBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderRadius: 99, paddingHorizontal: 12, paddingVertical: 7,
+  },
+  typeBadgeText: { fontFamily: fonts.semiBold, fontSize: 13 },
 
   priceWrap: { alignItems: 'center' },
   priceLabel: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 2 },
   priceAmount: { fontFamily: fonts.bold, fontSize: 28, color: colors.tealGreen },
-
-  timerCircle: {
-    width: 110, height: 110, borderRadius: 55,
-    borderWidth: 4, alignItems: 'center', justifyContent: 'center',
-  },
-  timerNumber: { fontFamily: fonts.bold, fontSize: 26 },
-
-  btnRow: { flexDirection: 'row', gap: 12, width: '100%' },
-  declineBtn: {
-    flex: 1, height: 52, borderRadius: 16, borderWidth: 1.5, borderColor: colors.steelGrey,
-    backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center',
-  },
-  declineBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: '#6B7280' },
-  acceptBtnWrap: { flex: 1.5, borderRadius: 16, overflow: 'hidden' },
-  acceptGrad: { height: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 16 },
-  acceptBtnText: { fontFamily: fonts.bold, fontSize: 15, color: colors.mistWhite },
 
   sheetBackdrop: { position: 'absolute', inset: 0, justifyContent: 'flex-end' },
   sheet: {

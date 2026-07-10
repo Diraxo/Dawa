@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   Image,
   Pressable,
@@ -56,7 +57,7 @@ interface DoctorInfo {
 
 export default function WaitingRoomScreen() {
   const router = useRouter()
-  const { getToken } = useAuth()
+  const { getToken, userId: clerkUserId } = useAuth()
 
   const {
     consultationId,
@@ -72,9 +73,19 @@ export default function WaitingRoomScreen() {
 
   const typeInfo = TYPE_META[consultationType ?? 'chat'] ?? TYPE_META.chat
   const navigated = useRef(false)
+  const myUserIdRef = useRef<string | null>(null)
   const [doctorInfo, setDoctorInfo] = useState<DoctorInfo | null>(null)
   const [consultStatus, setConsultStatus] = useState<string>('waiting_for_doctor')
   const [creditState, setCreditState] = useState<CreditState | null>(null)
+  const [cancelledState, setCancelledState] = useState<CreditState | null>(null)
+  const [cancelling, setCancelling] = useState(false)
+
+  // The waiting room stays active until the doctor accepts/declines or the
+  // patient cancels — no client-side countdown/timeout. A server-side
+  // pg_cron job (see migration 023) is the sole source of a 'doctor_missed'
+  // status; this screen only reacts to that status arriving, it never
+  // predicts or displays a remaining-time estimate.
+  const [timedOut, setTimedOut] = useState(false)
 
   // ── Save pending state for session recovery ──────────────────────────────
   useEffect(() => {
@@ -87,26 +98,41 @@ export default function WaitingRoomScreen() {
     }))
   }, [consultationId])
 
-  // ── Fetch doctor info from database ──────────────────────────────────────
+  // ── Resolve own internal user id (needed to stamp cancelled_by) ──────────
   useEffect(() => {
-    if (!doctorId) return
+    if (!clerkUserId) return
+    getToken().then(async (token) => {
+      if (!token) return
+      const { data } = await getAuthClient(token)
+        .from('users')
+        .select('id')
+        .eq('clerk_id', clerkUserId)
+        .maybeSingle()
+      if (data) myUserIdRef.current = data.id
+    })
+  }, [clerkUserId])
+
+  // ── Fetch doctor info ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!consultationId) return
     supabase
-      .from('doctor_profiles')
-      .select('specialty, years_experience, hospital_name, users!inner(full_name, profile_photo_url)')
-      .eq('id', doctorId)
+      .from('consultations')
+      .select('doctor:doctor_profiles(specialty, years_experience, hospital_name, user:users(full_name, profile_photo_url))')
+      .eq('id', consultationId)
       .single()
-      .then(({ data, error }) => {
-        if (error || !data) return
-        const u = (data as any).users ?? {}
+      .then(({ data }) => {
+        if (!data) return
+        const dp = (data as any).doctor ?? {}
+        const u  = dp.user ?? {}
         setDoctorInfo({
           fullName:        u.full_name ?? doctorNameParam ?? 'Doctor',
           photoUrl:        u.profile_photo_url ?? null,
-          specialty:       (data as any).specialty ?? 'General Practice',
-          yearsExperience: (data as any).years_experience ?? null,
-          hospitalName:    (data as any).hospital_name ?? null,
+          specialty:       dp.specialty ?? 'General Practice',
+          yearsExperience: dp.years_experience ?? null,
+          hospitalName:    dp.hospital_name ?? null,
         })
       })
-  }, [doctorId])
+  }, [consultationId])
 
   // Keep a ref to doctorInfo so the subscription callback always reads the
   // latest value without needing to be recreated when it loads.
@@ -146,6 +172,7 @@ export default function WaitingRoomScreen() {
                 consultationId,
                 doctorId,
                 doctorName:       doctorDisplayName,
+                doctorPhotoUrl:   doctorInfoRef.current?.photoUrl ?? '',
               },
             })
           } else if (newStatus === 'declined') {
@@ -168,41 +195,232 @@ export default function WaitingRoomScreen() {
           } else if (newStatus === 'cancelled') {
             navigated.current = true
             AsyncStorage.removeItem(PENDING_KEY)
-            Alert.alert(
-              'Request Cancelled',
-              'Your consultation request has been cancelled.',
-              [{ text: 'OK', onPress: () => router.replace('/(patient)/(tabs)/doctors' as any) }],
-            )
+            supabase
+              .from('consultations')
+              .select('credit_amount, consultation_credit')
+              .eq('id', consultationId)
+              .single()
+              .then(({ data }) => {
+                setCancelledState({
+                  doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+                  creditAmount:         Number(data?.credit_amount ?? 0),
+                  creditConsultationId: consultationId,
+                })
+              })
+          } else if (newStatus === 'doctor_missed') {
+            navigated.current = true
+            AsyncStorage.removeItem(PENDING_KEY)
+            setTimedOut(true)
           }
         },
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    // Poll every 5 s as a guaranteed fallback when Realtime is unreliable
+    async function checkNow() {
+      if (navigated.current) return
+      const { data: pollData } = await supabase
+        .from('consultations')
+        .select('status, type')
+        .eq('id', consultationId)
+        .single()
+      if (!pollData || navigated.current) return
+      setConsultStatus(pollData.status)
+      const s = pollData.status
+      if (s === 'accepted' || s === 'in_progress' || s === 'active') {
+        navigated.current = true
+        AsyncStorage.removeItem(PENDING_KEY)
+        router.replace({
+          pathname: ROUTE_MAP[consultationType ?? 'chat'] as any,
+          params: {
+            channelId:        consultationId,
+            consultationId,
+            doctorId,
+            doctorName:       doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'Doctor',
+            doctorPhotoUrl:   doctorInfoRef.current?.photoUrl ?? '',
+          },
+        })
+      } else if (s === 'declined') {
+        navigated.current = true
+        AsyncStorage.removeItem(PENDING_KEY)
+        supabase
+          .from('consultations')
+          .select('credit_amount, consultation_credit')
+          .eq('id', consultationId)
+          .single()
+          .then(({ data: cd }) => {
+            setCreditState({
+              doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'The doctor',
+              creditAmount:         Number(cd?.credit_amount ?? 0),
+              creditConsultationId: consultationId,
+            })
+          })
+      } else if (s === 'cancelled') {
+        navigated.current = true
+        AsyncStorage.removeItem(PENDING_KEY)
+        supabase
+          .from('consultations')
+          .select('credit_amount, consultation_credit')
+          .eq('id', consultationId)
+          .single()
+          .then(({ data: cd }) => {
+            setCancelledState({
+              doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+              creditAmount:         Number(cd?.credit_amount ?? 0),
+              creditConsultationId: consultationId,
+            })
+          })
+      } else if (s === 'doctor_missed') {
+        navigated.current = true
+        AsyncStorage.removeItem(PENDING_KEY)
+        setTimedOut(true)
+      }
+    }
+
+    // Run immediately on mount — catches the case where the doctor accepted
+    // while the Realtime subscription was still connecting.
+    checkNow()
+    const pollInterval = setInterval(checkNow, 1500)
+
+    return () => {
+      clearInterval(pollInterval)
+      supabase.removeChannel(channel)
+    }
   }, [consultationId])
 
   // ── Cancel handler ───────────────────────────────────────────────────────
+  // Guarded to pre-acceptance statuses only — once the doctor has accepted
+  // (or the session started), cancelling from this screen would create an
+  // inconsistent state; that case is handled by the live consultation screens.
+  const CANCELLABLE_STATUSES = new Set(['waiting_for_doctor', 'pending_payment'])
   const handleCancel = () => {
+    if (cancelling || navigated.current) return
+    if (!CANCELLABLE_STATUSES.has(consultStatus)) {
+      Alert.alert('Unable to Cancel', 'This request can no longer be cancelled because the doctor has already responded.')
+      return
+    }
     Alert.alert('Cancel Request', 'Are you sure you want to cancel your consultation request?', [
       { text: 'No', style: 'cancel' },
       {
         text: 'Yes, Cancel',
         style: 'destructive',
         onPress: async () => {
-          if (navigated.current) return
-          navigated.current = true
-          await AsyncStorage.removeItem(PENDING_KEY)
-          const token = await getToken()
-          if (token && consultationId) {
-            await getAuthClient(token)
+          setCancelling(true)
+          try {
+            const token = await getToken()
+            if (!token || !consultationId) throw new Error('Not authenticated')
+            const { data, error } = await getAuthClient(token)
               .from('consultations')
-              .update({ status: 'cancelled' })
+              .update({ status: 'cancelled', cancelled_by: myUserIdRef.current })
               .eq('id', consultationId)
+              .select('credit_amount, consultation_credit')
+              .single()
+            if (error) throw error
+            // Set navigated only now that the update is confirmed — the
+            // realtime/poll handlers guard on navigated.current, so flipping
+            // it earlier (before the update landed) would make them ignore
+            // the resulting 'cancelled' status and leave the screen stuck.
+            navigated.current = true
+            await AsyncStorage.removeItem(PENDING_KEY)
+            setCancelledState({
+              doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+              creditAmount:         Number(data?.credit_amount ?? 0),
+              creditConsultationId: consultationId,
+            })
+          } catch {
+            Alert.alert('Cancellation Failed', 'Could not cancel your request. Please check your connection and try again.')
+          } finally {
+            setCancelling(false)
           }
-          router.replace('/(patient)/(tabs)/doctors' as any)
         },
       },
     ])
+  }
+
+  // ── Doctor missed / timeout screen ──────────────────────────────────────────
+  if (timedOut) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+          <View style={styles.creditIconWrap}>
+            <Ionicons name="time-outline" size={64} color={colors.warning} />
+          </View>
+          <Text style={styles.creditTitle}>No Response</Text>
+          <Text style={styles.creditSub}>
+            The doctor did not respond in time. Your credit has been preserved.
+          </Text>
+          <View style={styles.creditCard}>
+            <Ionicons name="wallet-outline" size={22} color={colors.tealGreen} />
+            <View style={styles.creditCardText}>
+              <Text style={styles.creditCardLabel}>Consultation Credit Preserved</Text>
+              <Text style={[styles.creditCardAmount, { fontSize: 15 }]}>Book another doctor with no extra charge</Text>
+            </View>
+          </View>
+          <Pressable
+            style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
+            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+          >
+            <Ionicons name="search" size={18} color={colors.mistWhite} />
+            <Text style={styles.creditBtnText}>Choose Another Doctor</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
+            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+          >
+            <Ionicons name="refresh" size={18} color={colors.mistWhite} />
+            <Text style={styles.creditBtnText}>Try Again</Text>
+          </Pressable>
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </SafeAreaView>
+    )
+  }
+
+  // ── Patient (or admin) cancelled the request — never conflated with the
+  // "doctor declined" wording below ────────────────────────────────────────
+  if (cancelledState) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+          <View style={styles.creditIconWrap}>
+            <Ionicons name="close-circle-outline" size={64} color={colors.steelGrey} />
+          </View>
+
+          <Text style={styles.creditTitle}>Request Cancelled</Text>
+          <Text style={styles.creditSub}>
+            You cancelled your consultation request with Dr. {cancelledState.doctorName}.
+          </Text>
+
+          {cancelledState.creditAmount > 0 && (
+            <View style={styles.creditCard}>
+              <Ionicons name="wallet-outline" size={22} color={colors.tealGreen} />
+              <View style={styles.creditCardText}>
+                <Text style={styles.creditCardLabel}>Consultation Credit Preserved</Text>
+                <Text style={styles.creditCardAmount}>ETB {cancelledState.creditAmount.toFixed(2)}</Text>
+              </View>
+            </View>
+          )}
+
+          <Pressable
+            style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
+          >
+            <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
+            <Text style={styles.creditBtnText}>Reschedule</Text>
+          </Pressable>
+
+          <Pressable
+            style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
+            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+          >
+            <Ionicons name="search" size={18} color={colors.mistWhite} />
+            <Text style={styles.creditBtnText}>Choose Another Doctor</Text>
+          </Pressable>
+
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </SafeAreaView>
+    )
   }
 
   // ── Consultation credit screen (doctor declined a paid consultation) ────────
@@ -236,7 +454,15 @@ export default function WaitingRoomScreen() {
             onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
           >
             <Ionicons name="search" size={18} color={colors.mistWhite} />
-            <Text style={styles.creditBtnText}>Find Another Doctor</Text>
+            <Text style={styles.creditBtnText}>Choose Another Doctor</Text>
+          </Pressable>
+
+          <Pressable
+            style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
+          >
+            <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
+            <Text style={styles.creditBtnText}>Reschedule</Text>
           </Pressable>
 
           <View style={{ height: 40 }} />
@@ -355,11 +581,16 @@ export default function WaitingRoomScreen() {
       {/* ── Cancel button ── */}
       <View style={styles.footer}>
         <Pressable
-          style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.75 }]}
+          style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.75 }, cancelling && styles.cancelBtnDisabled]}
           onPress={handleCancel}
+          disabled={cancelling}
         >
-          <Ionicons name="close-circle-outline" size={20} color={colors.error} />
-          <Text style={styles.cancelText}>Cancel Request</Text>
+          {cancelling ? (
+            <ActivityIndicator size="small" color={colors.error} />
+          ) : (
+            <Ionicons name="close-circle-outline" size={20} color={colors.error} />
+          )}
+          <Text style={styles.cancelText}>{cancelling ? 'Cancelling…' : 'Cancel Request'}</Text>
         </Pressable>
       </View>
     </SafeAreaView>
@@ -458,6 +689,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: colors.error,
     backgroundColor: 'rgba(211,47,47,0.1)',
   },
+  cancelBtnDisabled: { opacity: 0.6 },
   cancelText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.error },
 
   // ── Credit screen ────────────────────────────────────────────────────────

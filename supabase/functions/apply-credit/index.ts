@@ -15,6 +15,7 @@
 //   new_consultation_id     string  — new consultation to apply credit to
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createRemoteJWKSet, jwtVerify } from 'npm:jose'
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -25,6 +26,30 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405, headers: CORS })
+  }
+
+  // Verify the caller's own Clerk session — this endpoint moves a paid
+  // consultation's credit onto another consultation, so patient_clerk_id
+  // must come from a verified token, not be trusted as a body field.
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader?.startsWith('Bearer ')) {
+    return new Response(
+      JSON.stringify({ error: 'Missing Authorization header' }),
+      { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } },
+    )
+  }
+  const clerkToken = authHeader.slice(7)
+  const clerkFrontendApi = Deno.env.get('CLERK_FRONTEND_API')!
+  const jwks = createRemoteJWKSet(new URL(`${clerkFrontendApi}/.well-known/jwks.json`))
+  let clerkSub: string
+  try {
+    const { payload } = await jwtVerify(clerkToken, jwks)
+    clerkSub = payload.sub!
+  } catch {
+    return new Response(
+      JSON.stringify({ error: 'Invalid or expired token' }),
+      { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } },
+    )
   }
 
   let body: {
@@ -38,8 +63,15 @@ Deno.serve(async (req: Request) => {
     return new Response('Invalid JSON body', { status: 400, headers: CORS })
   }
 
-  const { patient_clerk_id, credit_consultation_id, new_consultation_id } = body
-  if (!patient_clerk_id || !credit_consultation_id || !new_consultation_id) {
+  const { credit_consultation_id, new_consultation_id } = body
+  const patient_clerk_id = clerkSub
+  if (body.patient_clerk_id && body.patient_clerk_id !== clerkSub) {
+    return new Response(
+      JSON.stringify({ error: 'Forbidden' }),
+      { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } },
+    )
+  }
+  if (!credit_consultation_id || !new_consultation_id) {
     return new Response(
       JSON.stringify({ error: 'Missing required fields' }),
       { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } },
@@ -104,6 +136,7 @@ Deno.serve(async (req: Request) => {
       id,
       patient_amount,
       payment_status,
+      scheduled_at,
       patient:users!patient_id ( clerk_id )
     `)
     .eq('id', new_consultation_id)
@@ -129,23 +162,42 @@ Deno.serve(async (req: Request) => {
   // ── Apply credit ───────────────────────────────────────────────────────────
 
   if (newFee <= creditAmount) {
-    // Full coverage — mark credit used, mark new consultation paid + waiting
+    // Full coverage — mark credit used, mark new consultation paid.
+    //
+    // Same "now" vs "scheduled" distinction the Chapa path applies in
+    // payment-return.tsx / patient/payment/return: a booking more than an
+    // hour out must become 'scheduled', not 'waiting_for_doctor', or it
+    // fires the doctor's immediate new_request notification and drops the
+    // patient into the waiting room for an appointment that's tomorrow.
+    const scheduledAtMs = (newConsult as any).scheduled_at
+      ? new Date((newConsult as any).scheduled_at).getTime()
+      : Date.now()
+    const isScheduled = scheduledAtMs > Date.now() + 60 * 60 * 1000
+
     await supabase
       .from('consultations')
-      .update({ credit_used: true })
+      .update({ credit_used: true, replacement_consultation_id: new_consultation_id })
       .eq('id', credit_consultation_id)
 
+    // waiting_started_at must be stamped here too — mark_doctor_missed_consultations()
+    // (migration 023) and the patient waiting-room countdown both key off this column;
+    // without it a credit-covered booking the doctor never answers stays in
+    // 'waiting_for_doctor' forever instead of auto-expiring to 'doctor_missed'.
+    // Scheduled bookings skip this entirely — the scheduled-time cron
+    // (trigger_appointment_notifications) flips 'scheduled' -> 'waiting_for_doctor'
+    // and stamps waiting_started_at itself once scheduled_at arrives.
     await supabase
       .from('consultations')
       .update({
         payment_status:   'paid',
-        status:           'waiting_for_doctor',
+        status:           isScheduled ? 'scheduled' : 'waiting_for_doctor',
         credit_source_id: credit_consultation_id,
+        ...(isScheduled ? {} : { waiting_started_at: new Date().toISOString() }),
       })
       .eq('id', new_consultation_id)
 
     return new Response(
-      JSON.stringify({ success: true, covered: 'full', creditApplied: creditAmount }),
+      JSON.stringify({ success: true, covered: 'full', creditApplied: creditAmount, scheduled: isScheduled }),
       { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } },
     )
   }
@@ -158,6 +210,11 @@ Deno.serve(async (req: Request) => {
     .from('consultations')
     .update({ credit_source_id: credit_consultation_id })
     .eq('id', new_consultation_id)
+
+  await supabase
+    .from('consultations')
+    .update({ replacement_consultation_id: new_consultation_id })
+    .eq('id', credit_consultation_id)
 
   return new Response(
     JSON.stringify({

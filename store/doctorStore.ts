@@ -14,6 +14,7 @@ export interface IncomingRequest {
   currency: string
   patientId: string
   patientClerkId: string
+  patientPhotoUrl?: string | null
   waitingStartedAt?: string
 }
 
@@ -44,6 +45,9 @@ interface DoctorState {
   regNationalIdFrontName: string | null
   regNationalIdBackUri: string | null   // only used for national_id type
   regNationalIdBackName: string | null
+
+  // Registration — Step 2: Languages
+  regLanguages: string[]
 
   // Registration — Step 4: Pricing
   regChatPrice: string
@@ -77,6 +81,7 @@ export const useDoctorStore = create<DoctorState>()(
       regYearsOfExperience: 1,
       regHospitalName: '',
       regBio: '',
+      regLanguages: [],
 
       regLicenseDocUris: [],
       regLicenseDocNames: [],
@@ -107,6 +112,7 @@ export const useDoctorStore = create<DoctorState>()(
           regYearsOfExperience: 1,
           regHospitalName: '',
           regBio: '',
+          regLanguages: [],
           regLicenseDocUris: [],
           regLicenseDocNames: [],
           regIdDocType: null,
@@ -136,6 +142,7 @@ export const useDoctorStore = create<DoctorState>()(
         regYearsOfExperience: s.regYearsOfExperience,
         regHospitalName: s.regHospitalName,
         regBio: s.regBio,
+        regLanguages: s.regLanguages,
         regLicenseDocNames: s.regLicenseDocNames,
         regIdDocType: s.regIdDocType,
         regNationalIdFrontName: s.regNationalIdFrontName,

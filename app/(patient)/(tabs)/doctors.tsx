@@ -1,12 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useScrollToTop } from '@react-navigation/native'
-import { useRouter } from 'expo-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useFocusEffect, useRouter } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FlatList,
-  Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -22,19 +20,6 @@ import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
 
-const PRICE_FILTERS = [
-  { label: 'Any Price', max: Infinity },
-  { label: '< ETB 200', max: 200 },
-  { label: '< ETB 400', max: 400 },
-]
-
-const RATING_FILTERS = [
-  { label: 'Any', min: 0 },
-  { label: '4.0+', min: 4.0 },
-  { label: '4.5+', min: 4.5 },
-  { label: '4.8+', min: 4.8 },
-]
-
 function mapDoctor(d: any): Doctor {
   return {
     id: d.id,
@@ -42,7 +27,7 @@ function mapDoctor(d: any): Doctor {
     subtitle: d.hospital_name ?? undefined,
     specialty: d.specialty ?? 'General',
     rating_average: Number(d.rating_average) ?? 0,
-    review_count: d.total_consultations ?? 0,
+    review_count: d.review_count ?? 0,
     years_experience: d.years_experience ?? undefined,
     bio: d.bio ?? undefined,
     chat_price: Number(d.chat_price) ?? 0,
@@ -51,6 +36,7 @@ function mapDoctor(d: any): Doctor {
     is_online: d.is_online ?? false,
     profile_photo_url: d.users?.profile_photo_url ?? null,
     availability: d.availability ?? null,
+    languages: d.languages ?? null,
   }
 }
 
@@ -60,54 +46,137 @@ export default function DoctorsScreen() {
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
   const [allDoctors, setAllDoctors] = useState<Doctor[]>([])
-  const [specialties, setSpecialties] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState('')
-  const [specialty, setSpecialty] = useState('')
-  const [specialtyOpen, setSpecialtyOpen] = useState(false)
-  const [priceIdx, setPriceIdx] = useState(0)
-  const [ratingIdx, setRatingIdx] = useState(0)
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
 
+  // Latest known realtime-derived fields per doctor. A REST fetch (initial
+  // load, or the post-SUBSCRIBED reconciliation fetch below) can resolve
+  // after a realtime UPDATE has already landed for a doctor — without this,
+  // the fetch's setter would blindly overwrite state with a possibly-stale
+  // snapshot. Every fetch result is merged through this map (realtime always
+  // wins) before it reaches state.
+  const realtimeKnownRef = useRef<Map<string, Partial<Pick<Doctor,
+    'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
+    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count'
+  >>>>(new Map())
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+
+  const mergeKnownRealtime = (docs: Doctor[]): Doctor[] =>
+    docs.map(d => {
+      const known = realtimeKnownRef.current.get(d.id)
+      return known ? { ...d, ...known } : d
+    })
+
+  // Single merge point used by both the realtime handler and every fetch
+  // result so a doctor's fields are only ever patched, never blindly replaced.
+  const applyDoctorUpdate = (
+    list: Doctor[],
+    doctorId: string,
+    patch: Partial<Doctor>
+  ): Doctor[] => list.map(d => (d.id === doctorId ? { ...d, ...patch } : d))
+
   useEffect(() => {
-    Promise.all([
-      supabase
+    let mounted = true
+    const CHANNEL_NAME = 'patient-doctors-list-status'
+
+    const fetchDoctors = async () => {
+      const { data } = await supabase
         .from('doctor_profiles')
         .select('*, users!inner(full_name, profile_photo_url)')
         .eq('status', 'approved')
-        .order('rating_average', { ascending: false }),
-      supabase.from('specialties').select('name').order('name'),
-      supabase.from('doctor_profiles').select('specialty').eq('status', 'approved').not('specialty', 'is', null),
-    ]).then(([doctorsRes, adminSpecsRes, usedSpecsRes]) => {
-      if (doctorsRes.data) setAllDoctors(doctorsRes.data.map(mapDoctor))
+        .order('rating_average', { ascending: false })
+      if (!mounted) return
+      if (data) setAllDoctors(mergeKnownRealtime(data.map(mapDoctor)))
+    }
 
-      // Only show specialty chips that exist in the admin table AND have ≥1 approved doctor
-      const adminSet = new Set((adminSpecsRes.data ?? []).map((s: any) => s.name as string))
-      const withDoctors = [...new Set(
-        (usedSpecsRes.data ?? []).map((d: any) => d.specialty as string).filter(Boolean)
-      )].filter(s => adminSet.has(s)).sort() as string[]
-      if (withDoctors.length) setSpecialties(withDoctors)
-    })
+    ;(async () => {
+      // Fetch first, subscribe after — joining the realtime channel
+      // concurrently with this REST fetch let UPDATE events land in the
+      // join-latency window (silently dropped, never queued/redelivered),
+      // and let this fetch's callback clobber realtime state that had
+      // already been applied by an event that beat it back. The
+      // reconciliation fetch triggered on SUBSCRIBED below closes the
+      // join-latency-window gap.
+      await fetchDoctors()
+      if (!mounted) return
+
+      // Realtime: doctor online/offline/availability status → instantly re-sort list
+      const channel = supabase
+        .channel(CHANNEL_NAME)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
+          (payload) => {
+            const updated = payload.new as any
+            if (updated.status !== 'approved') return
+            const patch = {
+              is_online: updated.is_online as boolean,
+              languages: (updated.languages ?? undefined) as string[] | null | undefined,
+              availability: (updated.availability ?? null) as Doctor['availability'],
+              bio: (updated.bio ?? undefined) as string | undefined,
+              specialty: (updated.specialty ?? 'General') as string,
+              subtitle: (updated.hospital_name ?? undefined) as string | undefined,
+              years_experience: (updated.years_experience ?? undefined) as number | undefined,
+              chat_price: Number(updated.chat_price ?? 0),
+              phone_price: Number(updated.phone_price ?? 0),
+              video_price: Number(updated.video_price ?? 0),
+              rating_average: Number(updated.rating_average ?? 0),
+              review_count: (updated.review_count ?? 0) as number,
+            }
+            realtimeKnownRef.current.set(updated.id, patch)
+            setAllDoctors(prev => applyDoctorUpdate(prev, updated.id, patch))
+          }
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            // Reconcile anything that changed during the join-latency window
+            // (channel handshake + auth) between the initial fetch above and
+            // this channel actually reaching SUBSCRIBED.
+            fetchDoctors()
+          }
+        })
+
+      channelRef.current = channel
+    })()
+
+    return () => {
+      mounted = false
+      if (channelRef.current) supabase.removeChannel(channelRef.current)
+    }
   }, [])
 
-  // Realtime: doctor online/offline status → instantly re-sort list
+  // Tab screens stay mounted across tab switches, so the mount-only effect
+  // above never sees a photo edited while this tab was in the background —
+  // re-fetch on every return to this tab. Realtime is_online/availability
+  // state is preserved via mergeKnownRealtime.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false
+      ;(async () => {
+        const { data } = await supabase
+          .from('doctor_profiles')
+          .select('*, users!inner(full_name, profile_photo_url)')
+          .eq('status', 'approved')
+          .order('rating_average', { ascending: false })
+        if (!cancelled && data) setAllDoctors(mergeKnownRealtime(data.map(mapDoctor)))
+      })()
+      return () => { cancelled = true }
+    }, [])
+  )
+
+  // The booking modal is handed a one-shot snapshot when opened; keep its
+  // is_online AND availability (hours/blocked days/on-demand-vs-scheduled
+  // toggles) in sync with realtime updates for as long as it stays open —
+  // otherwise a doctor blocking a day or changing hours while the sheet is
+  // open lets the patient book a slot that's no longer actually available.
   useEffect(() => {
-    const channel = supabase
-      .channel('patient-doctors-list-status')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
-        (payload) => {
-          const updated = payload.new as any
-          if (updated.status !== 'approved') return
-          setAllDoctors(prev =>
-            prev.map(d => d.id === updated.id ? { ...d, is_online: updated.is_online } : d)
-          )
-        }
-      )
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
-  }, [])
+    if (!bookingDoctor) return
+    const live = allDoctors.find(d => d.id === bookingDoctor.id)
+    if (!live) return
+    if (live.is_online !== bookingDoctor.is_online || live.availability !== bookingDoctor.availability) {
+      setBookingDoctor({ ...bookingDoctor, is_online: live.is_online, availability: live.availability })
+    }
+  }, [allDoctors, bookingDoctor])
 
   const filteredDoctors = useMemo(() => {
     let list = [...allDoctors]
@@ -120,28 +189,10 @@ export default function DoctorsScreen() {
         d.subtitle?.toLowerCase().includes(q)
       )
     }
-    if (specialty) {
-      list = list.filter(d => d.specialty === specialty)
-    }
-    const minRating = RATING_FILTERS[ratingIdx].min
-    if (minRating > 0) {
-      list = list.filter(d => d.rating_average >= minRating)
-    }
-    const maxPrice = PRICE_FILTERS[priceIdx].max
-    if (maxPrice < Infinity) {
-      list = list.filter(d =>
-        d.chat_price <= maxPrice ||
-        d.phone_price <= maxPrice ||
-        d.video_price <= maxPrice
-      )
-    }
-    // Online doctors always first, then by best rating
-    list.sort((a, b) => {
-      if (b.is_online !== a.is_online) return b.is_online ? 1 : -1
-      return b.rating_average - a.rating_average
-    })
+    // Online doctors always first
+    list.sort((a, b) => (b.is_online !== a.is_online ? (b.is_online ? 1 : -1) : 0))
     return list
-  }, [searchQuery, specialty, priceIdx, ratingIdx])
+  }, [searchQuery, allDoctors])
 
   const handleViewProfile = (id: string) => {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
@@ -172,52 +223,10 @@ export default function DoctorsScreen() {
         )}
       </View>
 
-      {/* Specialty dropdown button */}
-      <Pressable
-        style={({ pressed }) => [styles.specialtyBtn, pressed && { opacity: 0.8 }]}
-        onPress={() => setSpecialtyOpen(true)}
-      >
-        <Ionicons name="medical-outline" size={16} color={specialty === '' ? '#6B7280' : colors.tealGreen} />
-        <Text style={[styles.specialtyBtnText, specialty !== '' && styles.specialtyBtnActive]}>
-          {specialty || t('allSpecialties')}
-        </Text>
-        <Ionicons name="chevron-down" size={16} color="#9CA3AF" />
-      </Pressable>
-
-      {/* Rating chips */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-        {RATING_FILTERS.map((r, idx) => (
-          <Pressable
-            key={r.label}
-            onPress={() => setRatingIdx(idx)}
-            style={[styles.chip, ratingIdx === idx && styles.chipSelected]}
-          >
-            {ratingIdx === idx && idx > 0 && (
-              <Ionicons name="star" size={12} color={colors.mistWhite} />
-            )}
-            <Text style={[styles.chipText, ratingIdx === idx && styles.chipTextSelected]}>
-              {r.label}
-            </Text>
-          </Pressable>
-        ))}
-        <View style={styles.chipSpacer} />
-        {PRICE_FILTERS.map((p, idx) => (
-          <Pressable
-            key={p.label}
-            onPress={() => setPriceIdx(idx)}
-            style={[styles.chip, priceIdx === idx && styles.chipSelectedBlue]}
-          >
-            <Text style={[styles.chipText, priceIdx === idx && styles.chipTextSelected]}>
-              {p.label}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
       {/* Sort indicator */}
       <View style={styles.sortRow}>
-        <Ionicons name="trophy" size={14} color={colors.warning} />
-        <Text style={styles.sortText}>{t('sortedByBestRating')}</Text>
+        <Ionicons name="radio-button-on" size={12} color={colors.success} />
+        <Text style={styles.sortText}>{t('onlineDoctorsFirst')}</Text>
       </View>
     </View>
   )
@@ -247,46 +256,6 @@ export default function DoctorsScreen() {
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
       />
-
-      {/* Specialty picker modal */}
-      <Modal
-        visible={specialtyOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSpecialtyOpen(false)}
-      >
-        <Pressable style={styles.modalBackdrop} onPress={() => setSpecialtyOpen(false)} />
-        <View style={styles.specialtySheet}>
-          <Text style={styles.sheetTitle}>{t('selectSpecialty')}</Text>
-          <ScrollView showsVerticalScrollIndicator={false}>
-            <Pressable
-              style={[styles.specialtyOption, specialty === '' && styles.specialtyOptionSelected]}
-              onPress={() => { setSpecialty(''); setSpecialtyOpen(false) }}
-            >
-              <Text style={[styles.specialtyOptionText, specialty === '' && styles.specialtyOptionTextSelected]}>
-                {t('allSpecialties')}
-              </Text>
-              {specialty === '' && (
-                <Ionicons name="checkmark" size={18} color={colors.tealGreen} />
-              )}
-            </Pressable>
-            {specialties.map(s => (
-              <Pressable
-                key={s}
-                style={[styles.specialtyOption, specialty === s && styles.specialtyOptionSelected]}
-                onPress={() => { setSpecialty(s); setSpecialtyOpen(false) }}
-              >
-                <Text style={[styles.specialtyOptionText, specialty === s && styles.specialtyOptionTextSelected]}>
-                  {s}
-                </Text>
-                {specialty === s && (
-                  <Ionicons name="checkmark" size={18} color={colors.tealGreen} />
-                )}
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-      </Modal>
 
       {/* Booking bottom sheet */}
       <BookingModal
@@ -318,30 +287,6 @@ const styles = StyleSheet.create({
     color: colors.inkBlack, padding: 0,
   },
 
-  // Specialty
-  specialtyBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: colors.mistWhite, borderRadius: 12,
-    paddingHorizontal: 14, paddingVertical: 11, marginBottom: 12,
-    borderWidth: 1.5, borderColor: colors.steelGrey,
-  },
-  specialtyBtnText: { flex: 1, fontFamily: fonts.medium, fontSize: 14, color: '#6B7280' },
-  specialtyBtnActive: { color: colors.tealGreen },
-
-  // Chips
-  chipScroll: { marginBottom: 12 },
-  chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20,
-    backgroundColor: colors.mistWhite, borderWidth: 1.5, borderColor: colors.steelGrey,
-    marginRight: 8,
-  },
-  chipSelected: { backgroundColor: colors.tealGreen, borderColor: colors.tealGreen },
-  chipSelectedBlue: { backgroundColor: colors.careBlue, borderColor: colors.careBlue },
-  chipText: { fontFamily: fonts.medium, fontSize: 13, color: '#374151' },
-  chipTextSelected: { color: colors.mistWhite },
-  chipSpacer: { width: 1, height: 30, backgroundColor: colors.steelGrey, marginRight: 8 },
-
   // Sort
   sortRow: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -353,19 +298,4 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingVertical: 60, gap: 12 },
   emptyTitle: { fontFamily: fonts.semiBold, fontSize: 18, color: colors.inkBlack },
   emptySub: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280', textAlign: 'center' },
-
-  // Specialty modal
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
-  specialtySheet: {
-    backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 40, maxHeight: '60%',
-  },
-  sheetTitle: { fontFamily: fonts.bold, fontSize: 18, color: colors.inkBlack, marginBottom: 16 },
-  specialtyOption: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey,
-  },
-  specialtyOptionSelected: { backgroundColor: '#F0FDFB', marginHorizontal: -20, paddingHorizontal: 20 },
-  specialtyOptionText: { fontFamily: fonts.medium, fontSize: 15, color: colors.inkBlack },
-  specialtyOptionTextSelected: { color: colors.tealGreen },
 })

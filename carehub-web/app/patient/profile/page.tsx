@@ -3,8 +3,10 @@
 import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { pushOwnPhotoToStream } from '@/lib/stream'
 import { getInitials } from '@/lib/utils'
+import { COUNTRIES } from '@/lib/countries'
 
 interface UserProfile {
   full_name: string
@@ -44,6 +46,10 @@ export default function PatientProfilePage() {
 
   const [saving, setSaving] = useState(false)
   const [uploadingPhoto, setUploadingPhoto] = useState(false)
+  // Once the patient explicitly removes their photo, force the default avatar
+  // for the rest of this session instead of silently falling back to Clerk's
+  // (e.g. Google) photo via the usual profile_photo_url-or-imageUrl pattern.
+  const [photoRemoved, setPhotoRemoved] = useState(false)
 
   useEffect(() => {
     if (!user) return
@@ -93,6 +99,28 @@ export default function PatientProfilePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
+  // Live-sync own photo — a change made from another device/session (e.g.
+  // mobile) should reflect here without a manual reload. Mirrors
+  // hooks/useUserPhotoRealtime.ts, scoped inline since this screen already
+  // manages photo state (profile.profile_photo_url + photoRemoved) by hand.
+  useEffect(() => {
+    if (!userId) return
+    const channel = supabase
+      .channel(`own-photo-${userId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userId}` },
+        (payload) => {
+          const url = (payload.new as { profile_photo_url: string | null })?.profile_photo_url ?? null
+          if (url) setPhotoRemoved(false)
+          setProfile(prev => prev ? { ...prev, profile_photo_url: url } : prev)
+          setForm(prev => ({ ...prev, profile_photo_url: url }))
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [userId])
+
   async function handlePhotoUpload(file: File) {
     if (!userId || !user) return
     setUploadingPhoto(true)
@@ -100,20 +128,49 @@ export default function PatientProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      // Use Clerk user ID as filename — matches mobile convention so both platforms share one file
-      const path = `${user.id}.jpg`
+      // Path must be clerk_id/filename so the RLS foldername policy passes
+      // (storage.foldername(name)[1] = clerk_id) — matches mobile convention.
+      const path = `${user.id}/avatar.jpg`
 
-      const { error: uploadError } = await client.storage.from('avatars').upload(path, file, { upsert: true, contentType: 'image/jpeg' })
+      const { error: uploadError } = await client.storage.from('profile-photos').upload(path, file, { upsert: true, contentType: 'image/jpeg' })
       if (uploadError) throw uploadError
 
-      const { data: { publicUrl } } = client.storage.from('avatars').getPublicUrl(path)
+      const { data: { publicUrl } } = client.storage.from('profile-photos').getPublicUrl(path)
       await client.from('users').update({ profile_photo_url: publicUrl }).eq('id', userId)
 
+      setPhotoRemoved(false)
       setProfile(prev => prev ? { ...prev, profile_photo_url: publicUrl } : prev)
       setForm(prev => ({ ...prev, profile_photo_url: publicUrl }))
+      pushOwnPhotoToStream(publicUrl)
     } catch (e) {
       console.error('Photo upload failed:', e)
-      alert('Photo upload failed. Please ensure the avatars storage bucket exists in Supabase.')
+      alert('Photo upload failed. Please try again.')
+    } finally {
+      setUploadingPhoto(false)
+    }
+  }
+
+  async function handlePhotoDelete() {
+    if (!userId || !user) return
+    setUploadingPhoto(true)
+    try {
+      const token = await getToken()
+      if (!token) return
+      const client = getAuthClient(token)
+      const path = `${user.id}/avatar.jpg`
+
+      // Best-effort — a missing/already-deleted file must not block clearing the DB field.
+      await client.storage.from('profile-photos').remove([path]).catch(() => {})
+      await client.from('users').update({ profile_photo_url: null }).eq('id', userId)
+
+      // Deliberately falls back to the default initials avatar, not Clerk's photo.
+      setPhotoRemoved(true)
+      setProfile(prev => prev ? { ...prev, profile_photo_url: null } : prev)
+      setForm(prev => ({ ...prev, profile_photo_url: null }))
+      pushOwnPhotoToStream(null)
+    } catch (e) {
+      console.error('Photo delete failed:', e)
+      alert('Failed to remove photo. Please try again.')
     } finally {
       setUploadingPhoto(false)
     }
@@ -182,6 +239,8 @@ export default function PatientProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
+      // Best-effort — a missing file must never block account deletion.
+      await client.storage.from('profile-photos').remove([`${user.id}/avatar.jpg`]).catch(() => {})
       await client.from('users').delete().eq('id', userId)
       await user.delete()
       router.replace('/sign-up')
@@ -193,7 +252,7 @@ export default function PatientProfilePage() {
   }
 
   const displayName = profile?.full_name || user?.fullName || 'Patient'
-  const photoUrl = profile?.profile_photo_url || user?.imageUrl || null
+  const photoUrl = photoRemoved ? null : (profile?.profile_photo_url || user?.imageUrl || null)
 
   return (
     <div className="p-8 max-w-2xl">
@@ -241,6 +300,15 @@ export default function PatientProfilePage() {
           <span className="inline-block mt-2 px-3 py-1 rounded-full bg-teal-green/10 text-teal-green text-xs font-bold">
             Patient
           </span>
+          {photoUrl && (
+            <button
+              onClick={handlePhotoDelete}
+              disabled={uploadingPhoto}
+              className="block mt-2 text-danger text-xs font-semibold hover:underline disabled:opacity-50"
+            >
+              Delete Photo
+            </button>
+          )}
         </div>
       </div>
 
@@ -265,7 +333,60 @@ export default function PatientProfilePage() {
             { key: 'full_name', label: 'Full Name', type: 'text' },
             { key: 'email', label: 'Email', type: 'email', readonly: true },
             { key: 'phone', label: 'Phone Number', type: 'tel' },
-            { key: 'country', label: 'Country', type: 'text' },
+          ].map(field => (
+            <div key={field.key}>
+              <label className="block text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">
+                {field.label}
+              </label>
+              {editing && !field.readonly ? (
+                <input
+                  type={field.type}
+                  value={form[field.key as keyof UserProfile] as string ?? ''}
+                  onChange={e => setForm(prev => ({ ...prev, [field.key]: e.target.value }))}
+                  className="w-full h-11 px-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black focus:outline-none focus:border-int-blue"
+                />
+              ) : (
+                <p className="h-11 px-4 flex items-center font-montserrat text-sm text-ink-black bg-cloud-grey rounded-2xl">
+                  {profile?.[field.key as keyof UserProfile] || '—'}
+                </p>
+              )}
+            </div>
+          ))}
+
+          {/* Country — a one-time choice. Once set (matching mobile's
+              lock-icon convention at app/(auth)/country.tsx +
+              edit-personal-info.tsx) it can never be changed again, so admin
+              always sees a stable value. */}
+          <div>
+            <label className="block text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">
+              Country
+            </label>
+            {editing && !form.country ? (
+              <select
+                value={form.country}
+                onChange={e => setForm(prev => ({ ...prev, country: e.target.value }))}
+                className="w-full h-11 px-4 rounded-2xl border border-steel-grey bg-cloud-grey font-montserrat text-sm text-ink-black focus:outline-none focus:border-int-blue"
+              >
+                <option value="">Select country</option>
+                {COUNTRIES.map(c => (
+                  <option key={c.id} value={c.name}>{c.name}</option>
+                ))}
+              </select>
+            ) : (
+              <>
+                <p className="h-11 px-4 flex items-center font-montserrat text-sm text-ink-black bg-cloud-grey rounded-2xl">
+                  {profile?.country || '—'}
+                </p>
+                {editing && (
+                  <p className="text-[11px] text-ink-black/40 mt-1">
+                    Country cannot be changed once set. Contact support@dawa.app for help.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
+          {[
             { key: 'language', label: 'Language', type: 'text' },
             { key: 'address', label: 'Address', type: 'text' },
           ].map(field => (
@@ -273,7 +394,7 @@ export default function PatientProfilePage() {
               <label className="block text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">
                 {field.label}
               </label>
-              {editing && !field.readonly ? (
+              {editing ? (
                 <input
                   type={field.type}
                   value={form[field.key as keyof UserProfile] as string ?? ''}

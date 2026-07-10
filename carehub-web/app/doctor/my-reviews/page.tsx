@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
 import { formatDate } from '@/lib/utils'
+import { MessageCircle, Phone, Video, Star } from 'lucide-react'
 
 interface Review {
   id: string
@@ -14,15 +15,17 @@ interface Review {
   consultation: { type: string } | null
 }
 
-const TYPE_ICONS: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+const TYPE_ICONS: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
 
 function Stars({ rating, size = 'sm' }: { rating: number; size?: 'sm' | 'lg' }) {
   return (
     <div className="flex gap-0.5">
       {[1, 2, 3, 4, 5].map(i => (
-        <span key={i} className={size === 'lg' ? 'text-2xl' : 'text-sm'}>
-          {i <= rating ? '⭐' : '☆'}
-        </span>
+        <Star
+          key={i}
+          size={size === 'lg' ? 24 : 14}
+          className={i <= rating ? 'text-yellow-400 fill-yellow-400' : 'text-steel-grey'}
+        />
       ))}
     </div>
   )
@@ -104,7 +107,7 @@ export default function DoctorMyReviewsPage() {
         </div>
       ) : reviews.length === 0 ? (
         <div className="card p-14 text-center">
-          <p className="text-4xl mb-4">⭐</p>
+          <Star size={40} className="mx-auto mb-4 text-steel-grey" />
           <p className="font-montserrat font-bold text-lg text-ink-black mb-2">No reviews yet</p>
           <p className="text-ink-black/50 text-sm">Patient reviews will appear here after consultations.</p>
         </div>
@@ -113,6 +116,7 @@ export default function DoctorMyReviewsPage() {
           {reviews.map(review => {
             const patientName = (review.patient as any)?.full_name ?? 'Patient'
             const type = (review.consultation as any)?.type ?? 'chat'
+            const TypeIcon = TYPE_ICONS[type] ?? MessageCircle
             return (
               <div key={review.id} className="card p-5">
                 <div className="flex items-start gap-4">
@@ -126,8 +130,8 @@ export default function DoctorMyReviewsPage() {
                     <div className="flex items-center justify-between mb-1">
                       <div>
                         <p className="font-montserrat font-bold text-sm text-ink-black">{patientName}</p>
-                        <p className="text-xs text-ink-black/40">
-                          {TYPE_ICONS[type]} {type.charAt(0).toUpperCase() + type.slice(1)} consultation · {formatDate(review.created_at)}
+                        <p className="text-xs text-ink-black/40 flex items-center gap-1">
+                          <TypeIcon size={12} /> {type.charAt(0).toUpperCase() + type.slice(1)} consultation · {formatDate(review.created_at)}
                         </p>
                       </div>
                       <Stars rating={review.rating} />

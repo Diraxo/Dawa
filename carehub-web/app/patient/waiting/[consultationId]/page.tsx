@@ -2,9 +2,14 @@
 
 import { useEffect, useState, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
+import { useAuth } from '@clerk/nextjs'
+import { supabase, getAuthClient } from '@/lib/supabase'
 import { stripDrPrefix } from '@/lib/utils'
 import Link from 'next/link'
+import {
+  Clock, Wallet, Search, RefreshCw, XCircle, Ban, CalendarClock,
+  MessageCircle, Phone, Video, CheckCircle2,
+} from 'lucide-react'
 
 interface ConsultationData {
   id: string
@@ -19,16 +24,42 @@ interface ConsultationData {
   } | null
 }
 
+const CANCELLABLE_STATUSES = new Set(['waiting_for_doctor', 'pending_payment'])
+
 export default function WaitingRoomPage() {
   const { consultationId } = useParams<{ consultationId: string }>()
   const router = useRouter()
+  const { getToken, userId: clerkUserId } = useAuth()
   const [consultation, setConsultation] = useState<ConsultationData | null>(null)
   const [loading, setLoading] = useState(true)
   const [dots, setDots] = useState('.')
   const [status, setStatus] = useState<string>('waiting_for_doctor')
   const [declined, setDeclined] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
+  // The waiting room stays active until the doctor accepts/declines or the
+  // patient cancels — no client-side countdown/timeout. A server-side
+  // pg_cron job (see migration 023) is the sole source of a 'doctor_missed'
+  // status; this page only reacts to that status arriving.
+  const [timedOut, setTimedOut] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
   const navigated = useRef(false)
+  const myUserIdRef = useRef<string | null>(null)
+
+  // Resolve own internal user id (needed to stamp cancelled_by)
+  useEffect(() => {
+    if (!clerkUserId) return
+    getToken().then(async (token) => {
+      if (!token) return
+      const { data } = await getAuthClient(token)
+        .from('users')
+        .select('id')
+        .eq('clerk_id', clerkUserId)
+        .maybeSingle()
+      if (data) myUserIdRef.current = data.id
+    })
+  }, [clerkUserId, getToken])
 
   // Animated dots
   useEffect(() => {
@@ -36,8 +67,42 @@ export default function WaitingRoomPage() {
     return () => clearInterval(interval)
   }, [])
 
+  // Polling fallback: every 3 s in case Realtime misses the status change
   useEffect(() => {
-    let cancelled = false
+    if (timedOut || declined || cancelled) return
+    const poll = async () => {
+      if (navigated.current) return
+      try {
+        const { data } = await supabase
+          .from('consultations')
+          .select('id, type, status')
+          .eq('id', consultationId)
+          .single()
+        if (!data || navigated.current) return
+        const s = (data as unknown as { status: string; type: string }).status
+        const t = (data as unknown as { status: string; type: string }).type
+        if (s === 'accepted' || s === 'in_progress' || s === 'active') {
+          navigated.current = true
+          router.replace(`/patient/consultation/${t}/${consultationId}`)
+        } else if (s === 'declined') {
+          navigated.current = true
+          setDeclined(true)
+        } else if (s === 'cancelled') {
+          navigated.current = true
+          setCancelled(true)
+        } else if (s === 'doctor_missed') {
+          navigated.current = true
+          setTimedOut(true)
+        }
+      } catch { /* network error — retry next tick */ }
+    }
+    const interval = setInterval(poll, 3000)
+    return () => clearInterval(interval)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [consultationId, timedOut, declined])
+
+  useEffect(() => {
+    let unmounted = false
 
     async function load() {
       if (channelRef.current) {
@@ -51,7 +116,7 @@ export default function WaitingRoomPage() {
         .eq('id', consultationId)
         .single()
 
-      if (cancelled) return
+      if (unmounted) return
 
       setConsultation(data as unknown as ConsultationData)
       setLoading(false)
@@ -61,15 +126,21 @@ export default function WaitingRoomPage() {
       // Already accepted/in_progress by the time we load
       if (data?.status === 'accepted' || data?.status === 'in_progress' || data?.status === 'active') {
         navigated.current = true
-        router.push(`/patient/consultation/${data.type}/${consultationId}`)
+        router.replace(`/patient/consultation/${data.type}/${consultationId}`)
         return
       }
 
       // Declined/cancelled before we loaded
-      if (data?.status === 'declined' || data?.status === 'cancelled') {
+      if (data?.status === 'declined') {
         navigated.current = true
         setStatus(data.status)
         setDeclined(true)
+        return
+      }
+      if (data?.status === 'cancelled') {
+        navigated.current = true
+        setStatus(data.status)
+        setCancelled(true)
         return
       }
 
@@ -88,15 +159,21 @@ export default function WaitingRoomPage() {
 
           if (updated.status === 'accepted' || updated.status === 'in_progress' || updated.status === 'active') {
             navigated.current = true
-            router.push(`/patient/consultation/${updated.type}/${consultationId}`)
-          } else if (updated.status === 'declined' || updated.status === 'cancelled') {
+            router.replace(`/patient/consultation/${updated.type}/${consultationId}`)
+          } else if (updated.status === 'declined') {
             navigated.current = true
             setDeclined(true)
+          } else if (updated.status === 'cancelled') {
+            navigated.current = true
+            setCancelled(true)
+          } else if (updated.status === 'doctor_missed') {
+            setTimedOut(true)
+            navigated.current = true
           }
         })
         .subscribe()
 
-      if (cancelled) {
+      if (unmounted) {
         supabase.removeChannel(channel)
       } else {
         channelRef.current = channel
@@ -106,7 +183,7 @@ export default function WaitingRoomPage() {
     load()
 
     return () => {
-      cancelled = true
+      unmounted = true
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current)
         channelRef.current = null
@@ -115,14 +192,77 @@ export default function WaitingRoomPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [consultationId])
 
+  // Guarded to pre-acceptance statuses only — once the doctor has accepted
+  // (or the session started), cancelling here would create an inconsistent
+  // state; that case is handled by the live consultation pages instead.
   async function cancelConsultation() {
-    if (navigated.current) return
-    navigated.current = true
-    await supabase
-      .from('consultations')
-      .update({ status: 'cancelled' })
-      .eq('id', consultationId)
-    router.push('/patient/appointments')
+    if (cancelling || navigated.current) return
+    if (!CANCELLABLE_STATUSES.has(status)) {
+      setCancelError('This request can no longer be cancelled because the doctor has already responded.')
+      return
+    }
+    setCancelling(true)
+    setCancelError(null)
+    try {
+      const token = await getToken()
+      if (!token) throw new Error('Not authenticated')
+      const { data, error } = await getAuthClient(token)
+        .from('consultations')
+        .update({ status: 'cancelled', cancelled_by: myUserIdRef.current })
+        .eq('id', consultationId)
+        .select('credit_amount, consultation_credit')
+        .single()
+      if (error) throw error
+      // Set navigated only now that the update is confirmed — the
+      // realtime/poll handlers guard on navigated.current, so flipping it
+      // earlier (before the update landed) would make them ignore the
+      // resulting 'cancelled' status and leave the page stuck.
+      navigated.current = true
+      setConsultation(prev => prev ? { ...prev, credit_amount: data?.credit_amount ?? prev.credit_amount } : prev)
+      setCancelled(true)
+    } catch {
+      setCancelError('Could not cancel your request. Please check your connection and try again.')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  if (timedOut) {
+    return (
+      <div className="p-8 flex items-center justify-center min-h-[80vh]">
+        <div className="card p-10 max-w-md w-full text-center">
+          <div className="w-16 h-16 rounded-full bg-warning/10 flex items-center justify-center mx-auto mb-4">
+            <Clock size={32} className="text-warning" />
+          </div>
+          <h1 className="font-montserrat font-black text-xl text-ink-black mb-2">
+            No Response
+          </h1>
+          <p className="text-ink-black/50 text-sm mb-6">
+            The doctor did not respond in time. Your consultation credit has been preserved.
+          </p>
+          <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 mb-6 text-left">
+            <div className="flex items-center gap-2 mb-1">
+              <Wallet size={18} className="text-teal-600" />
+              <p className="font-montserrat font-bold text-sm text-teal-800">Credit Preserved</p>
+            </div>
+            <p className="text-teal-600 text-xs leading-relaxed">
+              No additional payment required when you book with another doctor at the same or lower fee.
+            </p>
+          </div>
+          <div className="flex flex-col gap-3">
+            <Link href="/patient/doctors" className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl">
+              <Search size={16} /> Choose Another Doctor
+            </Link>
+            <Link href="/patient/doctors" className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey">
+              <RefreshCw size={16} /> Try Again
+            </Link>
+            <Link href="/patient/help-support" className="text-ink-black/40 text-sm underline mt-1">
+              Contact Support
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   if (declined) {
@@ -134,8 +274,8 @@ export default function WaitingRoomPage() {
     return (
       <div className="p-8 flex items-center justify-center min-h-[80vh]">
         <div className="card p-10 max-w-md w-full text-center">
-          <div className="w-16 h-16 rounded-full bg-danger/10 flex items-center justify-center text-3xl mx-auto mb-4">
-            ❌
+          <div className="w-16 h-16 rounded-full bg-danger/10 flex items-center justify-center mx-auto mb-4">
+            <XCircle size={32} className="text-danger" />
           </div>
           <h1 className="font-montserrat font-black text-xl text-ink-black mb-2">
             Consultation Unavailable
@@ -148,7 +288,7 @@ export default function WaitingRoomPage() {
           {creditAmount !== null && creditAmount > 0 && (
             <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 mb-6 text-left">
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-teal-600 text-lg">💳</span>
+                <Wallet size={18} className="text-teal-600" />
                 <p className="font-montserrat font-bold text-sm text-teal-800">
                   Consultation Credit Available
                 </p>
@@ -162,12 +302,80 @@ export default function WaitingRoomPage() {
             </div>
           )}
 
-          <Link
-            href="/patient/doctors"
-            className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl"
-          >
-            🔍 Find Another Doctor
-          </Link>
+          <div className="flex flex-col gap-3">
+            <Link
+              href="/patient/doctors"
+              className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl"
+            >
+              <Search size={16} /> Choose Another Doctor
+            </Link>
+            {consultation?.doctor?.id && (
+              <Link
+                href={`/patient/doctors/${consultation.doctor.id}`}
+                className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey"
+              >
+                <CalendarClock size={16} /> Reschedule
+              </Link>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (cancelled) {
+    const creditAmount = consultation?.credit_amount ?? null
+    const doctorName = consultation?.doctor?.user?.full_name
+      ? stripDrPrefix(consultation.doctor.user.full_name)
+      : 'the doctor'
+
+    return (
+      <div className="p-8 flex items-center justify-center min-h-[80vh]">
+        <div className="card p-10 max-w-md w-full text-center">
+          <div className="w-16 h-16 rounded-full bg-steel-grey/20 flex items-center justify-center mx-auto mb-4">
+            <Ban size={32} className="text-ink-black/40" />
+          </div>
+          <h1 className="font-montserrat font-black text-xl text-ink-black mb-2">
+            Request Cancelled
+          </h1>
+          <p className="text-ink-black/50 text-sm mb-6">
+            You cancelled your consultation request with Dr. {doctorName}.
+          </p>
+
+          {/* Consultation Credit Banner */}
+          {creditAmount !== null && creditAmount > 0 && (
+            <div className="bg-teal-50 border border-teal-200 rounded-2xl p-5 mb-6 text-left">
+              <div className="flex items-center gap-2 mb-2">
+                <Wallet size={18} className="text-teal-600" />
+                <p className="font-montserrat font-bold text-sm text-teal-800">
+                  Consultation Credit Preserved
+                </p>
+              </div>
+              <p className="font-montserrat font-black text-2xl text-teal-700 mb-1">
+                ETB {Number(creditAmount).toFixed(2)}
+              </p>
+              <p className="text-teal-600 text-xs leading-relaxed">
+                No additional payment required when booking with a doctor at the same or lower fee.
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3">
+            {consultation?.doctor?.id && (
+              <Link
+                href={`/patient/doctors/${consultation.doctor.id}`}
+                className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl"
+              >
+                <CalendarClock size={16} /> Reschedule
+              </Link>
+            )}
+            <Link
+              href="/patient/doctors"
+              className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey"
+            >
+              <Search size={16} /> Choose Another Doctor
+            </Link>
+          </div>
         </div>
       </div>
     )
@@ -192,7 +400,7 @@ export default function WaitingRoomPage() {
     )
   }
 
-  const typeIcon = consultation.type === 'chat' ? '💬' : consultation.type === 'phone' ? '📞' : '🎥'
+  const TypeIcon = consultation.type === 'chat' ? MessageCircle : consultation.type === 'phone' ? Phone : Video
   const typeLabel = consultation.type === 'chat' ? 'Chat' : consultation.type === 'phone' ? 'Phone Call' : 'Video Call'
   const doctorName = stripDrPrefix(consultation.doctor?.user?.full_name ?? '')
   const photoUrl = consultation.doctor?.user?.profile_photo_url
@@ -212,7 +420,7 @@ export default function WaitingRoomPage() {
       <div className="card p-10 max-w-md w-full text-center">
         {/* Payment success badge */}
         <div className="inline-flex items-center gap-1.5 bg-success/10 text-success border border-success/30 rounded-full px-3 py-1 text-xs font-semibold mb-5">
-          ✓ Payment Successful
+          <CheckCircle2 size={14} /> Payment Successful
         </div>
 
         {/* Doctor avatar */}
@@ -230,7 +438,7 @@ export default function WaitingRoomPage() {
 
         {/* Type badge */}
         <div className="inline-flex items-center gap-1.5 bg-cloud-grey rounded-full px-3 py-1 text-xs font-semibold text-ink-black mb-4">
-          {typeIcon} {typeLabel}
+          <TypeIcon size={14} /> {typeLabel}
         </div>
 
         <h1 className="font-montserrat font-black text-xl text-ink-black mb-1">
@@ -241,7 +449,7 @@ export default function WaitingRoomPage() {
         </p>
 
         {/* Status badge */}
-        <div className={`inline-flex items-center gap-2 border rounded-full px-4 py-1.5 text-xs font-semibold mb-6 ${statusColor}`}>
+        <div className={`inline-flex items-center gap-2 border rounded-full px-4 py-1.5 text-xs font-semibold mb-4 ${statusColor}`}>
           <span className={`w-2 h-2 rounded-full ${status === 'accepted' || status === 'in_progress' ? 'bg-teal-green' : 'bg-care-blue'} animate-pulse`} />
           {statusLabel}
         </div>
@@ -259,11 +467,16 @@ export default function WaitingRoomPage() {
           </div>
         )}
 
+        {cancelError && (
+          <p className="text-danger text-xs mb-3 text-center">{cancelError}</p>
+        )}
+
         <button
           onClick={cancelConsultation}
-          className="btn-outline w-full text-danger border-danger/30 hover:bg-danger/5"
+          disabled={cancelling}
+          className="btn-outline w-full text-danger border-danger/30 hover:bg-danger/5 disabled:opacity-60"
         >
-          Cancel Request
+          {cancelling ? 'Cancelling…' : 'Cancel Request'}
         </button>
       </div>
     </div>

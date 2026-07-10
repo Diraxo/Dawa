@@ -42,6 +42,7 @@ export async function fetchAgoraToken(
 ): Promise<string> {
   const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL
   const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
+  if (!supabaseUrl) throw new Error('[Agora] EXPO_PUBLIC_SUPABASE_URL is not set in this build')
   const res = await fetch(`${supabaseUrl}/functions/v1/agora-token`, {
     method: 'POST',
     headers: {

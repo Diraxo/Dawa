@@ -7,9 +7,16 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 import Link from 'next/link'
 import LogoMark from '@/components/ui/LogoMark'
 import { MIN_AGE_DOCTOR, meetsAgeRequirement } from '@/lib/ageValidation'
+import { MessageCircle, Phone, Video } from 'lucide-react'
 
 const STEP_LABELS = ['Personal Info', 'Credentials', 'Documents', 'Pricing']
 const MAX_BIO = 300
+
+const LANGUAGES = [
+  'Arabic', 'Amharic', 'English', 'French', 'Somali', 'Swahili',
+  'Tigrinya', 'Oromo', 'Afar', 'Harari', 'Sidama', 'Wolaytta',
+  'Turkish', 'Hindi', 'Urdu',
+]
 
 function fileIcon(file: File) {
   return file.type.startsWith('image/') ? '🖼️' : '📄'
@@ -42,6 +49,7 @@ export default function DoctorRegisterPage() {
   const [yearsExperience, setYearsExperience] = useState(0)
   const [hospitalName, setHospitalName] = useState('')
   const [bio, setBio] = useState('')
+  const [languages, setLanguages] = useState<string[]>([])
 
   // ── Step 3: Documents ────────────────────────────────────────────────────────
   const [licenseFiles, setLicenseFiles] = useState<File[]>([])
@@ -53,6 +61,13 @@ export default function DoctorRegisterPage() {
   const [chatPrice, setChatPrice] = useState('')
   const [phonePrice, setPhonePrice] = useState('')
   const [videoPrice, setVideoPrice] = useState('')
+  const [commissionRate, setCommissionRate] = useState(20)
+
+  useEffect(() => {
+    supabase.rpc('get_commission_rate').then(({ data }) => {
+      if (typeof data === 'number') setCommissionRate(data)
+    })
+  }, [])
 
   // Pre-fill name from Clerk
   useEffect(() => {
@@ -165,9 +180,11 @@ export default function DoctorRegisterPage() {
       if (profilePhotoFile) {
         try {
           const ext = profilePhotoFile.name.split('.').pop()?.toLowerCase() ?? 'jpg'
-          const photoPath = `${user.id}.${ext}`
-          await client.storage.from('avatars').upload(photoPath, profilePhotoFile, { upsert: true })
-          const { data: urlData } = client.storage.from('avatars').getPublicUrl(photoPath)
+          // Path must be clerk_id/filename so the RLS foldername policy passes
+          // (storage.foldername(name)[1] = clerk_id) — matches mobile convention.
+          const photoPath = `${user.id}/profile.${ext}`
+          await client.storage.from('profile-photos').upload(photoPath, profilePhotoFile, { upsert: true })
+          const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(photoPath)
           await client.from('users').update({ profile_photo_url: urlData.publicUrl }).eq('clerk_id', user.id)
         } catch {
           // Profile photo failure is non-blocking
@@ -199,6 +216,7 @@ export default function DoctorRegisterPage() {
           years_experience: yearsExperience,
           hospital_name: hospitalName,
           bio,
+          languages,
           license_doc_url: licenseDocUrl,
           id_doc_url: idDocUrl,
           chat_price: parseInt(chatPrice) || 0,
@@ -453,7 +471,7 @@ export default function DoctorRegisterPage() {
                 <label className="block text-xs font-bold text-ink-black/50 mb-1.5">Hospital / Clinic Name *</label>
                 <input
                   className={inputClass}
-                  placeholder="e.g. Tikur Anbessa Hospital"
+                  placeholder="e.g. Karamara Hospital"
                   value={hospitalName}
                   onChange={e => setHospitalName(e.target.value)}
                   autoComplete="off"
@@ -472,6 +490,39 @@ export default function DoctorRegisterPage() {
                   autoComplete="off"
                 />
                 <p className="text-[11px] text-ink-black/40 text-right mt-0.5 font-montserrat">{bio.length} / {MAX_BIO}</p>
+              </div>
+
+              {/* Languages Spoken */}
+              <div>
+                <label className="block text-xs font-bold text-ink-black/50 mb-2">Languages Spoken</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {LANGUAGES.map(lang => {
+                    const selected = languages.includes(lang)
+                    return (
+                      <button
+                        key={lang}
+                        type="button"
+                        onClick={() =>
+                          setLanguages(prev =>
+                            prev.includes(lang) ? prev.filter(l => l !== lang) : [...prev, lang]
+                          )
+                        }
+                        className={`flex items-center gap-2 h-10 px-3 rounded-xl text-sm font-montserrat text-left transition-colors border ${
+                          selected
+                            ? 'bg-teal-50 border-teal-green text-teal-green font-semibold'
+                            : 'bg-cloud-grey border-steel-grey text-ink-black/60 hover:border-int-blue'
+                        }`}
+                      >
+                        {selected && (
+                          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                        <span className="truncate">{lang}</span>
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
             </div>
           )}
@@ -658,20 +709,20 @@ export default function DoctorRegisterPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a2.25 2.25 0 00-2.25-2.25H15a3 3 0 11-6 0H5.25A2.25 2.25 0 003 12m18 0v6a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 18v-6m18 0V9M3 12V9m18 0a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 9m18 0V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v3" />
                 </svg>
                 <p className="text-xs text-ink-black font-montserrat leading-relaxed">
-                  You keep <strong className="text-teal-green">80%</strong> of each consultation fee.
-                  A <strong>20% platform fee</strong> supports Dawa operations and infrastructure.
+                  You keep <strong className="text-teal-green">{100 - commissionRate}%</strong> of each consultation fee.
+                  A <strong>{commissionRate}% platform fee</strong> supports Dawa operations and infrastructure.
                 </p>
               </div>
 
               {/* Price cards */}
               {([
-                { icon: '💬', label: 'Chat Consultation', desc: 'Text-based conversation', price: chatPrice, setPrice: setChatPrice },
-                { icon: '📞', label: 'Phone Consultation', desc: 'Audio call session', price: phonePrice, setPrice: setPhonePrice },
-                { icon: '🎥', label: 'Video Consultation', desc: 'Video call session', price: videoPrice, setPrice: setVideoPrice },
-              ] as const).map(({ icon, label, desc, price, setPrice }) => (
+                { icon: MessageCircle, color: '#00BFA5', label: 'Chat Consultation', desc: 'Text-based conversation', price: chatPrice, setPrice: setChatPrice },
+                { icon: Phone, color: '#1A4598', label: 'Phone Consultation', desc: 'Audio call session', price: phonePrice, setPrice: setPhonePrice },
+                { icon: Video, color: '#7C3AED', label: 'Video Consultation', desc: 'Video call session', price: videoPrice, setPrice: setVideoPrice },
+              ] as const).map(({ icon: Icon, color, label, desc, price, setPrice }) => (
                 <div key={label} className="flex items-center gap-4 bg-white border border-steel-grey rounded-2xl p-4 shadow-card">
-                  <div className="w-12 h-12 rounded-xl bg-cloud-grey flex items-center justify-center text-2xl flex-shrink-0">
-                    {icon}
+                  <div className="w-12 h-12 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0">
+                    <Icon size={22} color={color} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-sm text-ink-black font-montserrat">{label}</p>
@@ -700,16 +751,16 @@ export default function DoctorRegisterPage() {
               {step4Valid && (
                 <div className="bg-green-50 border border-green-200 rounded-2xl p-4 mt-1">
                   <p className="font-bold text-sm text-green-700 font-montserrat mb-0.5">Earnings Preview</p>
-                  <p className="text-xs text-ink-black/50 font-montserrat mb-3">After 20% platform fee, per session you earn:</p>
+                  <p className="text-xs text-ink-black/50 font-montserrat mb-3">After {commissionRate}% platform fee, per session you earn:</p>
                   {[
-                    { icon: '💬', label: 'Chat', price: chatPrice },
-                    { icon: '📞', label: 'Phone', price: phonePrice },
-                    { icon: '🎥', label: 'Video', price: videoPrice },
-                  ].map(({ icon, label, price: p }) => {
-                    const net = p ? Math.floor(Number(p) * 0.8) : 0
+                    { icon: MessageCircle, color: '#00BFA5', label: 'Chat', price: chatPrice },
+                    { icon: Phone, color: '#1A4598', label: 'Phone', price: phonePrice },
+                    { icon: Video, color: '#7C3AED', label: 'Video', price: videoPrice },
+                  ].map(({ icon: Icon, color, label, price: p }) => {
+                    const net = p ? Math.floor(Number(p) * (100 - commissionRate) / 100) : 0
                     return (
                       <div key={label} className="flex items-center gap-2 py-2 border-b border-green-100 last:border-0">
-                        <span className="text-base">{icon}</span>
+                        <Icon size={16} color={color} />
                         <span className="flex-1 text-sm text-ink-black font-montserrat">{label}</span>
                         <span className="font-bold text-sm text-green-700 font-montserrat">ETB {net.toLocaleString()}</span>
                         <span className="text-xs text-ink-black/40 font-montserrat">/ session</span>

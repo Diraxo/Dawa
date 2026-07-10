@@ -1,7 +1,7 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
@@ -20,8 +20,9 @@ import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -55,7 +56,13 @@ const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
 
 const DAYS: DayKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-const TYPE_ICONS = { chat: '💬', phone: '📞', video: '🎥' }
+const TYPE_ICONS: Record<'chat' | 'phone' | 'video', keyof typeof Ionicons.glyphMap> = {
+  chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam',
+}
+
+const TYPE_COLORS: Record<'chat' | 'phone' | 'video', string> = {
+  chat: colors.tealGreen, phone: colors.careBlue, video: '#7C3AED',
+}
 
 function formatApptDate(iso: string): { date: string; time: string } {
   const d = new Date(iso)
@@ -226,6 +233,9 @@ function WeekStrip({ onDaySelect }: { onDaySelect: (weekday: number, date: Date)
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 const PENDING_MSG = 'Your account is under review. You cannot modify your schedule until admin approves you.'
+const SUSPENDED_MSG = 'Your account has been suspended. Please contact support.'
+const getStatusGateAlert = (status: string | null | undefined): [string, string] =>
+  status === 'suspended' ? ['Account Suspended', SUSPENDED_MSG] : ['Account Under Review', PENDING_MSG]
 
 export default function ScheduleScreen() {
   const { t } = useTranslation()
@@ -233,19 +243,58 @@ export default function ScheduleScreen() {
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
+  const [acceptScheduled, setAcceptScheduled] = useState(true)
+  const [acceptOnDemand, setAcceptOnDemand] = useState(true)
   const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [savingAvailability, setSavingAvailability] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
+  const { isOnline, setIsOnline, toggling: togglingOnline, toggle: toggleOnline } = useDoctorOnlineToggle(profileId)
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loadingAppts, setLoadingAppts] = useState(true)
   const [timePicker, setTimePicker] = useState<{ day: DayKey; field: 'startTime' | 'endTime' } | null>(null)
-  const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [showBlockPicker, setShowBlockPicker] = useState(false)
   const [blockPickerDate, setBlockPickerDate] = useState(() => {
     const d = new Date()
     d.setDate(d.getDate() + 1)
     return d.toISOString().split('T')[0]
   })
+
+  // Future days only (>= tomorrow) — today's live consultations are already
+  // covered by Home's "Today's Schedule" widget, so including them here
+  // duplicated them under "Upcoming Appointments" instead of keeping today
+  // and upcoming visually separate. Re-run on Realtime changes (below) so a
+  // newly-paid or rescheduled appointment appears without a manual refresh.
+  const loadAppointments = async (client: ReturnType<typeof getAuthClient>, doctorProfileId: string) => {
+    const tomorrowStart = new Date(new Date().setHours(0, 0, 0, 0))
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1)
+    const { data: appts } = await client
+      .from('consultations')
+      .select('id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)')
+      .eq('doctor_id', doctorProfileId)
+      .in('status', ['pending', 'active', 'scheduled'])
+      .gte('scheduled_at', tomorrowStart.toISOString())
+      .order('scheduled_at', { ascending: true })
+      .limit(20)
+
+    setAppointments(
+      (appts ?? []).map((a: any) => {
+        const { date, time } = formatApptDate(a.scheduled_at)
+        return { id: a.id, patientName: a.patient?.full_name ?? 'Patient', date, time, type: a.type }
+      })
+    )
+  }
+
+  const scrollRef = useRef<ScrollView>(null)
+
+  const applyAvailability = (availabilityJson: unknown) => {
+    if (!availabilityJson) return
+    const saved = availabilityJson as Record<string, any>
+    const { blocked_dates, acceptScheduled: savedAcceptScheduled, acceptOnDemand: savedAcceptOnDemand, ...dayAvail } = saved
+    setAvailability((prev) => ({ ...prev, ...dayAvail }))
+    if (Array.isArray(blocked_dates)) setBlockedDates(blocked_dates)
+    if (typeof savedAcceptScheduled === 'boolean') setAcceptScheduled(savedAcceptScheduled)
+    if (typeof savedAcceptOnDemand === 'boolean') setAcceptOnDemand(savedAcceptOnDemand)
+  }
 
   useEffect(() => {
     if (!user?.id) return
@@ -260,33 +309,15 @@ export default function ScheduleScreen() {
 
         const { data: profile } = await client
           .from('doctor_profiles')
-          .select('id, availability')
+          .select('id, availability, is_online')
           .eq('user_id', (me as any).id)
           .maybeSingle()
         if (!profile) return
         setProfileId(profile.id)
-        if (profile.availability) {
-          const saved = profile.availability as Record<string, any>
-          const { blocked_dates, ...dayAvail } = saved
-          setAvailability((prev) => ({ ...prev, ...dayAvail }))
-          if (Array.isArray(blocked_dates)) setBlockedDates(blocked_dates)
-        }
+        setIsOnline((profile as any).is_online ?? false)
+        applyAvailability(profile.availability)
 
-        const { data: appts } = await client
-          .from('consultations')
-          .select('id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)')
-          .eq('doctor_id', profile.id)
-          .in('status', ['pending', 'active'])
-          .gte('scheduled_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString())
-          .order('scheduled_at', { ascending: true })
-          .limit(20)
-
-        setAppointments(
-          (appts ?? []).map((a: any) => {
-            const { date, time } = formatApptDate(a.scheduled_at)
-            return { id: a.id, patientName: a.patient?.full_name ?? 'Patient', date, time, type: a.type }
-          })
-        )
+        await loadAppointments(client, profile.id)
       } finally {
         setLoadingAppts(false)
       }
@@ -294,13 +325,52 @@ export default function ScheduleScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
 
+  // Live-sync availability/blocked-days edited from another device or the
+  // website — without this, this screen only reflected what it itself last
+  // saved until the next full app focus/reload.
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-schedule-availability-${profileId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` },
+        (payload) => {
+          const next = (payload.new as { availability?: unknown })?.availability
+          if (next) applyAvailability(next)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [profileId])
+
+  // Live-refresh Upcoming Appointments whenever any of this doctor's
+  // consultations change (new scheduled booking, reschedule, cancellation).
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-schedule-${profileId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
+        async () => {
+          const token = await getToken()
+          if (!token) return
+          await loadAppointments(getAuthClient(token), profileId)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
   const toggleDay = (day: DayKey) =>
     setAvailability((prev) => ({ ...prev, [day]: { ...prev[day], enabled: !prev[day].enabled } }))
 
   const handleSaveAvailability = async () => {
     if (savingAvailability) return
     if (doctorStatus && doctorStatus !== 'approved') {
-      Alert.alert('Account Under Review', PENDING_MSG)
+      Alert.alert(...getStatusGateAlert(doctorStatus))
       return
     }
 
@@ -323,12 +393,19 @@ export default function ScheduleScreen() {
       if (!profileId) throw new Error('Doctor profile not found.')
       const token = await getToken()
       if (!token) throw new Error('Not authenticated.')
-      const { error } = await getAuthClient(token)
+      const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
-        .update({ availability: { ...availability, blocked_dates: blockedDates } })
+        .update({ availability: { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: blockedDates } })
         .eq('id', profileId)
+        .select('id')
       if (error) throw error
-      Alert.alert('Saved', 'Your availability has been updated.')
+      if (!updatedRows || updatedRows.length === 0) {
+        throw new Error('No doctor profile row matched — nothing was saved.')
+      }
+      await loadAppointments(getAuthClient(token), profileId)
+      Alert.alert('Saved', 'Your availability has been updated.', [
+        { text: 'OK', onPress: () => scrollRef.current?.scrollTo({ y: 0, animated: true }) },
+      ])
     } catch {
       Alert.alert('Error', 'Could not save your availability. Please try again.')
     } finally {
@@ -358,10 +435,55 @@ export default function ScheduleScreen() {
         />
       )}
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
+      <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
         {/* Weekly strip */}
         <Text style={styles.sectionTitle}>{t('thisWeek')}</Text>
-        <WeekStrip onDaySelect={(_, date) => setSelectedDate(date)} />
+        <WeekStrip onDaySelect={() => {}} />
+
+        {/* Availability status */}
+        {!(doctorStatus && doctorStatus !== 'approved') && (
+          <View style={[styles.availabilityCard, styles.onlineRow]}>
+            <View style={styles.onlineDot}>
+              <View style={[styles.onlineDotInner, { backgroundColor: isOnline ? colors.success : colors.steelGrey }]} />
+            </View>
+            <Text style={styles.onlineLabel}>{isOnline ? 'Online · Taking Patients' : 'Offline'}</Text>
+            <Switch
+              value={isOnline}
+              onValueChange={toggleOnline}
+              disabled={togglingOnline}
+              trackColor={{ true: colors.success, false: colors.steelGrey }}
+              thumbColor={colors.mistWhite}
+            />
+          </View>
+        )}
+
+        {/* Booking mode toggles */}
+        <View style={styles.availabilityCard}>
+          <View style={styles.modeRow}>
+            <View style={styles.modeInfo}>
+              <Text style={styles.modeTitle}>Accept Scheduled Appointments</Text>
+              <Text style={styles.modeSub}>Let patients book in advance</Text>
+            </View>
+            <Switch
+              value={acceptScheduled}
+              onValueChange={setAcceptScheduled}
+              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
+              thumbColor={colors.mistWhite}
+            />
+          </View>
+          <View style={[styles.modeRow, styles.modeRowLast]}>
+            <View style={styles.modeInfo}>
+              <Text style={styles.modeTitle}>Accept On-Demand Consultations</Text>
+              <Text style={styles.modeSub}>Let patients start an instant consultation right now</Text>
+            </View>
+            <Switch
+              value={acceptOnDemand}
+              onValueChange={setAcceptOnDemand}
+              trackColor={{ true: colors.tealGreen, false: colors.steelGrey }}
+              thumbColor={colors.mistWhite}
+            />
+          </View>
+        </View>
 
         {/* Availability settings */}
         <View style={styles.availabilityCard}>
@@ -403,35 +525,21 @@ export default function ScheduleScreen() {
           disabled={savingAvailability}
         />
 
-        {/* Upcoming appointments — filtered to selected day */}
+        {/* Upcoming appointments — matches website: the week strip only
+            highlights a day, it doesn't filter this list */}
         <Text style={[styles.sectionTitle, styles.mt8]}>{t('upcomingAppts')}</Text>
         {loadingAppts ? (
           <ActivityIndicator color={colors.careBlue} style={{ marginVertical: 20 }} />
-        ) : appointments.filter(a => {
-            // Re-parse the formatted date to compare with selectedDate
-            const selectedStr = selectedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-            return a.date === 'Today'
-              ? selectedDate.toDateString() === new Date().toDateString()
-              : a.date === 'Tomorrow'
-              ? selectedDate.toDateString() === (() => { const t = new Date(); t.setDate(t.getDate() + 1); return t.toDateString() })()
-              : a.date === selectedStr
-          }).length === 0 ? (
+        ) : appointments.length === 0 ? (
           <View style={styles.emptyCard}>
             <Ionicons name="calendar-clear-outline" size={28} color={colors.steelGrey} />
             <Text style={styles.emptyText}>{t('noScheduledAppts')}</Text>
           </View>
         ) : (
-          appointments.filter(a => {
-            const selectedStr = selectedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-            return a.date === 'Today'
-              ? selectedDate.toDateString() === new Date().toDateString()
-              : a.date === 'Tomorrow'
-              ? selectedDate.toDateString() === (() => { const t = new Date(); t.setDate(t.getDate() + 1); return t.toDateString() })()
-              : a.date === selectedStr
-          }).map((appt) => (
+          appointments.map((appt) => (
             <View key={appt.id} style={styles.apptCard}>
-              <View style={styles.apptLeft}>
-                <Text style={styles.apptIcon}>{TYPE_ICONS[appt.type]}</Text>
+              <View style={[styles.apptLeft, { backgroundColor: `${TYPE_COLORS[appt.type]}18` }]}>
+                <Ionicons name={TYPE_ICONS[appt.type]} size={21} color={TYPE_COLORS[appt.type]} />
               </View>
               <View style={styles.apptInfo}>
                 <Text style={styles.apptPatient}>{appt.patientName}</Text>
@@ -479,7 +587,7 @@ export default function ScheduleScreen() {
             style={({ pressed }) => [styles.blockTimeBtn, pressed && { opacity: 0.85 }]}
             onPress={() => {
               if (doctorStatus && doctorStatus !== 'approved') {
-                Alert.alert('Account Under Review', PENDING_MSG)
+                Alert.alert(...getStatusGateAlert(doctorStatus))
               } else {
                 setShowBlockPicker(true)
               }
@@ -524,14 +632,20 @@ export default function ScheduleScreen() {
                   if (isNaN(d.getTime())) { Alert.alert('Invalid Date', 'That date is not valid.'); return }
                   if (d < new Date(new Date().setHours(0,0,0,0))) { Alert.alert('Past Date', 'You can only block future dates.'); return }
                   if (!blockedDates.includes(blockPickerDate)) {
+                    const previous = blockedDates
                     const updated = [...blockedDates, blockPickerDate]
                     setBlockedDates(updated)
                     getToken().then(async token => {
-                      if (!token || !profileId) return
-                      await getAuthClient(token)
+                      if (!token || !profileId) { setBlockedDates(previous); return }
+                      const { data: updatedRows, error } = await getAuthClient(token)
                         .from('doctor_profiles')
-                        .update({ availability: { ...availability, blocked_dates: updated } })
+                        .update({ availability: { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated } })
                         .eq('id', profileId)
+                        .select('id')
+                      if (error || !updatedRows || updatedRows.length === 0) {
+                        setBlockedDates(previous)
+                        Alert.alert('Error', 'Could not block this date. Please try again.')
+                      }
                     })
                   }
                   setShowBlockPicker(false)
@@ -574,6 +688,15 @@ const styles = StyleSheet.create({
   mt8: { marginTop: 8 },
 
   availabilityCard: { backgroundColor: colors.mistWhite, borderRadius: 16, padding: 16, marginBottom: 20, ...shadow('#000', 0, 1, 4, 0.05, 1) },
+  onlineRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  onlineDot: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center' },
+  onlineDotInner: { width: 10, height: 10, borderRadius: 5 },
+  onlineLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, flex: 1 },
+  modeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey },
+  modeRowLast: { borderBottomWidth: 0, paddingBottom: 0, paddingTop: 14 },
+  modeInfo: { flex: 1, paddingRight: 12 },
+  modeTitle: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 2 },
+  modeSub: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF' },
   availabilityTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack, marginBottom: 12 },
   dayRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey, gap: 12 },
   daySwitch: { transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] },
@@ -595,7 +718,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite, borderRadius: 14, padding: 14, marginBottom: 10,
     ...shadow('#000', 0, 1, 4, 0.04, 1),
   },
-  apptLeft: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center' },
+  apptLeft: { width: 44, height: 44, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   apptIcon: { fontSize: 20 },
   apptInfo: { flex: 1 },
   apptPatient: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },

@@ -1,7 +1,9 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
+import { stripDrPrefix } from '@/lib/utils'
+import { sendDoctorStatusPush } from '@/lib/doctorStatusPush'
 
 async function getEmailTemplate(key: string): Promise<string | null> {
   const { data } = await supabaseAdmin
@@ -66,11 +68,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       // In-app notification
       await supabaseAdmin.from('notifications').insert({
         user_id: profile.user_id,
-        title: 'Application Approved 🎉',
-        body: 'Congratulations! Your doctor application has been approved. You can now go online and start receiving consultations.',
+        title: 'Doctor Application Approved',
+        body: 'Your account has been approved. You may now begin accepting patients.',
         type: 'doctor_approved',
         data_json: { doctorProfileId: id },
       })
+      await sendDoctorStatusPush(profile.user_id, 'Doctor Application Approved', 'Your account has been approved. You may now begin accepting patients.')
 
       // Email notification
       const { data: userRow } = await supabaseAdmin
@@ -81,7 +84,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
       if (userRow?.email) {
         const template = await getEmailTemplate('email_approval_template')
-        const doctorName = userRow.full_name ?? 'Doctor'
+        const doctorName = stripDrPrefix(userRow.full_name ?? 'Doctor')
         const emailBody = template
           ? template.replace(/\{name\}/g, doctorName)
           : `Hello Dr. ${doctorName},\n\nYour Dawa application has been approved! You can now log in and start accepting consultations.\n\nWelcome to the Dawa team!`
@@ -89,7 +92,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       }
     }
 
-    await logAdminAction(userId, 'approve_doctor', { doctorProfileId: id })
+    await logAdminAction(userId, 'approve_doctor', { doctorProfileId: id }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
     return NextResponse.json({ success: true })
   }
 
@@ -115,11 +118,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       // In-app notification
       await supabaseAdmin.from('notifications').insert({
         user_id: profile.user_id,
-        title: 'Application Not Approved',
-        body: `Your doctor application was not approved. Reason: ${reason}`,
+        title: 'Doctor Application Rejected',
+        body: `Your application was not approved. Reason: ${reason}`,
         type: 'doctor_rejected',
         data_json: { doctorProfileId: id },
       })
+      await sendDoctorStatusPush(profile.user_id, 'Doctor Application Rejected', `Your application was not approved. Reason: ${reason}`)
 
       // Email notification
       const { data: userRow } = await supabaseAdmin
@@ -130,7 +134,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
       if (userRow?.email) {
         const template = await getEmailTemplate('email_rejection_template')
-        const doctorName = userRow.full_name ?? 'Doctor'
+        const doctorName = stripDrPrefix(userRow.full_name ?? 'Doctor')
         const emailBody = template
           ? template.replace(/\{name\}/g, doctorName).replace(/\{reason\}/g, reason)
           : `Hello Dr. ${doctorName},\n\nYour Dawa application was not approved at this time.\n\nReason: ${reason}\n\nIf you believe this is an error, please contact support.\n\nThe Dawa Team`
@@ -138,7 +142,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       }
     }
 
-    await logAdminAction(userId, 'reject_doctor', { doctorProfileId: id, reason })
+    await logAdminAction(userId, 'reject_doctor', { doctorProfileId: id, reason }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
     return NextResponse.json({ success: true })
   }
 

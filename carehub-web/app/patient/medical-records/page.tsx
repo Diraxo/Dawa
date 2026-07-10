@@ -3,9 +3,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
-import { formatDate, stripDrPrefix } from '@/lib/utils'
+import { formatDate, stripDrPrefix, parsePrescription } from '@/lib/utils'
+import { validateFile, safeFilename } from '@/lib/fileValidation'
+import { MessageCircle, Phone, Video } from 'lucide-react'
 
-type Category = 'all' | 'summary' | 'prescription' | 'documents'
+type Category = 'all' | 'summary' | 'prescription' | 'lab_report' | 'documents'
 
 interface MedicalRecord {
   id: string
@@ -34,6 +36,7 @@ const CATEGORY_LABELS: { key: Category; label: string; icon: string }[] = [
   { key: 'all', label: 'All Records', icon: '📋' },
   { key: 'summary', label: 'Summaries', icon: '📄' },
   { key: 'prescription', label: 'Prescriptions', icon: '💊' },
+  { key: 'lab_report', label: 'Lab Reports', icon: '🔬' },
   { key: 'documents', label: 'My Documents', icon: '📁' },
 ]
 
@@ -92,15 +95,24 @@ export default function PatientMedicalRecordsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file || !supabaseUserId) return
+  async function handleUpload(file: File, isLabReport: boolean) {
+    if (!supabaseUserId) return
     setUploadError('')
+
+    // Client-side validation before uploading
+    const validation = validateFile(file)
+    if (!validation.valid) {
+      setUploadError(validation.error ?? 'Invalid file.')
+      return
+    }
+
     setUploading(true)
     try {
       const token = await getToken()
       if (!token) throw new Error('Not authenticated')
-      const path = `${supabaseUserId}/${Date.now()}_${file.name}`
+      const prefix = isLabReport ? 'lab_report_' : ''
+      const filename = safeFilename(file.name, prefix)
+      const path = `${supabaseUserId}/${filename}`
       const { error } = await getAuthClient(token)
         .storage
         .from('patient-documents')
@@ -108,31 +120,41 @@ export default function PatientMedicalRecordsPage() {
       if (error) throw error
       setUploadedDocs(prev => [{
         id: path,
-        name: file.name,
+        name: filename,
         created_at: new Date().toISOString(),
         path,
       }, ...prev])
-      setCategory('documents')
+      setCategory(isLabReport ? 'lab_report' : 'documents')
     } catch (err: any) {
       setUploadError(err?.message ?? 'Upload failed. Please try again.')
     } finally {
       setUploading(false)
-      e.target.value = ''
     }
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    await handleUpload(file, false)
+    e.target.value = ''
   }
 
   const filteredRecords = records.filter(r => {
     if (category === 'prescription') return !!r.prescription
     if (category === 'summary') return !!r.diagnosis || !!r.chief_complaint
-    if (category === 'documents') return false
+    if (category === 'documents' || category === 'lab_report') return false
     return true
   })
 
-  const typeIcon = (type: string) =>
-    type === 'chat' ? '💬' : type === 'phone' ? '📞' : '🎥'
+  const labReports = uploadedDocs.filter(d => d.name.startsWith('lab_report_'))
+  const regularDocs = uploadedDocs.filter(d => !d.name.startsWith('lab_report_'))
+
+  const TypeIcon = (type: string) =>
+    type === 'chat' ? MessageCircle : type === 'phone' ? Phone : Video
 
   const showDocs = category === 'documents' || category === 'all'
-  const showRecords = category !== 'documents'
+  const showLabReports = category === 'lab_report' || category === 'all'
+  const showRecords = category !== 'documents' && category !== 'lab_report'
 
   return (
     <div className="p-8 max-w-3xl">
@@ -149,19 +171,34 @@ export default function PatientMedicalRecordsPage() {
           <h1 className="font-montserrat font-black text-3xl text-ink-black">Medical Records</h1>
           <p className="text-ink-black/50 text-sm mt-1">Your consultation summaries, prescriptions, and uploaded documents</p>
         </div>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          className="h-10 px-5 rounded-xl font-montserrat font-bold text-sm text-white flex items-center gap-2 disabled:opacity-60 flex-shrink-0"
-          style={{ background: uploading ? '#9CA3AF' : 'linear-gradient(to right, #2962FF, #00BFA5)' }}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          {uploading ? 'Uploading…' : 'Upload'}
-        </button>
+        <div className="flex gap-2 flex-shrink-0">
+          <input
+            type="file"
+            accept=".pdf,image/*"
+            className="hidden"
+            id="upload-lab"
+            onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f, true); e.currentTarget.value = '' }}
+          />
+          <label
+            htmlFor="upload-lab"
+            className="h-10 px-4 rounded-xl font-montserrat font-bold text-sm flex items-center gap-2 cursor-pointer border border-[#D97706] text-[#D97706] hover:bg-[#D97706]/5 transition-colors"
+          >
+            🔬 Lab Report
+          </label>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="h-10 px-5 rounded-xl font-montserrat font-bold text-sm text-white flex items-center gap-2 disabled:opacity-60"
+            style={{ background: uploading ? '#9CA3AF' : 'linear-gradient(to right, #2962FF, #00BFA5)' }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            {uploading ? 'Uploading…' : 'Upload'}
+          </button>
+        </div>
       </div>
 
       {uploadError && (
@@ -200,6 +237,7 @@ export default function PatientMedicalRecordsPage() {
             const docName = record.consultation?.doctor_profile?.user?.full_name ?? 'Doctor'
             const type = record.consultation?.type ?? 'chat'
             const hasRx = !!record.prescription
+            const Icon = TypeIcon(type)
 
             return (
               <div key={record.id} className="card overflow-hidden">
@@ -221,8 +259,8 @@ export default function PatientMedicalRecordsPage() {
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-ink-black/50">
-                      {typeIcon(type)} Dr. {stripDrPrefix(docName)} · {formatDate(record.created_at)}
+                    <p className="text-xs text-ink-black/50 inline-flex items-center gap-1">
+                      <Icon size={12} /> Dr. {stripDrPrefix(docName)} · {formatDate(record.created_at)}
                     </p>
                   </div>
                   <svg
@@ -249,12 +287,27 @@ export default function PatientMedicalRecordsPage() {
                           <p className="text-sm text-ink-black bg-cloud-grey rounded-xl px-4 py-3">{record.diagnosis}</p>
                         </div>
                       )}
-                      {record.prescription && (
-                        <div>
-                          <p className="text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">Prescription</p>
-                          <p className="text-sm text-ink-black bg-teal-green/5 border border-teal-green/20 rounded-xl px-4 py-3">{record.prescription}</p>
-                        </div>
-                      )}
+                      {record.prescription && (() => {
+                        const rxList = parsePrescription(record.prescription)
+                        return (
+                          <div>
+                            <p className="text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">Prescription</p>
+                            {rxList ? (
+                              <div className="flex flex-col gap-1.5">
+                                {rxList.map((rx, i) => (
+                                  <div key={i} className="bg-teal-green/5 border border-teal-green/20 rounded-xl px-4 py-3">
+                                    <p className="text-sm font-semibold text-ink-black">{rx.medicine}</p>
+                                    {rx.dosage && <p className="text-xs text-ink-black/60">{rx.dosage}{rx.duration ? ` · ${rx.duration}` : ''}</p>}
+                                    {rx.instructions && <p className="text-xs text-ink-black/60">{rx.instructions}</p>}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-sm text-ink-black bg-teal-green/5 border border-teal-green/20 rounded-xl px-4 py-3">{record.prescription}</p>
+                            )}
+                          </div>
+                        )
+                      })()}
                       {record.followup_recommendation && (
                         <div>
                           <p className="text-[11px] font-bold text-ink-black/40 uppercase tracking-wider mb-1.5">Follow-up</p>
@@ -268,7 +321,24 @@ export default function PatientMedicalRecordsPage() {
             )
           })}
 
-          {showDocs && uploadedDocs.map(doc => {
+          {showLabReports && labReports.map(doc => (
+            <div key={doc.id} className="card flex items-center gap-4 p-5">
+              <div className="w-11 h-11 rounded-2xl bg-[#D97706]/10 flex items-center justify-center text-xl flex-shrink-0">
+                🔬
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-montserrat font-bold text-sm text-ink-black truncate">
+                  {doc.name.replace(/^lab_report_\d+_/, '')}
+                </p>
+                <p className="text-xs text-ink-black/50 mt-0.5">Lab Report · {formatDate(doc.created_at)}</p>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#D97706]/10 text-[#D97706] flex-shrink-0">
+                Lab Report
+              </span>
+            </div>
+          ))}
+
+          {showDocs && regularDocs.map(doc => {
             const isPdf = doc.name.toLowerCase().endsWith('.pdf')
             const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(doc.name)
             return (
@@ -297,7 +367,15 @@ export default function PatientMedicalRecordsPage() {
             </div>
           )}
 
-          {category === 'documents' && uploadedDocs.length === 0 && (
+          {category === 'lab_report' && labReports.length === 0 && (
+            <div className="card p-14 text-center">
+              <p className="text-4xl mb-4">🔬</p>
+              <p className="font-montserrat font-bold text-lg text-ink-black mb-2">No lab reports yet</p>
+              <p className="text-ink-black/50 text-sm">Upload lab reports using the "🔬 Lab Report" button above.</p>
+            </div>
+          )}
+
+          {category === 'documents' && regularDocs.length === 0 && (
             <div className="card p-14 text-center">
               <p className="text-4xl mb-4">📁</p>
               <p className="font-montserrat font-bold text-lg text-ink-black mb-2">No documents yet</p>

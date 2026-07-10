@@ -99,7 +99,7 @@ const SECTIONS: Section[] = [
         type: 'subsection',
         label: 'For Doctors:',
         items: [
-          'You must respond to consultation requests within 30 seconds',
+          'You must respond to consultation requests in a timely manner',
           'You must provide professional, ethical medical advice',
           'You must complete consultation notes after each session',
           'You cannot solicit patients outside the platform',
@@ -117,7 +117,7 @@ const SECTIONS: Section[] = [
           'Consultation fees are charged per session',
           'Dawa takes a 20% platform commission',
           'Doctors receive 80% of each consultation fee',
-          'Refunds are available if a doctor does not respond within 30 seconds of a request',
+          'Refunds are available if a doctor does not respond to a request within a reasonable time',
           'Refunds are NOT available once a consultation has started',
           'Withdrawal requests are processed within 3-5 business days',
         ],
@@ -188,7 +188,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'For questions about these terms:\nEmail: legal@carehub.com\nWebsite: www.carehub.com/terms',
+        text: 'For questions about these terms:\nEmail: legal@dawa.app\nWebsite: www.dawa.app/terms',
       },
     ],
   },
@@ -271,12 +271,12 @@ export default function TermsScreen() {
 
         <Pressable
           style={({ pressed }) => [styles.footerCard, pressed && { opacity: 0.8 }]}
-          onPress={() => Linking.openURL('mailto:legal@carehub.com')}
+          onPress={() => Linking.openURL('mailto:legal@dawa.app')}
         >
           <Ionicons name="mail-outline" size={18} color={colors.tealGreen} />
           <Text style={styles.footerText}>
             Contact us:{' '}
-            <Text style={styles.footerLink}>legal@carehub.com</Text>
+            <Text style={styles.footerLink}>legal@dawa.app</Text>
           </Text>
         </Pressable>
 

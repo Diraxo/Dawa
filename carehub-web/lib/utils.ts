@@ -44,3 +44,23 @@ export function truncate(str: string, n: number) {
 export function stripDrPrefix(name: string): string {
   return name.replace(/^Dr\.?\s+/i, '').trim()
 }
+
+export interface ParsedPrescription {
+  medicine: string
+  dosage?: string
+  duration?: string
+  instructions?: string
+}
+
+// consultation_summaries.prescription is stored as a JSON-stringified array of
+// structured entries by every writer; a few legacy rows may be plain text.
+// Always fall back to the raw string so nothing renders blank.
+export function parsePrescription(raw: string | null): ParsedPrescription[] | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}

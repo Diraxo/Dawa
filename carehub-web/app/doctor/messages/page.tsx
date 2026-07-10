@@ -4,14 +4,20 @@ import { useEffect, useState, useMemo } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { useRouter } from 'next/navigation'
 import { getStreamClient, fetchStreamToken } from '@/lib/stream'
+import { getAuthClient } from '@/lib/supabase'
+import { isChannelReadThrough } from '@/lib/readCache'
+import { ConversationRow, ConversationDivider } from '@/components/chat/ConversationRow'
+import { WifiOff, MessageCircle } from 'lucide-react'
 
 interface Conversation {
   id: string
+  patientId: string
   patientName: string
+  patientPhotoUrl: string | null
   lastMessage: string
   lastMessageTime: string
   unreadCount: number
-  isActive: boolean
+  isOnline: boolean
 }
 
 function formatTime(date: Date | string | null | undefined): string {
@@ -26,6 +32,15 @@ function formatTime(date: Date | string | null | undefined): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+function attachmentPreview(attachments: any[] | undefined): string | null {
+  if (!attachments?.length) return null
+  const att = attachments[0]
+  if (att.type === 'image') return 'Photo'
+  if (att.type === 'audio' || att.mime_type?.includes('audio')) return 'Voice message'
+  if (att.type === 'video') return 'Video'
+  return 'File'
+}
+
 function buildConvos(channels: any[], userId: string): Conversation[] {
   return channels.map(ch => {
     const msgs = ch.state.messages
@@ -33,15 +48,15 @@ function buildConvos(channels: any[], userId: string): Conversation[] {
     const otherMember = Object.values(ch.state.members as Record<string, any>).find(
       (m: any) => m.user?.id !== userId
     )
-    const d = ch.data as Record<string, unknown> | undefined
-    const isActive = (d?.consultationStatus as string) !== 'completed'
     return {
       id: ch.id ?? '',
+      patientId: (otherMember as any)?.user?.id ?? '',
       patientName: (otherMember as any)?.user?.name ?? 'Patient',
-      lastMessage: lastMsg?.text || (lastMsg ? '📎 Attachment' : 'No messages yet'),
+      patientPhotoUrl: (otherMember as any)?.user?.image ?? null,
+      lastMessage: lastMsg?.text || attachmentPreview(lastMsg?.attachments) || 'No messages yet',
       lastMessageTime: formatTime(lastMsg?.created_at),
-      unreadCount: ch.countUnread(),
-      isActive,
+      unreadCount: isChannelReadThrough(ch.id, lastMsg?.id) ? 0 : ch.countUnread(),
+      isOnline: (otherMember as any)?.user?.online ?? false,
     }
   })
 }
@@ -58,42 +73,41 @@ export default function DoctorMessagesPage() {
   useEffect(() => {
     if (!user || !userId) return
     let cancelled = false
+    const client = getStreamClient()
 
-    async function connect() {
+    async function load() {
+      const channels = await client.queryChannels(
+        { type: 'messaging', members: { $in: [userId!] } },
+        { last_message_at: -1 },
+        { watch: true, state: true, presence: true, limit: 30 }
+      )
+      if (!cancelled) setConversations(buildConvos(channels, userId!))
+    }
+
+    async function connectAndLoad() {
       setLoading(true)
       try {
         const clerkToken = await getToken()
-        if (!clerkToken) return
-        const streamToken = await fetchStreamToken(clerkToken)
-        const client = getStreamClient()
-
+        if (cancelled || !clerkToken) return
         if (!client.userID) {
+          const streamToken = await fetchStreamToken(clerkToken)
+          let ownPhotoUrl: string | null = null
+          try {
+            const { data: own } = await getAuthClient(clerkToken)
+              .from('users')
+              .select('profile_photo_url')
+              .eq('clerk_id', userId!)
+              .maybeSingle()
+            ownPhotoUrl = (own as any)?.profile_photo_url ?? null
+          } catch {}
           await client.connectUser(
-            { id: userId!, name: user!.fullName ?? 'Doctor' },
+            { id: userId!, name: user!.fullName ?? 'Doctor', image: ownPhotoUrl ?? user?.imageUrl ?? undefined },
             streamToken
           )
         }
         if (cancelled) return
         setConnected(true)
-
-        const channels = await client.queryChannels(
-          { type: 'messaging', members: { $in: [userId!] } },
-          { last_message_at: -1 },
-          { watch: true, state: true, limit: 30 }
-        )
-        if (!cancelled) setConversations(buildConvos(channels, userId!))
-
-        const sub = client.on('notification.message_new', async () => {
-          if (cancelled) return
-          const updated = await client.queryChannels(
-            { type: 'messaging', members: { $in: [userId!] } },
-            { last_message_at: -1 },
-            { watch: false, state: true, limit: 30 }
-          )
-          if (!cancelled) setConversations(buildConvos(updated, userId!))
-        })
-
-        return () => sub.unsubscribe()
+        await load()
       } catch (err) {
         console.error('[DoctorMessages] Stream error:', err)
       } finally {
@@ -101,20 +115,75 @@ export default function DoctorMessagesPage() {
       }
     }
 
-    let streamUnsub: (() => void) | null = null
+    connectAndLoad()
 
-    connect().then(cleanup => { streamUnsub = cleanup ?? null })
+    // In-place update when a new message arrives in a watched channel
+    const sub1 = client.on('message.new', event => {
+      if (!event.message || !event.cid) return
+      const channelId = event.cid.replace('messaging:', '')
+      const msg = event.message
+      setConversations(prev => {
+        const idx = prev.findIndex(c => c.id === channelId)
+        if (idx === -1) return prev
+        const updated = [...prev]
+        updated[idx] = {
+          ...updated[idx],
+          lastMessage: msg.text || attachmentPreview(msg.attachments) || 'Message',
+          lastMessageTime: formatTime(msg.created_at),
+          unreadCount: msg.user?.id === userId ? updated[idx].unreadCount : updated[idx].unreadCount + 1,
+        }
+        const [conv] = updated.splice(idx, 1)
+        return [conv, ...updated]
+      })
+    })
+
+    // Full refetch when a message arrives in a channel not yet being watched
+    const sub2 = client.on('notification.message_new', () => {
+      if (!cancelled) load()
+    })
+
+    // Live online/offline dot — requires `presence: true` above to be populated.
+    const sub3 = client.on('user.presence.changed', event => {
+      const presenceUserId = event.user?.id
+      if (!presenceUserId) return
+      setConversations(prev =>
+        prev.map(c => (c.patientId === presenceUserId ? { ...c, isOnline: !!event.user?.online } : c))
+      )
+    })
+
+    // Re-sync after a dropped socket resumes.
+    const sub4 = client.on('connection.changed', event => {
+      if (event.online && !cancelled) load()
+    })
+
+    // Live avatar update — e.g. the patient changes their profile photo
+    // while this list is open.
+    const sub5 = client.on('user.updated', event => {
+      const updatedUserId = event.user?.id
+      if (!updatedUserId) return
+      setConversations(prev =>
+        prev.map(c => (c.patientId === updatedUserId ? { ...c, patientPhotoUrl: (event.user as any)?.image ?? null } : c))
+      )
+    })
 
     return () => {
       cancelled = true
-      streamUnsub?.()
+      sub1.unsubscribe()
+      sub2.unsubscribe()
+      sub3.unsubscribe()
+      sub4.unsubscribe()
+      sub5.unsubscribe()
     }
   }, [user, userId, getToken])
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return conversations
-    return conversations.filter(c => c.patientName.toLowerCase().includes(q))
+    return conversations.filter(
+      c =>
+        c.patientName.toLowerCase().includes(q) ||
+        c.lastMessage.toLowerCase().includes(q)
+    )
   }, [conversations, searchQuery])
 
   const totalUnread = useMemo(
@@ -122,14 +191,15 @@ export default function DoctorMessagesPage() {
     [conversations]
   )
 
+  function openChat(conv: Conversation) {
+    router.push(`/doctor/consultation/chat/${conv.id}`)
+  }
+
   return (
     <div className="p-8 max-w-3xl">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="font-montserrat font-black text-3xl text-ink-black">Messages</h1>
-          <p className="text-ink-black/50 text-sm mt-1">Your patient conversations</p>
-        </div>
+      <div className="mb-6 flex items-center gap-3">
+        <h1 className="font-montserrat font-black text-3xl text-ink-black">Messages</h1>
         {totalUnread > 0 && (
           <div className="min-w-[32px] h-8 rounded-full bg-teal-green flex items-center justify-center px-2">
             <span className="text-white font-bold text-xs">{totalUnread > 99 ? '99+' : totalUnread}</span>
@@ -168,13 +238,13 @@ export default function DoctorMessagesPage() {
         </div>
       ) : !connected ? (
         <div className="card p-14 text-center">
-          <p className="text-4xl mb-4">📡</p>
+          <WifiOff size={36} className="mx-auto mb-4 text-steel-grey" />
           <p className="font-montserrat font-bold text-lg text-ink-black mb-2">Not connected</p>
           <p className="text-ink-black/50 text-sm">Sign in to see your patient conversations.</p>
         </div>
       ) : filtered.length === 0 ? (
         <div className="card p-14 text-center">
-          <p className="text-4xl mb-4">💬</p>
+          <MessageCircle size={36} className="mx-auto mb-4 text-steel-grey" />
           <p className="font-montserrat font-bold text-lg text-ink-black mb-2">
             {searchQuery ? 'No results found' : 'No conversations yet'}
           </p>
@@ -188,46 +258,20 @@ export default function DoctorMessagesPage() {
         <div className="card overflow-hidden">
           {filtered.map((conv, idx) => (
             <div key={conv.id}>
-              <button
-                onClick={() => router.push(`/doctor/consultation/chat/${conv.id}`)}
-                className="w-full flex items-center gap-4 px-5 py-4 hover:bg-cloud-grey transition-colors text-left"
-              >
-                {/* Avatar */}
-                <div className="relative flex-shrink-0">
-                  <div
-                    className="w-12 h-12 rounded-full flex items-center justify-center text-white font-black text-lg"
-                    style={{ background: conv.isActive ? '#1A4598' : '#9CA3AF' }}
-                  >
-                    {conv.patientName[0].toUpperCase()}
-                  </div>
-                  {conv.isActive && (
-                    <div className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-success border-2 border-white" />
-                  )}
-                </div>
-
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className={`font-montserrat text-sm text-ink-black truncate ${conv.unreadCount > 0 ? 'font-bold' : 'font-semibold'}`}>
-                      {conv.patientName}
-                    </p>
-                    <p className="text-[11px] text-ink-black/40 flex-shrink-0 ml-3">{conv.lastMessageTime}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <p className={`text-xs truncate flex-1 ${conv.unreadCount > 0 ? 'text-ink-black font-medium' : 'text-ink-black/50'}`}>
-                      {conv.lastMessage}
-                    </p>
-                    {conv.unreadCount > 0 && (
-                      <div className="min-w-[20px] h-5 rounded-full bg-teal-green flex items-center justify-center px-1.5 flex-shrink-0">
-                        <span className="text-white font-bold text-[10px]">
-                          {conv.unreadCount > 99 ? '99+' : conv.unreadCount}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </button>
-              {idx < filtered.length - 1 && <div className="h-px bg-cloud-grey ml-20" />}
+              <ConversationRow
+                onClick={() => openChat(conv)}
+                data={{
+                  id: conv.id,
+                  peerName: conv.patientName,
+                  peerPhotoUrl: conv.patientPhotoUrl,
+                  isDoctorPeer: false,
+                  lastMessage: conv.lastMessage,
+                  lastMessageTime: conv.lastMessageTime,
+                  unreadCount: conv.unreadCount,
+                  isOnline: conv.isOnline,
+                }}
+              />
+              {idx < filtered.length - 1 && <ConversationDivider />}
             </div>
           ))}
         </div>

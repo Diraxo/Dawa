@@ -1,4 +1,4 @@
-import { useAuth, useSignIn, useSignUp, useSSO } from '@clerk/clerk-expo'
+import { useAuth, useSignIn, useSSO } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
@@ -44,10 +44,9 @@ export default function SignInScreen() {
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage } = useAppStore()
   const { isLoaded, signIn, setActive } = useSignIn()
-  const { signUp } = useSignUp()
   const { startSSOFlow } = useSSO()
 
-  const { userRole: localRole } = useAuthStore()
+  const { userRole: localRole, setUserRole } = useAuthStore()
 
   const [langDropdown, setLangDropdown] = useState(false)
   const currentLang =
@@ -79,9 +78,15 @@ export default function SignInScreen() {
       const token = await getToken()
       const client = token ? getAuthClient(token) : supabase
       const { data } = await client.from('users').select('role').eq('clerk_id', clerkId).single()
-      if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
-      else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(auth)/role' as never)
+      if (data?.role === 'doctor') {
+        setUserRole('doctor')
+        router.replace('/(doctor)/(tabs)/home' as never)
+      } else if (data?.role === 'patient') {
+        setUserRole('patient')
+        router.replace('/(patient)/(tabs)/home' as never)
+      } else {
+        router.replace('/(auth)/role' as never)
+      }
     } catch {
       if (localRole === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
       else if (localRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
@@ -89,7 +94,7 @@ export default function SignInScreen() {
     } finally {
       redirectingRef.current = false
     }
-  }, [router, localRole, getToken])
+  }, [router, localRole, getToken, setUserRole])
 
   // Clear form every time this screen comes into focus (prevents OS autofill persistence)
   useFocusEffect(
@@ -113,12 +118,14 @@ export default function SignInScreen() {
     }, [isSignedIn, userId, checkRoleAndRedirect])
   )
 
-  // ── Fires after setActive completes (SSO or fallback for email sign-in) ──────────
+  // ── Fires whenever Clerk establishes a session — covers all paths: ────────────
+  // email sign-in, SSO setActive, and Android edge cases where startSSOFlow
+  // returns null but Clerk still processes the session via the deep-link callback.
+  // checkRoleAndRedirect's own redirectingRef prevents concurrent duplicate calls.
   useEffect(() => {
-    if (isSignedIn && userId && intendingSignInRef.current) {
-      intendingSignInRef.current = false
-      checkRoleAndRedirect(userId)
-    }
+    if (!isSignedIn || !userId) return
+    intendingSignInRef.current = false
+    checkRoleAndRedirect(userId)
   }, [isSignedIn, userId, checkRoleAndRedirect])
 
   // ── Email + Password sign-in via Clerk ────────────────────────────────────
@@ -137,18 +144,15 @@ export default function SignInScreen() {
       })
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive!({ session: result.createdSessionId })
-        // Get token immediately — Clerk session is active at SDK level after setActive,
-        // so getToken() works before React re-renders.
         const clerkId = result.createdUserId
-        const token = await getToken()
-        if (clerkId && token) {
+        if (clerkId) {
           await checkRoleAndRedirect(clerkId)
-        } else {
-          // Fallback: let useEffect handle redirect once isSignedIn/userId updates
-          intendingSignInRef.current = true
         }
+        // If clerkId is null, the useEffect handles redirect once isSignedIn/userId update
+      } else if (result.status === 'needs_second_factor') {
+        setGlobalError('Two-step verification is required for this account. Please sign in via the web app to complete setup.')
       } else {
-        setGlobalError('Incorrect email or password. Please try again.')
+        setGlobalError('Sign-in could not be completed. Please try again or use Google/Facebook sign-in.')
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
@@ -156,7 +160,7 @@ export default function SignInScreen() {
       if (code === 'form_identifier_not_found') {
         setGlobalError('No account found with this email. Please sign up first.')
       } else if (code === 'form_password_incorrect') {
-        setPasswordError('Incorrect password. Please try again.')
+        setPasswordError('Incorrect password. If you signed up with Google, tap "Continue with Google" below.')
       } else if (code === 'too_many_requests') {
         setGlobalError('Too many failed attempts. Please try again later.')
       } else if (code === 'session_exists') {
@@ -187,52 +191,31 @@ export default function SignInScreen() {
         if (authUrl) { window.location.href = authUrl.toString(); return }
         setGlobalError('Google sign-in failed. Please try again.')
       } else {
-        if (!signIn) return
         const redirectUrl = Linking.createURL('/oauth-native-callback')
-        // Manually implement SSO flow so we can pass oidcPrompt: 'select_account'
-        // to force Google to show the account picker instead of auto-selecting the last account
-        await (signIn as any).create({ strategy: 'oauth_google', redirectUrl, oidcPrompt: 'select_account' })
-        const { externalVerificationRedirectURL } = signIn.firstFactorVerification
-        if (!externalVerificationRedirectURL) {
-          setGlobalError('Google sign-in failed. Please try again.')
-          return
-        }
-        const authSessionResult = await WebBrowser.openAuthSessionAsync(
-          externalVerificationRedirectURL.toString(),
-          redirectUrl
-        )
-        if (authSessionResult.type !== 'success' || !authSessionResult.url) {
+        const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
+        if (createdSessionId && ssoSetActive) {
+          await ssoSetActive({ session: createdSessionId })
+        } else {
           intendingSignInRef.current = false
-          return
-        }
-        const urlParams = new URL(authSessionResult.url).searchParams
-        const rotatingTokenNonce = urlParams.get('rotating_token_nonce') ?? ''
-        await signIn.reload({ rotatingTokenNonce })
-        const needsSignUp = signIn.firstFactorVerification.status === 'transferable'
-        if (needsSignUp && signUp) {
-          await signUp.create({ transfer: true })
-          if (signUp.createdSessionId && setActive) {
-            await setActive({ session: signUp.createdSessionId })
-          }
-        } else if (signIn.createdSessionId && setActive) {
-          await setActive({ session: signIn.createdSessionId })
         }
       }
     } catch (err: any) {
+      console.error('[Google SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
         if (userId) checkRoleAndRedirect(userId)
         else setGlobalError('Session error. Please try again.')
       } else if (code !== 'oauth_access_denied') {
         intendingSignInRef.current = false
-        setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
+        const msg = err?.errors?.[0]?.message ?? err?.message ?? 'Google sign-in failed. Please try again.'
+        setGlobalError(msg)
       } else {
         intendingSignInRef.current = false
       }
     } finally {
       setGoogleLoading(false)
     }
-  }, [googleLoading, signIn, signUp, setActive, router, userId, checkRoleAndRedirect])
+  }, [googleLoading, startSSOFlow, signIn, router, userId, checkRoleAndRedirect])
 
   // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
   const handleFacebook = useCallback(async () => {
@@ -253,16 +236,20 @@ export default function SignInScreen() {
         const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
         if (createdSessionId && ssoSetActive) {
           await ssoSetActive({ session: createdSessionId })
+        } else {
+          intendingSignInRef.current = false
         }
       }
     } catch (err: any) {
+      console.error('[Facebook SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
         if (userId) checkRoleAndRedirect(userId)
         else setGlobalError('Session error. Please try again.')
       } else if (code !== 'oauth_access_denied') {
         intendingSignInRef.current = false
-        setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
+        const msg = err?.errors?.[0]?.message ?? err?.message ?? 'Facebook sign-in failed. Please try again.'
+        setGlobalError(msg)
       } else {
         intendingSignInRef.current = false
       }
@@ -357,7 +344,7 @@ export default function SignInScreen() {
                 placeholder={t('typeEmail')}
                 placeholderTextColor="#9CA3AF"
                 value={email}
-                onChangeText={(v) => { setEmail(v); setEmailError('') }}
+                onChangeText={(v) => { setEmail(v.toLowerCase()); setEmailError('') }}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}

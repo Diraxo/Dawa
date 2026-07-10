@@ -2,23 +2,33 @@ import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { useFocusEffect, useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useRouter } from 'expo-router'
-import { useCallback, useRef, useState } from 'react'
+import { useLocalSearchParams, useRouter } from 'expo-router'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FlatList,
+  Image,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { RescheduleModal } from '@/components/ui/RescheduleModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
+
+interface FollowupReminder {
+  id: string
+  remind_at: string
+  message: string | null
+  consultation_id: string
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,11 +42,14 @@ interface Appointment {
   doctorSpecialty: string
   doctorHospital: string
   doctorIsOnline: boolean
+  doctorPhotoUrl: string | null
   type: ConsultationType
   scheduledAt: string
   dateLabel: string
   timeLabel: string
-  status: 'pending' | 'active' | 'completed' | 'cancelled'
+  status: 'pending' | 'scheduled' | 'active' | 'completed' | 'cancelled'
+  amount: number
+  isOnDemand: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,7 +77,13 @@ function isOnDemandRow(row: any): boolean {
 
 function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Appointment {
   const dp = row.doctor_profiles as any
+  // scheduledAt drives sorting, join params, and reschedule — keep it exactly
+  // as before (the booked slot time), untouched by the display-timestamp fix below.
   const iso = row.scheduled_at ?? row.created_at ?? new Date().toISOString()
+  // The card's displayed date/time uses the same fallback chain as the
+  // doctor-side and website surfaces (started_at first) so both roles show
+  // the identical timestamp for the identical consultation.
+  const displayIso = row.started_at ?? row.scheduled_at ?? row.created_at ?? new Date().toISOString()
   return {
     id: row.id,
     doctorId: dp?.id ?? '',
@@ -72,11 +91,14 @@ function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Ap
     doctorSpecialty: dp?.specialty ?? 'General',
     doctorHospital: dp?.hospital_name ?? '',
     doctorIsOnline: dp?.is_online ?? false,
+    doctorPhotoUrl: dp?.users?.profile_photo_url ?? null,
     type: (row.type ?? 'chat') as ConsultationType,
     scheduledAt: iso,
-    dateLabel: dateLbl(iso, todayLabel, tomorrowLabel),
-    timeLabel: timeLbl(iso),
+    dateLabel: dateLbl(displayIso, todayLabel, tomorrowLabel),
+    timeLabel: timeLbl(displayIso),
     status: (row.status ?? 'pending') as Appointment['status'],
+    amount: Number(row.patient_amount) || 0,
+    isOnDemand: isOnDemandRow(row),
   }
 }
 
@@ -86,6 +108,12 @@ const TYPE_ICONS: Record<ConsultationType, string> = {
   chat: 'chatbubble-ellipses',
   phone: 'call',
   video: 'videocam',
+}
+
+const TYPE_COLORS: Record<ConsultationType, string> = {
+  chat: colors.tealGreen,
+  phone: colors.careBlue,
+  video: '#7C3AED',
 }
 
 // Deterministic avatar color from name initial
@@ -100,7 +128,7 @@ function avatarColor(name: string): string {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function DoctorAvatar({ name, isOnline }: { name: string; isOnline: boolean }) {
+function DoctorAvatar({ name, isOnline, photoUrl }: { name: string; isOnline: boolean; photoUrl?: string | null }) {
   const initials = name
     .replace('Dr. ', '')
     .split(' ')
@@ -111,9 +139,13 @@ function DoctorAvatar({ name, isOnline }: { name: string; isOnline: boolean }) {
 
   return (
     <View style={avatarStyles.wrapper}>
-      <View style={[avatarStyles.circle, { backgroundColor: avatarColor(name) }]}>
-        <Text style={avatarStyles.initials}>{initials}</Text>
-      </View>
+      {photoUrl ? (
+        <Image source={{ uri: photoUrl }} style={avatarStyles.circle} />
+      ) : (
+        <View style={[avatarStyles.circle, { backgroundColor: avatarColor(name) }]}>
+          <Text style={avatarStyles.initials}>{initials}</Text>
+        </View>
+      )}
       {isOnline && <View style={avatarStyles.onlineDot} />}
     </View>
   )
@@ -155,9 +187,13 @@ const avatarStyles = StyleSheet.create({
 function UpcomingCard({
   item,
   onJoin,
+  onReschedule,
+  onWaitingRoom,
 }: {
   item: Appointment
   onJoin: (item: Appointment) => void
+  onReschedule: (item: Appointment) => void
+  onWaitingRoom: (item: Appointment) => void
 }) {
   const { t } = useTranslation()
   const icon = TYPE_ICONS[item.type]
@@ -168,19 +204,22 @@ function UpcomingCard({
     <View style={cardStyles.card}>
       {/* Top row: avatar + info + date */}
       <View style={cardStyles.topRow}>
-        <DoctorAvatar name={item.doctorName} isOnline={item.doctorIsOnline} />
+        <DoctorAvatar name={item.doctorName} isOnline={item.doctorIsOnline} photoUrl={item.doctorPhotoUrl} />
 
         <View style={cardStyles.info}>
           <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
           <Text style={cardStyles.hospital}>{item.doctorHospital}</Text>
           <Text style={cardStyles.specialty}>{item.doctorSpecialty}</Text>
+          {item.amount > 0 && <Text style={cardStyles.priceText}>ETB {item.amount.toLocaleString()}</Text>}
         </View>
 
         <View style={cardStyles.dateBlock}>
           <Text style={cardStyles.dateLabel}>{item.dateLabel}</Text>
           <Text style={cardStyles.timeLabel}>{item.timeLabel}</Text>
           <View style={cardStyles.typeBadge}>
-            <Ionicons name={icon as any} size={12} color="#6B7280" />
+            <View style={[cardStyles.typeIconChip, { backgroundColor: `${TYPE_COLORS[item.type]}18` }]}>
+              <Ionicons name={icon as any} size={13} color={TYPE_COLORS[item.type]} />
+            </View>
             <Text style={cardStyles.typeText}>{typeLabel}</Text>
           </View>
         </View>
@@ -203,9 +242,37 @@ function UpcomingCard({
           </LinearGradient>
         </Pressable>
       ) : (
-        <View style={cardStyles.pendingRow}>
-          <Ionicons name="time-outline" size={15} color="#6B7280" />
-          <Text style={cardStyles.pendingText}>Awaiting doctor's confirmation</Text>
+        <View style={{ gap: 8 }}>
+          <View style={cardStyles.pendingRow}>
+            <Ionicons name="time-outline" size={15} color="#6B7280" />
+            <Text style={cardStyles.pendingText}>Awaiting doctor's confirmation</Text>
+          </View>
+          {item.status === 'pending' && !item.isOnDemand ? (
+            <View style={cardStyles.pastActionsRow}>
+              <Pressable
+                style={({ pressed }) => [cardStyles.rescheduleBtn, { flex: 1 }, pressed && { opacity: 0.75 }]}
+                onPress={() => onWaitingRoom(item)}
+              >
+                <Ionicons name="hourglass-outline" size={15} color={colors.careBlue} />
+                <Text style={cardStyles.rescheduleBtnText}>Waiting Room</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [cardStyles.rescheduleBtn, { flex: 1 }, pressed && { opacity: 0.75 }]}
+                onPress={() => onReschedule(item)}
+              >
+                <Ionicons name="calendar-outline" size={15} color={colors.careBlue} />
+                <Text style={cardStyles.rescheduleBtnText}>Reschedule</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              style={({ pressed }) => [cardStyles.rescheduleBtn, pressed && { opacity: 0.75 }]}
+              onPress={() => onReschedule(item)}
+            >
+              <Ionicons name="calendar-outline" size={15} color={colors.careBlue} />
+              <Text style={cardStyles.rescheduleBtnText}>Reschedule</Text>
+            </Pressable>
+          )}
         </View>
       )}
     </View>
@@ -230,19 +297,22 @@ function PastCard({
     <View style={[cardStyles.card, cardStyles.cardPast]}>
       {/* Top row */}
       <View style={cardStyles.topRow}>
-        <DoctorAvatar name={item.doctorName} isOnline={false} />
+        <DoctorAvatar name={item.doctorName} isOnline={false} photoUrl={item.doctorPhotoUrl} />
 
         <View style={cardStyles.info}>
           <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
           <Text style={cardStyles.hospital}>{item.doctorHospital}</Text>
           <Text style={cardStyles.specialty}>{item.doctorSpecialty}</Text>
+          {item.amount > 0 && <Text style={cardStyles.priceText}>ETB {item.amount.toLocaleString()}</Text>}
         </View>
 
         <View style={cardStyles.dateBlock}>
           <Text style={cardStyles.dateLabel}>{item.dateLabel}</Text>
           <Text style={cardStyles.timeLabelPast}>{item.timeLabel}</Text>
           <View style={cardStyles.typeBadge}>
-            <Ionicons name={icon as any} size={12} color="#9CA3AF" />
+            <View style={[cardStyles.typeIconChip, { backgroundColor: colors.cloudGrey }]}>
+              <Ionicons name={icon as any} size={13} color="#9CA3AF" />
+            </View>
             <Text style={[cardStyles.typeText, cardStyles.typeTextPast]}>{typeLabel}</Text>
           </View>
         </View>
@@ -316,6 +386,13 @@ const cardStyles = StyleSheet.create({
     color: colors.careBlue,
     lineHeight: 17,
   },
+  priceText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 12,
+    color: colors.inkBlack,
+    lineHeight: 17,
+    marginTop: 2,
+  },
   dateBlock: {
     alignItems: 'flex-end',
     gap: 2,
@@ -340,8 +417,15 @@ const cardStyles = StyleSheet.create({
   typeBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    marginTop: 2,
+    gap: 6,
+    marginTop: 4,
+  },
+  typeIconChip: {
+    width: 22,
+    height: 22,
+    borderRadius: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   typeText: {
     fontFamily: fonts.medium,
@@ -431,6 +515,12 @@ const cardStyles = StyleSheet.create({
     fontSize: 14,
     color: '#6B7280',
   },
+  rescheduleBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    height: 40, borderRadius: 12, borderWidth: 1.5, borderColor: colors.careBlue,
+    backgroundColor: '#EFF6FF',
+  },
+  rescheduleBtnText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.careBlue },
 })
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
@@ -493,62 +583,110 @@ export default function AppointmentsScreen() {
   const { t } = useTranslation()
   const router = useRouter()
   const { getToken, userId: clerkUserId } = useAuth()
+  const { tab: tabParam } = useLocalSearchParams<{ tab?: string }>()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
-  const [activeTab, setActiveTab] = useState<AppointmentTab>('upcoming')
+  const [activeTab, setActiveTab] = useState<AppointmentTab>(tabParam === 'past' ? 'past' : 'upcoming')
   const [upcoming, setUpcoming] = useState<Appointment[]>([])
   const [past, setPast] = useState<Appointment[]>([])
+  const [reminders, setReminders] = useState<FollowupReminder[]>([])
+
+  // This tab screen stays mounted across tab switches, so a plain useState
+  // initializer only wins on first-ever mount — re-navigating here with a
+  // new ?tab= param (e.g. from consultation-summary after submitting a
+  // review) needs an explicit sync or the already-mounted screen ignores it.
+  useEffect(() => {
+    if (tabParam === 'past' || tabParam === 'upcoming') setActiveTab(tabParam)
+  }, [tabParam])
+
+  const loadAppointments = useCallback(async (client: ReturnType<typeof getAuthClient>, patientId: string) => {
+    const [{ data }, { data: reminderData }] = await Promise.all([
+      client
+        .from('consultations')
+        .select(`
+          id, type, status, payment_status, scheduled_at, started_at, created_at, patient_amount,
+          doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(full_name, profile_photo_url))
+        `)
+        .eq('patient_id', patientId)
+        .order('scheduled_at', { ascending: false }),
+      client
+        .from('followup_reminders')
+        .select('id, remind_at, message, consultation_id')
+        .eq('patient_id', patientId)
+        .eq('sent', false)
+        .gte('remind_at', new Date().toISOString())
+        .order('remind_at', { ascending: true })
+        .limit(3),
+    ])
+    if (reminderData) setReminders(reminderData as FollowupReminder[])
+    if (!data) return
+
+    const now = new Date()
+    const todayLabel = t('today')
+    const tomorrowLabel = t('tomorrow')
+    const mapAppt = (row: any) => mapAppointment(row, todayLabel, tomorrowLabel)
+
+    // Upcoming: active, scheduled (not yet activated), OR legacy paid-pending scheduled (future only)
+    // Sorted nearest-first (ascending) — the base query orders descending for
+    // "past" to show most-recent-first, so upcoming needs its own re-sort.
+    setUpcoming(
+      data.filter(r => {
+        if (r.status === 'active') return true
+        if (r.status === 'scheduled') return true
+        if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
+          return new Date(r.scheduled_at) > now
+        }
+        return false
+      }).map(mapAppt).sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
+    )
+
+    // Past: completed, or cancelled ONLY if payment was already confirmed
+    // (payment-failure cancellations have payment_status='pending' — hide them)
+    setPast(
+      data.filter(r => {
+        if (r.status === 'completed') return true
+        if (r.status === 'cancelled' && r.payment_status === 'paid') return true
+        if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
+          return new Date(r.scheduled_at) <= now
+        }
+        return false
+      }).map(mapAppt)
+    )
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t])
 
   useFocusEffect(
     useCallback(() => {
       let cancelled = false
+      let channel: ReturnType<typeof supabase.channel> | null = null
+
       getToken().then(async token => {
         if (!token || cancelled) return
         const client = getAuthClient(token)
         const { data: me } = await client.from('users').select('id').eq('clerk_id', clerkUserId).maybeSingle()
         if (!me || cancelled) return
-        client
-          .from('consultations')
-          .select(`
-            id, type, status, payment_status, scheduled_at, created_at,
-            doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(full_name))
-          `)
-          .eq('patient_id', me.id)
-          .order('scheduled_at', { ascending: false })
-          .then(({ data }) => {
-            if (!data || cancelled) return
-            const now = new Date()
-            const todayLabel = t('today')
-            const tomorrowLabel = t('tomorrow')
-            const mapAppt = (row: any) => mapAppointment(row, todayLabel, tomorrowLabel)
+        await loadAppointments(client, me.id)
+        if (cancelled) return
 
-            // Upcoming: active OR paid-pending scheduled (future only)
-            setUpcoming(
-              data.filter(r => {
-                if (r.status === 'active') return true
-                if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
-                  return new Date(r.scheduled_at) > now
-                }
-                return false
-              }).map(mapAppt)
-            )
-
-            // Past: completed, or cancelled ONLY if payment was already confirmed
-            // (payment-failure cancellations have payment_status='pending' — hide them)
-            setPast(
-              data.filter(r => {
-                if (r.status === 'completed') return true
-                if (r.status === 'cancelled' && r.payment_status === 'paid') return true
-                if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
-                  return new Date(r.scheduled_at) <= now
-                }
-                return false
-              }).map(mapAppt)
-            )
-          })
+        // Live-refresh while the tab is focused (new scheduled booking,
+        // reschedule, doctor accepting/declining, cancellation) — the
+        // useFocusEffect re-fetch above only catches changes made while this
+        // tab was NOT focused.
+        channel = supabase
+          .channel(`patient-appointments-${me.id}`)
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${me.id}` },
+            async () => {
+              const freshToken = await getToken()
+              if (!freshToken) return
+              await loadAppointments(getAuthClient(freshToken), me.id)
+            }
+          )
+          .subscribe()
       })
-      return () => { cancelled = true }
-    }, [t])
+      return () => { cancelled = true; if (channel) supabase.removeChannel(channel) }
+    }, [getToken, clerkUserId, loadAppointments])
   )
 
   const list = activeTab === 'upcoming' ? upcoming : past
@@ -588,6 +726,24 @@ export default function AppointmentsScreen() {
       pathname: '/(patient)/doctor-profile',
       params: { id: item.doctorId },
     })
+  }
+
+  const handleWaitingRoom = (item: Appointment) => {
+    router.push({
+      pathname: '/(patient)/waiting-room' as any,
+      params: {
+        consultationId: item.id,
+        doctorId: item.doctorId,
+        doctorName: item.doctorName,
+        consultationType: item.type,
+      },
+    })
+  }
+
+  const [rescheduleTarget, setRescheduleTarget] = useState<Appointment | null>(null)
+
+  const handleReschedule = (item: Appointment) => {
+    setRescheduleTarget(item)
   }
 
   return (
@@ -642,6 +798,39 @@ export default function AppointmentsScreen() {
         </View>
       </View>
 
+      {/* ── Follow-up Reminders Banner ── */}
+      {reminders.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: 20, gap: 10, paddingBottom: 4 }}
+          style={{ maxHeight: 80, marginBottom: 4 }}
+          accessible={true}
+          accessibilityLabel="Upcoming follow-up reminders"
+        >
+          {reminders.map(r => {
+            const dt = new Date(r.remind_at)
+            const dateStr = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+            const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+            return (
+              <Pressable
+                key={r.id}
+                style={reminderStyles.chip}
+                onPress={() => router.push({ pathname: '/(patient)/consultation-summary' as any, params: { consultationId: r.consultation_id } })}
+                accessibilityRole="button"
+                accessibilityLabel={`Follow-up reminder: ${r.message ?? 'scheduled reminder'} on ${dateStr} at ${timeStr}`}
+              >
+                <Ionicons name="notifications" size={16} color={colors.careBlue} style={reminderStyles.chipIcon} />
+                <View>
+                  <Text style={reminderStyles.chipMsg} numberOfLines={1}>{r.message ?? 'Follow-up reminder'}</Text>
+                  <Text style={reminderStyles.chipDate}>{dateStr} · {timeStr}</Text>
+                </View>
+              </Pressable>
+            )
+          })}
+        </ScrollView>
+      )}
+
       {/* ── List ── */}
       <FlatList
         ref={listRef}
@@ -652,7 +841,7 @@ export default function AppointmentsScreen() {
         ListEmptyComponent={<EmptyState tab={activeTab} />}
         renderItem={({ item }) =>
           activeTab === 'upcoming' ? (
-            <UpcomingCard item={item} onJoin={handleJoin} />
+            <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onWaitingRoom={handleWaitingRoom} />
           ) : (
             <PastCard
               item={item}
@@ -662,9 +851,33 @@ export default function AppointmentsScreen() {
           )
         }
       />
+
+      <RescheduleModal
+        visible={!!rescheduleTarget}
+        appointment={rescheduleTarget ? {
+          id: rescheduleTarget.id,
+          doctorId: rescheduleTarget.doctorId,
+          doctorName: rescheduleTarget.doctorName,
+          type: rescheduleTarget.type,
+          scheduledAt: rescheduleTarget.scheduledAt,
+        } : null}
+        onClose={() => setRescheduleTarget(null)}
+        onRescheduled={() => setRescheduleTarget(null)}
+      />
     </SafeAreaView>
   )
 }
+
+const reminderStyles = StyleSheet.create({
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#E6F9F7', borderWidth: 1, borderColor: colors.tealGreen,
+    borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, maxWidth: 260,
+  },
+  chipIcon: { fontSize: 16 },
+  chipMsg: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.inkBlack, maxWidth: 180 },
+  chipDate: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginTop: 1 },
+})
 
 const styles = StyleSheet.create({
   safe: {

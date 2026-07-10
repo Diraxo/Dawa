@@ -29,11 +29,12 @@ export async function fetchAgoraToken(
   return token as string
 }
 
+// djb2 hash — must match lib/agora.ts and carehub-web/lib/agora.ts exactly
 export function uidFromString(str: string): number {
   let h = 5381
   for (let i = 0; i < str.length; i++) {
     h = ((h << 5) + h) ^ str.charCodeAt(i)
     h = h >>> 0
   }
-  return (h % 999998) + 1
+  return h === 0 ? 1 : h
 }

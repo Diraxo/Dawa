@@ -86,7 +86,7 @@ export default function DoctorAboutDawaScreen() {
             { step: '1', text: 'Complete your profile and upload your medical license and government ID.' },
             { step: '2', text: 'Wait for admin approval — usually within 24–48 hours.' },
             { step: '3', text: 'Go online from your home screen to start receiving consultation requests.' },
-            { step: '4', text: 'Accept or decline each request within 30 seconds.' },
+            { step: '4', text: 'Accept or decline each request as soon as you can.' },
             { step: '5', text: 'Complete the session and fill in consultation notes for the patient.' },
           ].map((item) => (
             <View key={item.step} style={styles.stepRow}>

@@ -18,8 +18,9 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import Constants from 'expo-constants'
+import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { shadow } from '@/lib/shadow'
-import { supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 import { useTranslation } from 'react-i18next'
@@ -45,7 +46,7 @@ interface MenuItem {
 export default function ProfileScreen() {
   const { t } = useTranslation()
   const { user } = useUser()
-  const { signOut } = useAuth()
+  const { signOut, getToken } = useAuth()
   const router = useRouter()
   const { selectedLanguage } = useAppStore()
   const { clearAuth, disconnectStream } = useAuthStore()
@@ -61,6 +62,15 @@ export default function ProfileScreen() {
   const [showDeleteAlert, setShowDeleteAlert] = useState(false)
   const [showDeleteConfirmAlert, setShowDeleteConfirmAlert] = useState(false)
   const [showDeleteErrorAlert, setShowDeleteErrorAlert] = useState(false)
+
+  // Photo is uploaded to Supabase Storage (edit-personal-info), not Clerk —
+  // read the DB value so a custom-uploaded photo actually shows here, falling
+  // back to Clerk's imageUrl only when the DB has none. Stays live via
+  // Realtime so an edit made elsewhere (or on another device) shows up
+  // without needing to leave and revisit this tab.
+  const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
+
+  const avatarUri = dbPhotoUrl ?? user?.imageUrl ?? null
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -87,8 +97,20 @@ export default function ProfileScreen() {
   const permanentlyDelete = async () => {
     setShowDeleteConfirmAlert(false)
     try {
+      // Best-effort avatar cleanup — must never block account deletion.
+      if (user?.id) {
+        const token = await getToken().catch(() => null)
+        if (token) {
+          await getAuthClient(token)
+            .storage.from('profile-photos')
+            .remove([`${user.id}/avatar.jpg`])
+            .catch(() => {})
+        }
+      }
       await supabase.from('users').delete().eq('clerk_id', user?.id)
       await user?.delete()
+      await disconnectStream()
+      clearAuth()
       router.replace('/(auth)/sign-up')
     } catch {
       setShowDeleteErrorAlert(true)
@@ -109,6 +131,12 @@ export default function ProfileScreen() {
       label: t('medicalRecords'),
       subtitle: t('viewHistoryDocs'),
       onPress: () => router.push('/(patient)/medical-records'),
+    },
+    {
+      icon: 'download-outline',
+      label: 'Export My Data',
+      subtitle: 'Download consultation history & records',
+      onPress: () => router.push('/(patient)/data-export'),
     },
     {
       icon: 'card-outline',
@@ -231,8 +259,8 @@ export default function ProfileScreen() {
             style={styles.avatarWrap}
             onPress={() => router.push('/(patient)/edit-personal-info')}
           >
-            {user?.imageUrl ? (
-              <Image source={{ uri: user.imageUrl }} style={styles.avatar} />
+            {avatarUri ? (
+              <Image source={{ uri: avatarUri }} style={styles.avatar} />
             ) : (
               <View style={styles.avatarFallback}>
                 <Text style={styles.avatarInitial}>{initial}</Text>

@@ -4,8 +4,18 @@ import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { useAuth, useUser } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
+import { MessageCircle, Phone, Video, Zap, Calendar, Wallet, Check } from 'lucide-react'
+import {
+  DAY_NAMES,
+  SLOT_DURATION_MINS,
+  isSlotPast,
+  getAvailableSlots,
+  getNextDays,
+  parseScheduledAt,
+} from '@/lib/slotGeneration'
 
 interface DoctorProfile {
   id: string
@@ -27,67 +37,24 @@ interface ActiveCredit {
   creditAmount:         number
 }
 
-const TYPE_META: Record<ConsultType, { icon: string; label: string; priceKey: keyof DoctorProfile }> = {
-  chat:  { icon: '💬', label: 'Chat Consultation',  priceKey: 'chat_price' },
-  phone: { icon: '📞', label: 'Phone Call',          priceKey: 'phone_price' },
-  video: { icon: '🎥', label: 'Video Call',          priceKey: 'video_price' },
+const TYPE_META: Record<ConsultType, { icon: typeof MessageCircle; label: string; priceKey: keyof DoctorProfile }> = {
+  chat:  { icon: MessageCircle, label: 'Chat Consultation',  priceKey: 'chat_price' },
+  phone: { icon: Phone,         label: 'Phone Call',          priceKey: 'phone_price' },
+  video: { icon: Video,         label: 'Video Call',          priceKey: 'video_price' },
 }
 
-const PLATFORM_FEE_PERCENT = 0.2
-
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-function parseTimeMins(t: string): number {
-  const [timePart, meridiem] = t.split(' ')
-  const [h, m] = timePart.split(':').map(Number)
-  let hour = h
-  if (meridiem === 'PM' && h !== 12) hour += 12
-  if (meridiem === 'AM' && h === 12) hour = 0
-  return hour * 60 + m
-}
-
-function formatTimeMins(totalMins: number): string {
-  const h24 = Math.floor(totalMins / 60)
-  const m = totalMins % 60
-  const meridiem = h24 >= 12 ? 'PM' : 'AM'
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
-  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
-}
-
-function getAvailableSlots(availability: Record<string, unknown> | null, dayValue: string): string[] {
-  if (!availability) return []
-  const dayName = DAY_NAMES[new Date(dayValue + 'T12:00:00').getDay()]
-  const cfg = availability[dayName] as { enabled?: boolean; startTime?: string; endTime?: string } | undefined
-  if (!cfg?.enabled || !cfg.startTime || !cfg.endTime) return []
-  const start = parseTimeMins(cfg.startTime)
-  const end = parseTimeMins(cfg.endTime)
-  const slots: string[] = []
-  for (let t = start; t < end; t += 60) slots.push(formatTimeMins(t))
-  return slots
-}
-
-function getNextDays(count: number) {
-  const days = []
-  const now = new Date()
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now)
-    d.setDate(now.getDate() + i)
-    days.push({
-      label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
-      value: d.toISOString().split('T')[0],
-    })
-  }
-  return days
-}
-
-function parseScheduledAt(dayValue: string, timeSlot: string): string {
-  const [timePart, meridiem] = timeSlot.split(' ')
-  const [hourStr, minStr] = timePart.split(':')
-  let hour = parseInt(hourStr, 10)
-  const min = parseInt(minStr, 10)
-  if (meridiem === 'PM' && hour !== 12) hour += 12
-  if (meridiem === 'AM' && hour === 12) hour = 0
-  return new Date(`${dayValue}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`).toISOString()
+// Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
+// supabase-js calls without an abortSignal) — without this, a stalled request
+// left the booking button stuck on its loading state forever with no error
+// and no way to recover.
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      err => { clearTimeout(timer); reject(err) },
+    )
+  })
 }
 
 export default function BookingPage() {
@@ -100,27 +67,140 @@ export default function BookingPage() {
   const [step, setStep] = useState<Step>(1)
   const [doctor, setDoctor] = useState<DoctorProfile | null>(null)
   const [selectedType, setSelectedType] = useState<ConsultType>(initialType)
-  const [scheduleMode, setScheduleMode] = useState<'now' | 'schedule'>('now')
+  // Starts unset (not a hardcoded 'now' literal) so the very first render of
+  // the timing step can never show the wrong option selected — see
+  // `effectiveScheduleMode` below, which derives the real default from
+  // canStartNow until the patient makes an explicit choice.
+  const [scheduleMode, setScheduleMode] = useState<'now' | 'schedule' | null>(null)
   const [selectedDay, setSelectedDay] = useState(0)
   const [selectedTime, setSelectedTime] = useState('')
+  const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [booking, setBooking] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [activeCredit, setActiveCredit] = useState<ActiveCredit | null>(null)
   const [creditLoading, setCreditLoading] = useState(false)
+  const [commissionRate, setCommissionRate] = useState(20)
+  const [doctorBusy, setDoctorBusy] = useState(false)
   const days = getNextDays(7)
 
-  useEffect(() => {
+  // Fetches the doctor profile. Called on mount, then once more when the
+  // realtime channel below reaches SUBSCRIBED — reconciles an is_online /
+  // availability change that fired during the join-latency window (before
+  // SUBSCRIBED), which would otherwise be lost forever. Passed through
+  // `reconcile` so this fetch can't revert a live update that already
+  // applied while it was in flight.
+  function loadDoctor() {
     supabase
       .from('doctor_profiles')
       .select('id, specialty, hospital_name, is_online, chat_price, phone_price, video_price, availability, user:users(full_name)')
       .eq('id', doctorId)
       .single()
       .then(({ data }) => {
-        setDoctor(data as unknown as DoctorProfile)
+        setDoctor(data ? reconcile(data as unknown as DoctorProfile) : null)
         setLoading(false)
       })
+  }
+
+  useEffect(() => {
+    loadDoctor()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctorId])
+
+  useEffect(() => {
+    supabase.rpc('get_commission_rate').then(({ data }) => {
+      if (typeof data === 'number') setCommissionRate(data)
+    })
+  }, [])
+
+  // Realtime: doctor online/offline status + availability → "Start Now" gate
+  // and slot list update live
+  const { reconcile } = useDoctorOnlineStatus((updatedId, fields) => {
+    if (updatedId !== doctorId) return
+    setDoctor(prev => prev ? { ...prev, is_online: fields.is_online, availability: fields.availability ?? prev.availability } : prev)
+  }, () => { loadDoctor() })
+
+  // Doctor-configured booking modes — default to true so existing profiles
+  // that never touched these toggles keep working as before.
+  const acceptOnDemand = (doctor?.availability as any)?.acceptOnDemand !== false
+  const acceptScheduled = (doctor?.availability as any)?.acceptScheduled !== false
+  const canStartNow = Boolean(doctor?.is_online) && acceptOnDemand && !doctorBusy
+
+  // The real default before the patient makes an explicit choice — derived
+  // from canStartNow on every render (not a one-time effect), so the timing
+  // step never paints a hardcoded 'now' that then has to visibly flip.
+  const effectiveScheduleMode: 'now' | 'schedule' = scheduleMode ?? (canStartNow ? 'now' : 'schedule')
+
+  // Fall back to scheduling if "Start Now" stops being valid while this
+  // screen is open (doctor goes offline, disables on-demand, or becomes busy).
+  useEffect(() => {
+    if (effectiveScheduleMode === 'now' && !canStartNow) setScheduleMode('schedule')
+  }, [canStartNow, effectiveScheduleMode])
+
+  // Doctor is BUSY when they already have an accepted/in-progress
+  // consultation. Checked via RPC (not a direct table read) so the patient
+  // never needs SELECT access to another patient's consultation row just to
+  // see a boolean. Polled while this screen is open.
+  async function checkDoctorBusy(doctorId: string) {
+    const { data } = await supabase.rpc('is_doctor_busy', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
+  useEffect(() => {
+    if (!doctorId) return
+    let cancelled = false
+    checkDoctorBusy(doctorId).then(busy => { if (!cancelled) setDoctorBusy(busy) })
+    const interval = setInterval(() => {
+      checkDoctorBusy(doctorId).then(busy => { if (!cancelled) setDoctorBusy(busy) })
+    }, 10_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [doctorId])
+
+  // Which of the currently-generated slots for the selected day are already
+  // booked. Checked per-slot via the is_slot_available RPC (SECURITY DEFINER
+  // — same reasoning as checkDoctorBusy above: a patient has no SELECT
+  // access to another patient's consultation/slot_lock rows, so this can't
+  // be a direct table read) rather than trusting only the post-submit
+  // SLOT_TAKEN error, which left already-booked slots looking selectable.
+  // Re-runs whenever the selected day (or the doctor's hours) changes.
+  useEffect(() => {
+    if (!doctorId || !doctor) { setBookedSlots(new Set()); return }
+    const dayValue = days[selectedDay]?.value
+    if (!dayValue) return
+    const slots = getAvailableSlots(doctor.availability ?? null, dayValue)
+    if (slots.length === 0) { setBookedSlots(new Set()); return }
+    let cancelled = false
+
+    const fetchBookedSlots = () => {
+      Promise.all(
+        slots.map(slot =>
+          supabase
+            .rpc('is_slot_available', { p_doctor_id: doctorId, p_slot_start: parseScheduledAt(dayValue, slot) })
+            .then(({ data }) => ({ slot, available: data !== false }))
+        )
+      ).then(results => {
+        if (cancelled) return
+        setBookedSlots(new Set(results.filter(r => !r.available).map(r => r.slot)))
+      })
+    }
+
+    fetchBookedSlots()
+
+    // Another patient booking/cancelling the same day while this page is
+    // already open must flip that slot's availability live — without this,
+    // only re-selecting the day picked it up.
+    const channel = supabase
+      .channel(`booking-slot-locks-${doctorId}-${dayValue}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctorId}` },
+        () => fetchBookedSlots()
+      )
+      .subscribe()
+
+    return () => { cancelled = true; supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doctorId, selectedDay, doctor?.availability])
 
   // Check for active credit when user reaches review/payment step
   useEffect(() => {
@@ -164,77 +244,154 @@ export default function BookingPage() {
   }, [step])
 
   async function initiateChapaPayment() {
-    if (scheduleMode === 'now' && doctor && !doctor.is_online) {
-      setPayError('This doctor is currently offline. Please schedule for a later time or choose another doctor.')
+    if (effectiveScheduleMode === 'now' && !canStartNow) {
+      setPayError(
+        doctor && !doctor.is_online
+          ? 'This doctor is currently offline. Please schedule for a later time or choose another doctor.'
+          : doctorBusy
+            ? 'Doctor is currently in another consultation. Please schedule for later or choose another doctor.'
+            : 'This doctor is not accepting on-demand consultations right now. Please schedule for a later time.'
+      )
+      return
+    }
+    if (effectiveScheduleMode === 'schedule' && !acceptScheduled) {
+      setPayError('This doctor is not accepting scheduled appointments right now.')
       return
     }
     setBooking(true)
     let createdConsultationId: string | null = null
     try {
-      const token = await getToken()
+      // Final busy re-check right before payment — the periodic poll above
+      // could be stale by up to 10s, and the patient must never be charged
+      // for an On-Demand consultation with a doctor who became busy in that
+      // window. book_appointment_slot() also enforces this server-side
+      // (DOCTOR_BUSY below) as the authoritative last-resort guard.
+      if (effectiveScheduleMode === 'now' && await checkDoctorBusy(doctorId)) {
+        setDoctorBusy(true)
+        setPayError('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+        setBooking(false)
+        return
+      }
+
+      const token = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
       if (!token || !user) throw new Error('Not authenticated')
 
       const client = getAuthClient(token)
-      const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+      const { data: userData } = await withTimeout(
+        client.from('users').select('id').eq('clerk_id', user.id).single(),
+        15000,
+        'Connection timed out. Please check your network and try again.',
+      )
       if (!userData) throw new Error('User profile not found')
 
       const price = doctor ? (doctor[TYPE_META[selectedType].priceKey] as number) : 0
-      const platformFee = Math.round(price * PLATFORM_FEE_PERCENT)
-      const doctorAmount = price - platformFee
 
-      const scheduledAt = scheduleMode === 'now'
+      const scheduledAt = effectiveScheduleMode === 'now'
         ? new Date().toISOString()
         : parseScheduledAt(days[selectedDay].value, selectedTime)
 
       const creditCoversAll = activeCredit !== null && price <= activeCredit.creditAmount
       const additionalRequired = activeCredit ? Math.max(0, price - activeCredit.creditAmount) : price
 
-      // 1. Create consultation record
-      const { data: consultation, error: consultErr } = await client.from('consultations').insert({
-        patient_id:      userData.id,
-        doctor_id:       doctorId,
-        type:            selectedType,
-        status:          'pending_payment',
-        scheduled_at:    scheduledAt,
-        patient_amount:  price,
-        doctor_amount:   doctorAmount,
-        platform_amount: platformFee,
-        payment_status:  'pending',
-      }).select('id').single()
+      // 1. Create consultation record — atomically claims the slot (prevents
+      //    two patients double-booking the same doctor at the same time)
+      const { data: newConsultationId, error: consultErr } = await withTimeout(
+        client.rpc('book_appointment_slot', {
+          p_patient_id:      userData.id,
+          p_doctor_id:       doctorId,
+          p_type:            selectedType,
+          p_slot_start:      scheduledAt,
+          p_slot_duration:   SLOT_DURATION_MINS,
+          p_patient_amount:  price,
+          p_is_on_demand:    effectiveScheduleMode === 'now',
+        }),
+        15000,
+        'Booking request timed out. Please check your connection and try again.',
+      )
 
-      if (consultErr || !consultation) throw new Error('Failed to create booking')
-      createdConsultationId = consultation.id
+      if (consultErr || !newConsultationId) {
+        const msg = consultErr?.message ?? ''
+        if (msg.includes('SLOT_TAKEN')) {
+          throw new Error('This time slot was just booked by someone else. Please pick another time.')
+        }
+        if (msg.includes('ON_DEMAND_DISABLED')) {
+          throw new Error('This doctor is not accepting on-demand consultations right now.')
+        }
+        if (msg.includes('DOCTOR_BUSY')) {
+          throw new Error('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+        }
+        if (msg.includes('PATIENT_BUSY')) {
+          throw new Error('You already have an active consultation. Please finish it before starting a new one.')
+        }
+        if (msg.includes('SCHEDULED_DISABLED')) {
+          throw new Error('This doctor is not accepting scheduled appointments right now.')
+        }
+        if (msg.includes('DAY_OFF')) {
+          throw new Error('This doctor is not available on the selected day.')
+        }
+        if (msg.includes('DATE_BLOCKED')) {
+          throw new Error('This doctor is unavailable on the selected date.')
+        }
+        if (msg.includes('OUTSIDE_HOURS')) {
+          throw new Error("This time is outside the doctor's working hours. Please pick another time.")
+        }
+        throw new Error('Failed to create booking')
+      }
+      createdConsultationId = newConsultationId as string
 
       const supabaseUrl    = process.env.NEXT_PUBLIC_SUPABASE_URL    ?? ''
       const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
       // 2. Full credit coverage — apply credit via edge function, skip Chapa
       if (creditCoversAll && activeCredit) {
-        const creditResp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
-          method: 'POST',
-          headers: {
-            'Content-Type':  'application/json',
-            'Authorization': `Bearer ${supabaseAnonKey}`,
-            'apikey':        supabaseAnonKey,
-          },
-          body: JSON.stringify({
-            patient_clerk_id:       user.id,
-            credit_consultation_id: activeCredit.creditConsultationId,
-            new_consultation_id:    consultation.id,
-          }),
-        })
+        const clerkToken = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+
+        // Bounded with a timeout — without it, a stalled network/edge-function
+        // call left this promise unresolved forever, stranding the UI on
+        // "Applying your credit…" with no way to recover (see the
+        // initialize-payment call below, which has always had this protection).
+        const creditController = new AbortController()
+        const creditTimeoutId = setTimeout(() => creditController.abort(), 20000)
+
+        let creditResp: Response
+        try {
+          creditResp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
+            method: 'POST',
+            signal: creditController.signal,
+            headers: {
+              'Content-Type':  'application/json',
+              'Authorization': `Bearer ${clerkToken}`,
+              'apikey':        supabaseAnonKey,
+            },
+            body: JSON.stringify({
+              credit_consultation_id: activeCredit.creditConsultationId,
+              new_consultation_id:    createdConsultationId,
+            }),
+          })
+        } catch (err: any) {
+          if (err?.name === 'AbortError') {
+            throw new Error('Applying your credit timed out. Please try again.')
+          }
+          throw err
+        } finally {
+          clearTimeout(creditTimeoutId)
+        }
         if (!creditResp.ok) {
           const d = await creditResp.json()
           throw new Error(d?.error ?? 'Failed to apply consultation credit')
         }
-        // Credit applied — navigate to waiting room
-        window.location.href = `/patient/waiting/${consultation.id}`
+        // "Now" bookings go straight to the waiting room. Scheduled bookings
+        // must not — apply-credit already left status='scheduled' for these,
+        // matching the Chapa path in patient/payment/return.
+        window.location.href = effectiveScheduleMode === 'now'
+          ? `/patient/waiting/${createdConsultationId}`
+          : '/patient/appointments'
         return
       }
 
       // 3. Partial credit — record credit_source_id via initialize-payment then pay difference
       // return_url — use actual origin so Chapa redirects back to the right domain
-      const returnUrl = `${window.location.origin}/patient/payment/return?consultation_id=${consultation.id}`
+      const returnUrl = `${window.location.origin}/patient/payment/return?consultation_id=${createdConsultationId}`
 
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 30000)
@@ -249,7 +406,7 @@ export default function BookingPage() {
             'apikey':        supabaseAnonKey,
           },
           body: JSON.stringify({
-            consultation_id:  consultation.id,
+            consultation_id:  createdConsultationId,
             amount:           activeCredit ? additionalRequired : price,
             email:            user.primaryEmailAddress?.emailAddress ?? '',
             first_name:       user.firstName  ?? 'Patient',
@@ -319,7 +476,8 @@ export default function BookingPage() {
   }
 
   const price = doctor[TYPE_META[selectedType].priceKey] as number
-  const platformFee = Math.round(price * PLATFORM_FEE_PERCENT)
+  const platformFee = Math.round(price * commissionRate / 100)
+  const SelectedTypeIcon = TYPE_META[selectedType].icon
 
   const STEPS = ['Type', 'Timing', 'Review', 'Payment']
 
@@ -344,7 +502,7 @@ export default function BookingPage() {
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
                 done ? 'bg-success text-white' : active ? 'bg-int-blue text-white' : 'bg-steel-grey text-ink-black/40'
               }`}>
-                {done ? '✓' : n}
+                {done ? <Check size={14} /> : n}
               </div>
               <span className={`text-[10px] font-semibold hidden sm:block ${active ? 'text-int-blue' : 'text-ink-black/40'}`}>{s}</span>
               {i < STEPS.length - 1 && <div className={`flex-1 h-0.5 ${done ? 'bg-success' : 'bg-steel-grey'}`} />}
@@ -366,7 +524,7 @@ export default function BookingPage() {
                   selectedType === key ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
                 }`}
               >
-                <span className="text-2xl">{meta.icon}</span>
+                <meta.icon size={24} className="text-int-blue" />
                 <div className="flex-1">
                   <p className="font-montserrat font-bold text-sm text-ink-black">{meta.label}</p>
                 </div>
@@ -386,32 +544,46 @@ export default function BookingPage() {
           <h2 className="font-montserrat font-bold text-lg text-ink-black mb-4">When do you want to consult?</h2>
           <div className="flex flex-col gap-3 mb-6">
             <button
-              onClick={() => setScheduleMode('now')}
+              onClick={() => canStartNow && setScheduleMode('now')}
+              disabled={!canStartNow}
               className={`flex items-center gap-4 p-4 rounded-2xl border-2 transition-all ${
-                scheduleMode === 'now' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
+                !canStartNow ? 'border-steel-grey opacity-50 cursor-not-allowed'
+                  : effectiveScheduleMode === 'now' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
               }`}
             >
-              <span className="text-2xl">⚡</span>
+              <Zap size={22} className="text-int-blue" />
               <div>
                 <p className="font-montserrat font-bold text-sm text-ink-black">Right Now — On Demand</p>
-                <p className="text-ink-black/50 text-xs">Doctor will be notified immediately</p>
+                <p className="text-ink-black/50 text-xs">
+                  {!doctor?.is_online
+                    ? 'Doctor is currently offline'
+                    : !acceptOnDemand
+                      ? 'Doctor is not accepting on-demand consultations'
+                      : doctorBusy
+                        ? 'Doctor is currently in another consultation'
+                        : 'Doctor will be notified immediately'}
+                </p>
               </div>
             </button>
             <button
-              onClick={() => setScheduleMode('schedule')}
+              onClick={() => acceptScheduled && setScheduleMode('schedule')}
+              disabled={!acceptScheduled}
               className={`flex items-center gap-4 p-4 rounded-2xl border-2 transition-all ${
-                scheduleMode === 'schedule' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
+                !acceptScheduled ? 'border-steel-grey opacity-50 cursor-not-allowed'
+                  : effectiveScheduleMode === 'schedule' ? 'border-int-blue bg-int-blue/5' : 'border-steel-grey hover:border-int-blue/40'
               }`}
             >
-              <span className="text-2xl">📅</span>
+              <Calendar size={22} className="text-int-blue" />
               <div>
                 <p className="font-montserrat font-bold text-sm text-ink-black">Schedule for Later</p>
-                <p className="text-ink-black/50 text-xs">Pick a future date and time slot</p>
+                <p className="text-ink-black/50 text-xs">
+                  {!acceptScheduled ? 'Doctor is not accepting scheduled appointments' : 'Pick a future date and time slot'}
+                </p>
               </div>
             </button>
           </div>
 
-          {scheduleMode === 'schedule' && (
+          {effectiveScheduleMode === 'schedule' && (
             <div className="mb-6">
               <p className="font-montserrat font-bold text-sm text-ink-black mb-2">Select Date</p>
               <div className="flex gap-2 overflow-x-auto pb-2 mb-4">
@@ -429,25 +601,55 @@ export default function BookingPage() {
               </div>
               <p className="font-montserrat font-bold text-sm text-ink-black mb-2">Select Time</p>
               {(() => {
-                const slots = getAvailableSlots(doctor?.availability ?? null, days[selectedDay].value)
+                const dayValue = days[selectedDay].value
+                const slots = getAvailableSlots(doctor?.availability ?? null, dayValue)
                 if (slots.length === 0) {
+                  const dayName = DAY_NAMES[new Date(dayValue + 'T12:00:00').getDay()]
+                  const cfg = (doctor?.availability as any)?.[dayName]
+                  const blocked = ((doctor?.availability as any)?.blocked_dates as string[] | undefined)?.includes(dayValue)
+                  const message = blocked
+                    ? 'This doctor is unavailable on the selected date. Please select another date.'
+                    : !cfg?.enabled
+                      ? `This doctor is not available on ${dayName}. Please select another date.`
+                      : 'No available slots for this day. Please select another date.'
                   return (
-                    <p className="text-ink-black/40 text-xs py-3">
-                      No available slots for this day. Please select another date.
-                    </p>
+                    <p className="text-ink-black/40 text-xs py-3">{message}</p>
                   )
                 }
                 return (
-                  <div className="flex flex-wrap gap-2">
-                    {slots.map(slot => (
-                      <button key={slot} onClick={() => setSelectedTime(slot)}
-                        className={`px-4 py-2.5 rounded-xl text-xs font-semibold transition-colors ${
-                          selectedTime === slot ? 'bg-care-blue text-white' : 'bg-white text-ink-black/60 border border-steel-grey'
-                        }`}>
-                        {slot}
-                      </button>
-                    ))}
-                  </div>
+                  <>
+                    <div className="flex items-center gap-4 text-[11px] text-ink-black/60 mb-3">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-md bg-success/10 border border-success inline-block" /> Available
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-md bg-danger/10 border border-danger inline-block" /> Booked
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {slots.map(slot => {
+                        const isBooked = bookedSlots.has(slot)
+                        const isPast = !isBooked && isSlotPast(dayValue, slot)
+                        const isDisabled = isBooked || isPast
+                        return (
+                          <button
+                            key={slot}
+                            onClick={() => !isDisabled && setSelectedTime(slot)}
+                            disabled={isDisabled}
+                            className={`px-4 py-2.5 rounded-xl text-xs font-semibold transition-colors ${
+                              isBooked
+                                ? 'bg-danger/10 text-ink-black/40 border border-danger opacity-70 cursor-not-allowed'
+                                : isPast
+                                  ? 'bg-steel-grey/20 text-ink-black/40 border border-steel-grey opacity-60 cursor-not-allowed'
+                                  : selectedTime === slot ? 'bg-care-blue text-white' : 'bg-success/10 text-ink-black/60 border border-success'
+                            }`}
+                          >
+                            {slot}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
                 )
               })()}
             </div>
@@ -457,7 +659,7 @@ export default function BookingPage() {
             <button onClick={() => setStep(1)} className="btn-outline flex-1">← Back</button>
             <button
               onClick={() => setStep(3)}
-              disabled={scheduleMode === 'schedule' && !selectedTime}
+              disabled={effectiveScheduleMode === 'schedule' && (!selectedTime || bookedSlots.has(selectedTime) || isSlotPast(days[selectedDay].value, selectedTime))}
               className="btn-primary flex-1 disabled:opacity-50"
             >
               Continue →
@@ -482,12 +684,14 @@ export default function BookingPage() {
             </div>
             <div className="flex justify-between">
               <span className="text-ink-black/60">Type</span>
-              <span className="font-semibold text-ink-black">{TYPE_META[selectedType].icon} {TYPE_META[selectedType].label}</span>
+              <span className="font-semibold text-ink-black inline-flex items-center gap-1.5">
+                <SelectedTypeIcon size={14} /> {TYPE_META[selectedType].label}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-ink-black/60">Timing</span>
               <span className="font-semibold text-ink-black">
-                {scheduleMode === 'now' ? 'On Demand' : `${days[selectedDay].label} at ${selectedTime}`}
+                {effectiveScheduleMode === 'now' ? 'On Demand' : `${days[selectedDay].label} at ${selectedTime}`}
               </span>
             </div>
             <div className="border-t border-steel-grey pt-3 flex flex-col gap-1.5">
@@ -496,7 +700,7 @@ export default function BookingPage() {
                 <span className="text-ink-black">ETB {price}</span>
               </div>
               <div className="flex justify-between text-xs">
-                <span className="text-ink-black/50">Platform fee (20%)</span>
+                <span className="text-ink-black/50">Platform fee ({commissionRate}%)</span>
                 <span className="text-ink-black">ETB {platformFee}</span>
               </div>
               <div className="flex justify-between font-bold">
@@ -540,7 +744,9 @@ export default function BookingPage() {
             <div className="bg-cloud-grey rounded-2xl p-4 mb-5 flex flex-col gap-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-ink-black/60">Consultation</span>
-                <span className="font-semibold text-ink-black">{TYPE_META[selectedType].icon} {TYPE_META[selectedType].label}</span>
+                <span className="font-semibold text-ink-black inline-flex items-center gap-1.5">
+                <SelectedTypeIcon size={14} /> {TYPE_META[selectedType].label}
+              </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-ink-black/60">Doctor</span>
@@ -567,7 +773,7 @@ export default function BookingPage() {
             {/* Credit notice */}
             {activeCredit && !creditLoading && (
               <div className="flex items-start gap-2 bg-teal-50 border border-teal-200 rounded-xl p-4 mb-5">
-                <span className="text-teal-600 text-sm">💳</span>
+                <Wallet size={16} className="text-teal-600 shrink-0" />
                 <p className="text-teal-700 text-xs leading-relaxed">
                   {creditCoversAll
                     ? `Your ETB ${activeCredit.creditAmount} credit covers the full amount. No payment required.`

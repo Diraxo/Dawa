@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 
 // PATCH /api/admin/patients/[id]
 // body: { action: 'suspend' | 'unsuspend' }
@@ -47,6 +47,6 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     data_json: {},
   })
 
-  await logAdminAction(userId, isSuspended ? 'suspend_patient' : 'unsuspend_patient', { patientUserId: id })
+  await logAdminAction(userId, isSuspended ? 'suspend_patient' : 'unsuspend_patient', { patientUserId: id }, { entityType: 'patient', entityId: id, ...getRequestContext(req) })
   return NextResponse.json({ success: true, is_suspended: isSuspended })
 }

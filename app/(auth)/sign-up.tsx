@@ -1,8 +1,8 @@
-import { useAuth, useSignIn, useSignUp, useSSO } from '@clerk/clerk-expo'
+import { useAuth, useSignUp, useSSO } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
-import * as Linking from 'expo-linking'
+import * as AuthSession from 'expo-auth-session'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as WebBrowser from 'expo-web-browser'
@@ -43,7 +43,6 @@ export default function SignUpScreen() {
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage } = useAppStore()
   const { isLoaded, signUp } = useSignUp()
-  const { signIn, isLoaded: signInLoaded, setActive } = useSignIn()
   const { startSSOFlow } = useSSO()
   const { isSignedIn, userId } = useAuth()
 
@@ -190,36 +189,12 @@ export default function SignUpScreen() {
     setGlobalError('')
     ssoInProgressRef.current = true
     try {
-      if (!signIn || !signInLoaded) return
-      const redirectUrl = Linking.createURL('/oauth-native-callback')
-      // Manually implement SSO flow so we can pass oidcPrompt: 'select_account'
-      // to force Google to show the account picker instead of auto-selecting the last account
-      await (signIn as any).create({ strategy: 'oauth_google', redirectUrl, oidcPrompt: 'select_account' })
-      const { externalVerificationRedirectURL } = signIn.firstFactorVerification
-      if (!externalVerificationRedirectURL) {
+      const redirectUrl = AuthSession.makeRedirectUri()
+      const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
+      if (createdSessionId && ssoSetActive) {
+        await ssoSetActive({ session: createdSessionId })
+      } else {
         ssoInProgressRef.current = false
-        setGlobalError('Google sign-in failed. Please try again.')
-        return
-      }
-      const authSessionResult = await WebBrowser.openAuthSessionAsync(
-        externalVerificationRedirectURL.toString(),
-        redirectUrl
-      )
-      if (authSessionResult.type !== 'success' || !authSessionResult.url) {
-        ssoInProgressRef.current = false
-        return
-      }
-      const urlParams = new URL(authSessionResult.url).searchParams
-      const rotatingTokenNonce = urlParams.get('rotating_token_nonce') ?? ''
-      await signIn.reload({ rotatingTokenNonce })
-      const needsSignUp = signIn.firstFactorVerification.status === 'transferable'
-      if (needsSignUp) {
-        await signUp.create({ transfer: true })
-        if (signUp.createdSessionId && setActive) {
-          await setActive({ session: signUp.createdSessionId })
-        }
-      } else if (signIn.createdSessionId && setActive) {
-        await setActive({ session: signIn.createdSessionId })
       }
     } catch (err: any) {
       ssoInProgressRef.current = false
@@ -233,7 +208,7 @@ export default function SignUpScreen() {
     } finally {
       setGoogleLoading(false)
     }
-  }, [googleLoading, signIn, signInLoaded, signUp, setActive, router, userId, checkRoleAndRedirect])
+  }, [googleLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
 
   // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
   const handleFacebook = useCallback(async () => {
@@ -242,7 +217,7 @@ export default function SignUpScreen() {
     setGlobalError('')
     ssoInProgressRef.current = true
     try {
-      const redirectUrl = Linking.createURL('/oauth-native-callback')
+      const redirectUrl = AuthSession.makeRedirectUri()
       const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
       if (createdSessionId && setActive) {
         await setActive({ session: createdSessionId })

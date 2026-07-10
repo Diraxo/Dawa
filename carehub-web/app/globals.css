@@ -164,3 +164,41 @@ body {
     .container-site { padding: 0 16px; }
   }
 }
+
+/* ─── Print / PDF styles ──────────────────────────────────────────────────── */
+@media print {
+  /* Hide all navigation and UI chrome */
+  nav, aside, header,
+  [data-sidebar], [data-nav], [role="navigation"],
+  .print-hide,
+  button, a.btn-primary, a.btn-outline { display: none !important; }
+
+  /* Full-width content */
+  body { background: white !important; color: black !important; }
+  main, [role="main"] { padding: 0 !important; margin: 0 !important; }
+
+  /* Summary document card — remove rounded corners and shadow for print */
+  .print-card {
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    border: 1px solid #ddd !important;
+    page-break-inside: avoid;
+  }
+
+  /* Section dividers */
+  .print-section { page-break-inside: avoid; }
+
+  /* Typography */
+  p, span, td { font-size: 12pt !important; }
+  h1 { font-size: 20pt !important; }
+  h2 { font-size: 15pt !important; }
+
+  /* Page setup */
+  @page {
+    size: A4;
+    margin: 20mm 18mm;
+  }
+
+  /* Force show print-only elements */
+  .print-only { display: block !important; }
+}

@@ -1,9 +1,10 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 
 async function requireAdmin() {
-  const { userId } = auth()
+  const { userId } = await auth()
   if (!userId) return null
   const { data } = await supabaseAdmin.from('users').select('role').eq('clerk_id', userId).single()
   return data?.role === 'admin' ? userId : null
@@ -39,5 +40,7 @@ export async function POST(req: NextRequest) {
     const msg = error.message.includes('unique') ? 'That specialty already exists.' : error.message
     return NextResponse.json({ error: msg }, { status: 400 })
   }
+
+  await logAdminAction(adminId, 'specialty_created', { name: name.trim(), specialtyId: data.id }, { entityType: 'specialty', entityId: data.id, ...getRequestContext(req) })
   return NextResponse.json(data, { status: 201 })
 }

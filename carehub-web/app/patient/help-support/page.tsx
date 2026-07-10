@@ -32,11 +32,11 @@ const FAQS = [
       },
       {
         q: 'How do I start a consultation?',
-        a: 'Browse doctors, select one, choose your consultation type, complete booking, and wait in the virtual waiting room. The doctor will accept within 30 seconds.',
+        a: 'Browse doctors, select one, choose your consultation type, complete booking, and wait in the virtual waiting room until the doctor accepts.',
       },
       {
         q: 'What happens if the doctor doesn\'t respond?',
-        a: 'If the doctor doesn\'t accept within 30 seconds, the request is automatically cancelled and you can try another doctor.',
+        a: 'If the doctor doesn\'t respond within a reasonable time, the request is automatically cancelled, your credit is preserved, and you can try another doctor.',
       },
       {
         q: 'Can I schedule consultations in advance?',

@@ -24,6 +24,12 @@ import { useDoctorStore } from '@/store/doctorStore'
 
 const MAX_BIO = 300
 
+const LANGUAGES = [
+  'Arabic', 'Amharic', 'English', 'French', 'Somali', 'Swahili',
+  'Tigrinya', 'Oromo', 'Afar', 'Harari', 'Sidama', 'Wolaytta',
+  'Turkish', 'Hindi', 'Urdu',
+]
+
 export default function RegistrationStep2() {
   const router = useRouter()
   const store = useDoctorStore()
@@ -52,7 +58,9 @@ export default function RegistrationStep2() {
   const [experience, setExperience] = useState(store.regYearsOfExperience)
   const [hospital, setHospital] = useState(store.regHospitalName)
   const [bio, setBio] = useState(store.regBio)
+  const [languages, setLanguages] = useState<string[]>(store.regLanguages)
   const [showSpecialtyPicker, setShowSpecialtyPicker] = useState(false)
+  const [showLanguagePicker, setShowLanguagePicker] = useState(false)
 
   const isValid = licenseNumber.trim().length > 3 && specialty.length > 0 && hospital.trim().length > 1
 
@@ -63,6 +71,7 @@ export default function RegistrationStep2() {
       regYearsOfExperience: experience,
       regHospitalName: hospital,
       regBio: bio,
+      regLanguages: languages,
     })
     router.push('/(doctor)/registration/step-3')
   }
@@ -130,7 +139,7 @@ export default function RegistrationStep2() {
         <Text style={styles.label}>{t('hospitalClinicName')}</Text>
         <TextInput
           style={styles.input}
-          placeholder="e.g. Tikur Anbessa Hospital"
+          placeholder="e.g. Karamara Hospital"
           placeholderTextColor="#9CA3AF"
           value={hospital}
           onChangeText={setHospital}
@@ -148,6 +157,15 @@ export default function RegistrationStep2() {
           textAlignVertical="top"
         />
         <Text style={styles.charCount}>{bio.length} / {MAX_BIO}</Text>
+
+        {/* Languages Spoken */}
+        <Text style={styles.label}>Languages Spoken</Text>
+        <Pressable onPress={() => setShowLanguagePicker(true)} style={styles.pickerBtn}>
+          <Text style={[styles.pickerText, languages.length === 0 && styles.pickerPlaceholder]} numberOfLines={1}>
+            {languages.length > 0 ? languages.join(', ') : 'Select languages'}
+          </Text>
+          <Ionicons name="chevron-down" size={18} color="#6B7280" />
+        </Pressable>
 
         <View style={{ height: 100 }} />
       </ScrollView>
@@ -181,6 +199,36 @@ export default function RegistrationStep2() {
                   {specialty === s && <Ionicons name="checkmark" size={18} color={colors.tealGreen} />}
                 </Pressable>
               ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Language Picker Modal */}
+      <Modal visible={showLanguagePicker} transparent animationType="slide" onRequestClose={() => setShowLanguagePicker(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.modalBackdrop} onPress={() => setShowLanguagePicker(false)} />
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Languages Spoken</Text>
+            <ScrollView>
+              {LANGUAGES.map((lang) => {
+                const selected = languages.includes(lang)
+                return (
+                  <Pressable
+                    key={lang}
+                    onPress={() => {
+                      setLanguages(prev =>
+                        prev.includes(lang) ? prev.filter(l => l !== lang) : [...prev, lang]
+                      )
+                    }}
+                    style={[styles.specialtyItem, selected && styles.specialtyItemSelected]}
+                  >
+                    <Text style={[styles.specialtyItemText, selected && styles.specialtyItemTextSelected]}>{lang}</Text>
+                    {selected && <Ionicons name="checkmark" size={18} color={colors.tealGreen} />}
+                  </Pressable>
+                )
+              })}
             </ScrollView>
           </View>
         </View>

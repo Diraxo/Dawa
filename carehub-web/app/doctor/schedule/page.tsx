@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { writeDoctorOnlineStatus } from '@/lib/doctorOnline'
 import { formatDateTime } from '@/lib/utils'
 import Link from 'next/link'
+import { MessageCircle, Phone, Video, CalendarDays, XCircle, Clock, Ban } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,7 +32,12 @@ interface ScheduledConsultation {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DAYS: DayKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const WEEK_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const WEEK_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+// Weeks start Monday everywhere in this app (mobile schedule already did);
+// converts JS Date#getDay()'s 0=Sun..6=Sat into 0=Mon..6=Sun to index WEEK_DAYS.
+function toMonIndex(d: Date): number {
+  return (d.getDay() + 6) % 7
+}
 
 const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
   Mon: { enabled: true,  startTime: '09:00 AM', endTime: '05:00 PM' },
@@ -42,7 +49,7 @@ const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
   Sun: { enabled: false, startTime: '10:00 AM', endTime: '02:00 PM' },
 }
 
-const TYPE_ICONS: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+const TYPE_ICONS: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
 
 const STATUS_COLORS: Record<string, string> = {
   pending:   'bg-warning/15 text-warning',
@@ -91,18 +98,62 @@ export default function DoctorSchedulePage() {
   const [profileId, setProfileId] = useState<string | null>(null)
   const [isOnline, setIsOnline] = useState(false)
   const [toggling, setToggling] = useState(false)
+  const [status, setStatus] = useState<string>('')
 
   const [acceptScheduled, setAcceptScheduled] = useState(true)
-  const [onDemandOnly, setOnDemandOnly] = useState(false)
+  const [acceptOnDemand, setAcceptOnDemand] = useState(true)
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
   const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [blockInput, setBlockInput] = useState('')
   const [blockError, setBlockError] = useState('')
   const [savingAvail, setSavingAvail] = useState(false)
   const [savedAvail, setSavedAvail] = useState(false)
+  const [availError, setAvailError] = useState('')
 
   const [consultations, setConsultations] = useState<ScheduledConsultation[]>([])
-  const [selectedDay, setSelectedDay] = useState(new Date().getDay()) // 0=Sun
+  const [selectedDay, setSelectedDay] = useState(toMonIndex(new Date())) // 0=Mon
+
+  // Load consultations: all active/pending/scheduled + completed within this
+  // week. Re-run on Realtime changes (below) so a newly-paid or rescheduled
+  // appointment appears without a manual reload.
+  async function loadConsultations(client: ReturnType<typeof getAuthClient>, doctorProfileId: string) {
+    const weekStart = new Date()
+    weekStart.setDate(weekStart.getDate() - toMonIndex(weekStart))
+    weekStart.setHours(0, 0, 0, 0)
+    const weekEnd = new Date(weekStart)
+    weekEnd.setDate(weekEnd.getDate() + 7)
+
+    const [{ data: activePending }, { data: weekCompleted }] = await Promise.all([
+      client
+        .from('consultations')
+        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
+        .eq('doctor_id', doctorProfileId)
+        .in('status', ['pending', 'active', 'scheduled'])
+        .order('scheduled_at', { ascending: true }),
+      client
+        .from('consultations')
+        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
+        .eq('doctor_id', doctorProfileId)
+        .in('status', ['completed', 'cancelled'])
+        .gte('created_at', weekStart.toISOString())
+        .lt('created_at', weekEnd.toISOString())
+        .order('created_at', { ascending: true }),
+    ])
+    const data = [...(activePending ?? []), ...(weekCompleted ?? [])]
+    setConsultations((data ?? []) as unknown as ScheduledConsultation[])
+  }
+
+  function applyAvailability(availabilityJson: unknown) {
+    if (!availabilityJson) return
+    const avail = availabilityJson as Record<string, unknown>
+    if (typeof avail.acceptScheduled === 'boolean') setAcceptScheduled(avail.acceptScheduled)
+    if (typeof avail.acceptOnDemand === 'boolean') setAcceptOnDemand(avail.acceptOnDemand)
+    const dayKeys = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+    const dayAvail: Record<string, unknown> = {}
+    dayKeys.forEach(k => { if (avail[k]) dayAvail[k] = avail[k] })
+    if (Object.keys(dayAvail).length) setAvailability(prev => ({ ...prev, ...dayAvail }))
+    if (Array.isArray(avail.blocked_dates)) setBlockedDates(avail.blocked_dates as string[])
+  }
 
   // ── Load ───────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -117,137 +168,197 @@ export default function DoctorSchedulePage() {
 
       const { data: dp } = await client
         .from('doctor_profiles')
-        .select('id, is_online, availability')
+        .select('id, is_online, availability, status')
         .eq('user_id', (ud as any).id)
         .single()
       if (!dp) { setLoading(false); return }
 
       setProfileId((dp as any).id)
       setIsOnline((dp as any).is_online ?? false)
-      if ((dp as any).availability) {
-        const avail = (dp as any).availability as Record<string, unknown>
-        if (typeof avail.acceptScheduled === 'boolean') setAcceptScheduled(avail.acceptScheduled)
-        if (typeof avail.onDemandOnly === 'boolean') setOnDemandOnly(avail.onDemandOnly)
-        const dayKeys = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-        const dayAvail: Record<string, unknown> = {}
-        dayKeys.forEach(k => { if (avail[k]) dayAvail[k] = avail[k] })
-        if (Object.keys(dayAvail).length) setAvailability(prev => ({ ...prev, ...dayAvail }))
-        if (Array.isArray(avail.blocked_dates)) setBlockedDates(avail.blocked_dates as string[])
-      }
+      setStatus((dp as any).status ?? '')
+      applyAvailability((dp as any).availability)
 
-      // Load consultations: all active/pending + completed within this week
-      const weekStart = new Date()
-      weekStart.setDate(weekStart.getDate() - weekStart.getDay())
-      weekStart.setHours(0, 0, 0, 0)
-      const weekEnd = new Date(weekStart)
-      weekEnd.setDate(weekEnd.getDate() + 7)
-
-      const [{ data: activePending }, { data: weekCompleted }] = await Promise.all([
-        client
-          .from('consultations')
-          .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
-          .eq('doctor_id', (dp as any).id)
-          .in('status', ['pending', 'active'])
-          .order('scheduled_at', { ascending: true }),
-        client
-          .from('consultations')
-          .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
-          .eq('doctor_id', (dp as any).id)
-          .in('status', ['completed', 'cancelled'])
-          .gte('created_at', weekStart.toISOString())
-          .lt('created_at', weekEnd.toISOString())
-          .order('created_at', { ascending: true }),
-      ])
-      const data = [...(activePending ?? []), ...(weekCompleted ?? [])]
-
-      setConsultations((data ?? []) as unknown as ScheduledConsultation[])
+      await loadConsultations(client, (dp as any).id)
       setLoading(false)
     }
     load()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
+  // is_online AND availability/blocked-days are shared state across Home,
+  // Schedule, mobile, and any other client — without this the toggle/save
+  // here only ever updated local state, so it silently drifted out of sync
+  // with whatever another session last wrote to the DB until reload.
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-schedule-online-${profileId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` },
+        (payload) => {
+          const next = (payload.new as { is_online?: boolean; availability?: unknown; status?: string })
+          if (typeof next?.is_online === 'boolean') setIsOnline(next.is_online)
+          if (next?.availability) applyAvailability(next.availability)
+          if (typeof next?.status === 'string') setStatus(next.status)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [profileId])
+
+  // Live-refresh the appointment list whenever any of this doctor's
+  // consultations change (new scheduled booking, reschedule, cancellation).
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-schedule-consultations-${profileId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
+        async () => {
+          const token = await getToken()
+          if (!token) return
+          await loadConsultations(getAuthClient(token), profileId)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
   // ── Online toggle ──────────────────────────────────────────────────────────
   async function toggleOnline() {
-    if (!profileId) return
+    if (!profileId || isPending) return
     setToggling(true)
     const token = await getToken()
     if (!token) { setToggling(false); return }
     const client = getAuthClient(token)
     const next = !isOnline
-    await client.from('doctor_profiles').update({ is_online: next }).eq('id', profileId)
+    await writeDoctorOnlineStatus(client, profileId, next)
     setIsOnline(next)
     setToggling(false)
   }
 
   // ── Save availability ──────────────────────────────────────────────────────
+  function minutesOf(t12: string): number {
+    const [h, m] = to24h(t12).split(':').map(Number)
+    return h * 60 + m
+  }
+
   async function saveAvailability() {
     if (!profileId) return
+    if (isPending) {
+      setAvailError(
+        status === 'suspended'
+          ? 'Your account has been suspended. Please contact support.'
+          : 'Your account is under review. You cannot modify your schedule until admin approves you.'
+      )
+      return
+    }
+    setAvailError('')
+    for (const day of DAYS) {
+      const cfg = availability[day]
+      if (!cfg.enabled) continue
+      if (minutesOf(cfg.startTime) >= minutesOf(cfg.endTime)) {
+        setAvailError(`${day}: start time must be before end time.`)
+        return
+      }
+    }
     setSavingAvail(true)
     const token = await getToken()
     if (!token) { setSavingAvail(false); return }
     const client = getAuthClient(token)
-    const payload = { ...availability, acceptScheduled, onDemandOnly, blocked_dates: blockedDates }
+    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: blockedDates }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await client.from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId)
+    const { data: updatedRows, error } = await client.from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
     setSavingAvail(false)
+    if (error || !updatedRows || updatedRows.length === 0) {
+      setAvailError('Could not save your availability. Please try again.')
+      return
+    }
+    await loadConsultations(client, profileId)
     setSavedAvail(true)
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' })
     setTimeout(() => setSavedAvail(false), 2500)
   }
 
   // ── Block dates ────────────────────────────────────────────────────────────
   async function addBlockedDate() {
     setBlockError('')
+    if (isPending) {
+      setBlockError(
+        status === 'suspended'
+          ? 'Your account has been suspended. Please contact support.'
+          : 'Your account is under review. You cannot modify your schedule until admin approves you.'
+      )
+      return
+    }
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/
     if (!dateRegex.test(blockInput)) { setBlockError('Use YYYY-MM-DD format.'); return }
     const d = new Date(blockInput + 'T12:00:00')
     if (isNaN(d.getTime())) { setBlockError('Invalid date.'); return }
     if (d < new Date(new Date().setHours(0, 0, 0, 0))) { setBlockError('Cannot block past dates.'); return }
     const updated = blockedDates.includes(blockInput) ? blockedDates : [...blockedDates, blockInput]
+    const previous = blockedDates
     setBlockedDates(updated)
     setBlockInput('')
     if (!profileId) return
     const token = await getToken()
-    if (!token) return
-    const payload = { ...availability, acceptScheduled, onDemandOnly, blocked_dates: updated }
+    if (!token) { setBlockedDates(previous); return }
+    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId)
+    const { data: updatedRows, error } = await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
+    if (error || !updatedRows || updatedRows.length === 0) {
+      setBlockedDates(previous)
+      setBlockError('Could not block this date. Please try again.')
+    }
   }
 
   async function removeBlockedDate(dateStr: string) {
+    const previous = blockedDates
     const updated = blockedDates.filter(d => d !== dateStr)
     setBlockedDates(updated)
     if (!profileId) return
     const token = await getToken()
-    if (!token) return
-    const payload = { ...availability, acceptScheduled, onDemandOnly, blocked_dates: updated }
+    if (!token) { setBlockedDates(previous); return }
+    const payload = { ...availability, acceptScheduled, acceptOnDemand, blocked_dates: updated }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId)
+    const { data: updatedRows, error } = await getAuthClient(token).from('doctor_profiles').update({ availability: payload as any }).eq('id', profileId).select('id')
+    if (error || !updatedRows || updatedRows.length === 0) {
+      setBlockedDates(previous)
+      setBlockError('Could not remove this blocked date. Please try again.')
+    }
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const grouped: Record<number, ScheduledConsultation[]> = {}
   consultations.forEach(c => {
-    const day = new Date(c.created_at).getDay()
+    const day = toMonIndex(new Date(c.created_at))
     if (!grouped[day]) grouped[day] = []
     grouped[day].push(c)
   })
 
-  const todayDay = new Date().getDay()
+  const todayDay = toMonIndex(new Date())
 
   // This week's date numbers for the strip
   const today = new Date()
   const weekDates = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today)
-    d.setDate(today.getDate() - today.getDay() + i)
+    d.setDate(today.getDate() - toMonIndex(today) + i)
     return d.getDate()
   })
 
-  // Upcoming appointments (from all consultations with scheduled_at in the future)
+  // Upcoming appointments (from all consultations with scheduled_at in the future).
+  // Must include 'scheduled' — every paid future booking has this status
+  // (see loadConsultations' fetch filter below); omitting it silently hid
+  // every newly booked/rescheduled appointment from this list.
   const upcoming = consultations.filter(c =>
-    (c.status === 'pending' || c.status === 'active') &&
+    (c.status === 'pending' || c.status === 'active' || c.status === 'scheduled') &&
     (c.scheduled_at ? new Date(c.scheduled_at) >= new Date() : false)
   )
+
+  const isPending = !loading && !!status && status !== 'approved'
 
   return (
     <div className="p-8 max-w-4xl">
@@ -255,6 +366,30 @@ export default function DoctorSchedulePage() {
         <h1 className="font-montserrat font-black text-3xl text-ink-black">My Schedule</h1>
         <p className="text-ink-black/50 text-sm mt-1">Manage your availability and upcoming sessions</p>
       </div>
+
+      {/* Pending / rejected / suspended banner */}
+      {isPending && (
+        <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl mb-6 text-sm font-montserrat border
+          ${status === 'rejected' || status === 'suspended'
+            ? 'bg-[#FEE2E2] border-[#FECACA] text-[#991B1B]'
+            : 'bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]'}`}>
+          <span className="shrink-0 mt-0.5">
+            {status === 'rejected' ? <XCircle size={20} /> : status === 'suspended' ? <Ban size={20} /> : <Clock size={20} />}
+          </span>
+          <div>
+            <p className="font-bold mb-0.5">
+              {status === 'rejected' ? 'Application Not Approved' : status === 'suspended' ? 'Account Suspended' : 'Account Under Review'}
+            </p>
+            <p className="opacity-80">
+              {status === 'rejected'
+                ? 'Your application was not approved. Please contact support to reapply.'
+                : status === 'suspended'
+                ? 'Your account has been suspended. Please contact support.'
+                : 'Your account is being reviewed by our admin team. You cannot modify your schedule until you are approved.'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── Mode toggles ── */}
       <div className="card p-5 mb-6 divide-y divide-cloud-grey">
@@ -285,15 +420,15 @@ export default function DoctorSchedulePage() {
               </svg>
             </div>
             <div>
-              <p className="font-montserrat font-semibold text-sm text-ink-black">On-Demand Only</p>
-              <p className="text-xs text-ink-black/40 mt-0.5">Only accept instant consultation requests</p>
+              <p className="font-montserrat font-semibold text-sm text-ink-black">Accept On-Demand Consultations</p>
+              <p className="text-xs text-ink-black/40 mt-0.5">Let patients start an instant consultation with you right now</p>
             </div>
           </div>
           <button
-            onClick={() => setOnDemandOnly(v => !v)}
-            className={`relative w-12 h-6 rounded-full transition-colors ${onDemandOnly ? 'bg-teal-green' : 'bg-steel-grey'}`}
+            onClick={() => setAcceptOnDemand(v => !v)}
+            className={`relative w-12 h-6 rounded-full transition-colors ${acceptOnDemand ? 'bg-teal-green' : 'bg-steel-grey'}`}
           >
-            <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${onDemandOnly ? 'translate-x-7' : 'translate-x-1'}`} />
+            <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${acceptOnDemand ? 'translate-x-7' : 'translate-x-1'}`} />
           </button>
         </div>
       </div>
@@ -308,13 +443,14 @@ export default function DoctorSchedulePage() {
         </div>
         <button
           onClick={toggleOnline}
-          disabled={toggling}
-          className={`flex items-center gap-2.5 px-5 py-2.5 rounded-2xl font-montserrat font-bold text-sm transition-all disabled:opacity-50 ${
+          disabled={toggling || isPending}
+          title={isPending ? 'Available after admin approval' : undefined}
+          className={`flex items-center gap-2.5 px-5 py-2.5 rounded-2xl font-montserrat font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
             isOnline ? 'bg-success/10 text-success border border-success/20' : 'bg-cloud-grey text-ink-black/50 border border-steel-grey'
           }`}
         >
           <div className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-success animate-pulse' : 'bg-steel-grey'}`} />
-          {toggling ? '…' : isOnline ? 'Online · Go Offline' : 'Go Online'}
+          {toggling ? '…' : isPending ? 'Unavailable' : isOnline ? 'Online · Go Offline' : 'Go Online'}
         </button>
       </div>
 
@@ -402,10 +538,14 @@ export default function DoctorSchedulePage() {
           })}
         </div>
 
+        {availError && (
+          <p className="text-danger text-xs mt-3">{availError}</p>
+        )}
         <button
           onClick={saveAvailability}
-          disabled={savingAvail}
-          className="mt-5 w-full h-[52px] rounded-2xl font-montserrat font-bold text-base text-white disabled:opacity-60 transition-opacity"
+          disabled={savingAvail || isPending}
+          title={isPending ? 'Available after admin approval' : undefined}
+          className="mt-5 w-full h-[52px] rounded-2xl font-montserrat font-bold text-base text-white disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
           style={{ background: 'linear-gradient(to right, #2962FF, #00BFA5)' }}
         >
           {savingAvail ? 'Saving…' : savedAvail ? '✓ Saved' : 'Save Availability'}
@@ -420,15 +560,17 @@ export default function DoctorSchedulePage() {
         </div>
       ) : upcoming.length === 0 ? (
         <div className="card p-10 text-center mb-6">
-          <p className="text-3xl mb-2">📅</p>
+          <CalendarDays size={28} className="mx-auto mb-2 text-steel-grey" />
           <p className="text-ink-black/50 text-sm">No upcoming appointments</p>
         </div>
       ) : (
         <div className="flex flex-col gap-2 mb-6">
-          {upcoming.map(appt => (
+          {upcoming.map(appt => {
+            const TypeIcon = TYPE_ICONS[appt.type] ?? MessageCircle
+            return (
             <div key={appt.id} className="card p-4 flex items-center gap-3">
-              <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center text-xl flex-shrink-0">
-                {TYPE_ICONS[appt.type]}
+              <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0">
+                <TypeIcon size={20} className="text-ink-black/60" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-montserrat font-semibold text-sm text-ink-black">{appt.patient?.full_name ?? 'Patient'}</p>
@@ -438,7 +580,8 @@ export default function DoctorSchedulePage() {
                 Upcoming
               </span>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -451,15 +594,17 @@ export default function DoctorSchedulePage() {
           <div className="flex flex-col gap-3">{[1, 2, 3].map(i => <div key={i} className="h-16 shimmer-bg rounded-2xl" />)}</div>
         ) : consultations.length === 0 ? (
           <div className="text-center py-8">
-            <p className="text-3xl mb-2">📅</p>
+            <CalendarDays size={28} className="mx-auto mb-2 text-steel-grey" />
             <p className="text-ink-black/50 text-sm">No consultations this week.</p>
             <p className="text-ink-black/40 text-xs mt-1">Go online to start receiving patient requests.</p>
           </div>
         ) : (
           <div className="flex flex-col divide-y divide-cloud-grey">
-            {consultations.map(c => (
+            {consultations.map(c => {
+              const TypeIcon = TYPE_ICONS[c.type] ?? MessageCircle
+              return (
               <div key={c.id} className="py-3 flex items-center gap-3">
-                <span className="text-xl flex-shrink-0">{TYPE_ICONS[c.type]}</span>
+                <TypeIcon size={20} className="flex-shrink-0 text-ink-black/60" />
                 <div className="flex-1 min-w-0">
                   <p className="font-montserrat font-bold text-sm text-ink-black">{c.patient?.full_name ?? 'Patient'}</p>
                   <p className="text-ink-black/40 text-xs">{formatDateTime((c.started_at ?? c.created_at) as string)}</p>
@@ -478,7 +623,8 @@ export default function DoctorSchedulePage() {
                   )}
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
@@ -514,13 +660,16 @@ export default function DoctorSchedulePage() {
               value={blockInput}
               onChange={e => { setBlockInput(e.target.value); setBlockError('') }}
               min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
-              className="w-full h-11 px-4 rounded-xl border border-steel-grey bg-cloud-grey font-montserrat text-sm focus:outline-none focus:border-danger"
+              disabled={isPending}
+              className="w-full h-11 px-4 rounded-xl border border-steel-grey bg-cloud-grey font-montserrat text-sm focus:outline-none focus:border-danger disabled:opacity-60 disabled:cursor-not-allowed"
             />
             {blockError && <p className="text-xs text-danger mt-1">{blockError}</p>}
           </div>
           <button
             onClick={addBlockedDate}
-            className="h-11 px-5 rounded-xl font-montserrat font-bold text-sm text-white flex items-center gap-2 flex-shrink-0"
+            disabled={isPending}
+            title={isPending ? 'Available after admin approval' : undefined}
+            className="h-11 px-5 rounded-xl font-montserrat font-bold text-sm text-white flex items-center gap-2 flex-shrink-0 disabled:opacity-60 disabled:cursor-not-allowed"
             style={{ background: 'linear-gradient(to right, #EF4444, #DC2626)' }}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

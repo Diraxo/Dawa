@@ -1,9 +1,9 @@
 import { Ionicons } from '@expo/vector-icons'
-import { useScrollToTop } from '@react-navigation/native'
+import { useScrollToTop, useFocusEffect } from '@react-navigation/native'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Image,
   Pressable,
@@ -16,11 +16,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
+import { BookingModal } from '@/components/ui/BookingModal'
 import { DoctorCard, Doctor } from '@/components/ui/DoctorCard'
 import { QuickActionCard } from '@/components/ui/QuickActionCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
@@ -31,7 +33,7 @@ function mapDoctor(d: any): Doctor {
     subtitle: d.hospital_name ?? undefined,
     specialty: d.specialty ?? 'General',
     rating_average: Number(d.rating_average) ?? 0,
-    review_count: d.total_consultations ?? 0,
+    review_count: d.review_count ?? 0,
     years_experience: d.years_experience ?? undefined,
     bio: d.bio ?? undefined,
     chat_price: Number(d.chat_price) ?? 0,
@@ -39,6 +41,8 @@ function mapDoctor(d: any): Doctor {
     video_price: Number(d.video_price) ?? 0,
     is_online: d.is_online ?? false,
     profile_photo_url: d.users?.profile_photo_url ?? null,
+    availability: d.availability ?? null,
+    languages: d.languages ?? null,
   }
 }
 
@@ -62,26 +66,74 @@ export default function HomeScreen() {
   const scrollRef = useRef<ScrollView>(null)
   useScrollToTop(scrollRef)
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null)
   const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>([])
   const [topDoctors, setTopDoctors] = useState<Doctor[]>([])
   const [loadingDoctors, setLoadingDoctors] = useState(true)
-  const [specialties, setSpecialties] = useState<string[]>([])
   const [upcomingAppointment, setUpcomingAppointment] = useState<{
     doctorName: string; type: string; date: string; time: string
   } | null>(null)
-  const [activeConsultation, setActiveConsultation] = useState<{
-    id: string; doctorId: string; doctorName: string; type: string; status: string
-  } | null>(null)
+  const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
+  const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
+
+  // Kept current via effect below so the realtime handler (subscribed once
+  // per fetch cycle) never reads a stale closed-over value of
+  // topDoctors/onlineDoctors.
+  const topDoctorsRef = useRef<Doctor[]>([])
+  const onlineDoctorsRef = useRef<Doctor[]>([])
+  useEffect(() => { topDoctorsRef.current = topDoctors }, [topDoctors])
+  useEffect(() => { onlineDoctorsRef.current = onlineDoctors }, [onlineDoctors])
+
+  // The booking modal is handed a one-shot snapshot when opened; keep its
+  // is_online AND availability (hours/blocked days/on-demand-vs-scheduled
+  // toggles) in sync with realtime updates for as long as it stays open —
+  // otherwise a doctor going offline, or blocking a day/changing hours,
+  // while the sheet is open lets the patient book a slot that's no longer
+  // actually available.
+  useEffect(() => {
+    if (!bookingDoctor) return
+    const live = topDoctors.find(d => d.id === bookingDoctor.id) ?? onlineDoctors.find(d => d.id === bookingDoctor.id)
+    if (!live) return
+    if (live.is_online !== bookingDoctor.is_online || live.availability !== bookingDoctor.availability) {
+      setBookingDoctor({ ...bookingDoctor, is_online: live.is_online, availability: live.availability })
+    }
+  }, [topDoctors, onlineDoctors, bookingDoctor])
+
+  // Latest known realtime-derived fields per doctor. A REST fetch (initial
+  // load, or the post-SUBSCRIBED reconciliation fetch below) can resolve
+  // after a realtime UPDATE has already landed for a doctor — without this,
+  // the fetch's setter would blindly overwrite state with a possibly-stale
+  // snapshot. Every fetch result is merged through this map (realtime always
+  // wins) before it reaches state.
+  const realtimeKnownRef = useRef<Map<string, Partial<Pick<Doctor,
+    'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
+    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count'
+  >>>>(new Map())
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+
+  const mergeKnownRealtime = (docs: Doctor[]): Doctor[] =>
+    docs.map(d => {
+      const known = realtimeKnownRef.current.get(d.id)
+      return known ? { ...d, ...known } : d
+    })
+
+  // Single merge point used by both the realtime handler and every fetch
+  // result so a doctor's fields are only ever patched, never blindly replaced.
+  const applyDoctorUpdate = (
+    list: Doctor[],
+    doctorId: string,
+    patch: Partial<Doctor>
+  ): Doctor[] => list.map(d => (d.id === doctorId ? { ...d, ...patch } : d))
 
   useEffect(() => {
     if (!user) return
     let mounted = true
     setLoadingDoctors(true)
 
-    ;(async () => {
-      // Public doctor/specialty data — no auth required
-      const [onlineRes, topRes, specsRes] = await Promise.all([
+    const CHANNEL_NAME = 'patient-home-doctor-status'
+
+    const fetchDoctorLists = async () => {
+      // Public doctor data — no auth required
+      const [onlineRes, topRes] = await Promise.all([
         supabase
           .from('doctor_profiles')
           .select('*, users!inner(full_name, profile_photo_url)')
@@ -95,17 +147,24 @@ export default function HomeScreen() {
           .eq('status', 'approved')
           .order('rating_average', { ascending: false })
           .limit(8),
-        supabase
-          .from('specialties')
-          .select('name')
-          .order('name', { ascending: true }),
       ])
 
       if (!mounted) return
-      if (onlineRes.data) setOnlineDoctors(onlineRes.data.map(mapDoctor))
-      if (topRes.data) setTopDoctors(topRes.data.map(mapDoctor))
-      if (specsRes.data?.length) setSpecialties(specsRes.data.map((s: { name: string }) => s.name))
+      if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
+      if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
       setLoadingDoctors(false)
+    }
+
+    ;(async () => {
+      // Fetch first, subscribe after — joining the realtime channel
+      // concurrently with this REST fetch let UPDATE events land in the
+      // join-latency window (silently dropped, never queued/redelivered),
+      // and let this fetch's callback clobber realtime state that had
+      // already been applied by an event that beat it back. The
+      // reconciliation fetch triggered on SUBSCRIBED below closes the
+      // join-latency-window gap.
+      await fetchDoctorLists()
+      if (!mounted) return
 
       // Upcoming appointment — requires patient's Supabase UUID for explicit filtering
       const token = await getToken()
@@ -114,22 +173,13 @@ export default function HomeScreen() {
       const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).maybeSingle()
       if (!me || !mounted) return
 
-      const [apptRes, activeRes] = await Promise.all([
-        client
-          .from('consultations')
-          .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
-          .eq('patient_id', (me as any).id)
-          .in('status', ['pending', 'active'])
-          .order('scheduled_at', { ascending: true })
-          .limit(1),
-        client
-          .from('consultations')
-          .select('id, type, status, doctor_id, doctor_profiles!inner(users!inner(full_name))')
-          .eq('patient_id', (me as any).id)
-          .in('status', ['waiting_for_doctor', 'accepted', 'in_progress'])
-          .order('created_at', { ascending: false })
-          .limit(1),
-      ])
+      const apptRes = await client
+        .from('consultations')
+        .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
+        .eq('patient_id', (me as any).id)
+        .in('status', ['pending', 'active'])
+        .order('scheduled_at', { ascending: true })
+        .limit(1)
 
       if (!mounted) return
       if (apptRes.data?.length) {
@@ -142,85 +192,139 @@ export default function HomeScreen() {
           time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         })
       }
-      if (activeRes.data?.length) {
-        const c = activeRes.data[0] as any
-        setActiveConsultation({
-          id: c.id,
-          doctorId: c.doctor_id,
-          doctorName: (c.doctor_profiles as any)?.users?.full_name ?? 'Doctor',
-          type: c.type ?? 'chat',
-          status: c.status,
-        })
-      }
-    })()
 
-    return () => { mounted = false }
-  }, [user])
+      if (!mounted) return
 
-  // Realtime: doctor online/offline status → update lists instantly
-  useEffect(() => {
-    const channel = supabase
-      .channel('patient-home-doctor-status')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
-        async (payload) => {
-          const updated = payload.new as any
-          if (updated.status !== 'approved') return
-          const doctorId: string = updated.id
-          const isNowOnline: boolean = updated.is_online
+      // Realtime: doctor online/offline/availability status → update lists instantly
+      const existing = supabase.getChannels().find(ch => ch.topic === `realtime:${CHANNEL_NAME}`)
+      if (existing) supabase.removeChannel(existing)
 
-          if (isNowOnline) {
-            // Fetch full profile (payload.new lacks the users join)
-            const { data } = await supabase
+      const channel = supabase
+        .channel(CHANNEL_NAME)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
+          async (payload) => {
+            const updated = payload.new as any
+            if (updated.status !== 'approved') return
+            const doctorId: string = updated.id
+            const isNowOnline: boolean = updated.is_online
+            const updatedLanguages: string[] | null | undefined = updated.languages
+            const updatedAvailability: Doctor['availability'] = updated.availability ?? null
+            const restPatch = {
+              bio: (updated.bio ?? undefined) as string | undefined,
+              specialty: (updated.specialty ?? 'General') as string,
+              subtitle: (updated.hospital_name ?? undefined) as string | undefined,
+              years_experience: (updated.years_experience ?? undefined) as number | undefined,
+              chat_price: Number(updated.chat_price ?? 0),
+              phone_price: Number(updated.phone_price ?? 0),
+              video_price: Number(updated.video_price ?? 0),
+              rating_average: Number(updated.rating_average ?? 0),
+              review_count: (updated.review_count ?? 0) as number,
+            }
+
+            realtimeKnownRef.current.set(doctorId, {
+              is_online: isNowOnline,
+              languages: updatedLanguages,
+              availability: updatedAvailability,
+              ...restPatch,
+            })
+
+            setTopDoctors(prev => applyDoctorUpdate(prev, doctorId, {
+              is_online: isNowOnline,
+              languages: updatedLanguages ?? undefined,
+              availability: updatedAvailability,
+              ...restPatch,
+            }))
+
+            if (!isNowOnline) {
+              setOnlineDoctors(prev => prev.filter(d => d.id !== doctorId))
+              return
+            }
+
+            if (onlineDoctorsRef.current.some(d => d.id === doctorId)) {
+              setOnlineDoctors(prev => applyDoctorUpdate(prev, doctorId, {
+                is_online: true,
+                languages: updatedLanguages ?? undefined,
+                availability: updatedAvailability,
+                ...restPatch,
+              }))
+              return
+            }
+
+            // Reuse the profile we already have (from topDoctors) instead of an
+            // extra network round trip — a failed/slow fetch here used to mean
+            // the doctor silently never reappeared as online until app restart.
+            const known = topDoctorsRef.current.find(d => d.id === doctorId)
+            if (known) {
+              setOnlineDoctors(prev => [{ ...known, ...restPatch, is_online: true, availability: updatedAvailability ?? known.availability }, ...prev])
+              return
+            }
+
+            const { data, error } = await supabase
               .from('doctor_profiles')
               .select('*, users!inner(full_name, profile_photo_url)')
               .eq('id', doctorId)
-              .single()
+              .maybeSingle()
+            if (error) {
+              console.warn('[home] failed to fetch newly-online doctor profile', error)
+              return
+            }
             if (data) {
-              const doctor = mapDoctor(data)
               setOnlineDoctors(prev =>
-                prev.some(d => d.id === doctorId)
-                  ? prev.map(d => d.id === doctorId ? doctor : d)
-                  : [doctor, ...prev]
-              )
-              setTopDoctors(prev =>
-                prev.map(d => d.id === doctorId ? { ...d, is_online: true } : d)
+                prev.some(d => d.id === doctorId) ? prev : [mapDoctor(data), ...prev]
               )
             }
-          } else {
-            setOnlineDoctors(prev => prev.filter(d => d.id !== doctorId))
-            setTopDoctors(prev =>
-              prev.map(d => d.id === doctorId ? { ...d, is_online: false } : d)
-            )
           }
-        }
-      )
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
-  }, [])
-
-  // Realtime: update active consultation banner when status changes
-  useEffect(() => {
-    if (!activeConsultation) return
-    const channel = supabase
-      .channel(`patient-home-active-${activeConsultation.id}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${activeConsultation.id}` },
-        (payload) => {
-          const updated = payload.new as any
-          if (['waiting_for_doctor', 'accepted', 'in_progress'].includes(updated.status)) {
-            setActiveConsultation(prev => prev ? { ...prev, status: updated.status } : null)
-          } else {
-            setActiveConsultation(null)
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            // Reconcile anything that changed during the join-latency window
+            // (channel handshake + auth) between the initial fetch above and
+            // this channel actually reaching SUBSCRIBED.
+            fetchDoctorLists()
           }
-        }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [activeConsultation?.id])
+        })
+
+      channelRef.current = channel
+    })()
+
+    return () => {
+      mounted = false
+      if (channelRef.current) supabase.removeChannel(channelRef.current)
+    }
+  }, [user])
+
+  // Tab screens stay mounted across tab switches, so the mount-only effect
+  // above never sees a doctor's photo edited while this tab was in the
+  // background — re-fetch both lists on every return to this tab. Realtime
+  // is_online/availability state is preserved via mergeKnownRealtime.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false
+      ;(async () => {
+        const [onlineRes, topRes] = await Promise.all([
+          supabase
+            .from('doctor_profiles')
+            .select('*, users!inner(full_name, profile_photo_url)')
+            .eq('status', 'approved')
+            .eq('is_online', true)
+            .order('rating_average', { ascending: false })
+            .limit(8),
+          supabase
+            .from('doctor_profiles')
+            .select('*, users!inner(full_name, profile_photo_url)')
+            .eq('status', 'approved')
+            .order('rating_average', { ascending: false })
+            .limit(8),
+        ])
+        if (cancelled) return
+        if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
+        if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
+      })()
+      return () => { cancelled = true }
+    }, [])
+  )
 
   const firstName =
     user?.firstName ?? user?.fullName?.split(' ')[0] ?? 'there'
@@ -236,15 +340,8 @@ export default function HomeScreen() {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
   }
 
-  const handleSpecialtyPress = (specialty: string) => {
-    setSelectedSpecialty((prev) => (prev === specialty ? null : specialty))
-  }
-
   const filterDoctors = (docs: Doctor[]) => {
     let result = docs
-    if (selectedSpecialty) {
-      result = result.filter((d) => d.specialty === selectedSpecialty)
-    }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase()
       result = result.filter(
@@ -260,31 +357,12 @@ export default function HomeScreen() {
   const filteredOnline = filterDoctors(onlineDoctors)
   const filteredTop = filterDoctors(topDoctors)
 
-  const handleActiveBannerPress = () => {
-    if (!activeConsultation) return
-    if (activeConsultation.status === 'waiting_for_doctor') {
-      router.push({
-        pathname: '/(patient)/waiting-room' as any,
-        params: { doctorId: activeConsultation.doctorId, consultationId: activeConsultation.id, type: activeConsultation.type },
-      })
-    } else {
-      const screen = activeConsultation.type === 'video'
-        ? '/(patient)/video-consultation'
-        : activeConsultation.type === 'phone'
-        ? '/(patient)/phone-consultation'
-        : '/(patient)/chat-consultation'
-      router.push({
-        pathname: screen as any,
-        params: { consultationId: activeConsultation.id, doctorId: activeConsultation.doctorId, doctorName: activeConsultation.doctorName },
-      })
-    }
-  }
-
   const handleQuickAction = () => {
     router.push('/(patient)/(tabs)/doctors')
   }
 
   return (
+    <>
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView
         ref={scrollRef}
@@ -304,8 +382,8 @@ export default function HomeScreen() {
             onPress={() => router.push('/(patient)/(tabs)/profile')}
             style={({ pressed }) => [styles.avatarBtn, pressed && { opacity: 0.75 }]}
           >
-            {user?.imageUrl ? (
-              <Image source={{ uri: user.imageUrl }} style={styles.avatar} />
+            {(dbPhotoUrl ?? user?.imageUrl) ? (
+              <Image source={{ uri: (dbPhotoUrl ?? user?.imageUrl) as string }} style={styles.avatar} />
             ) : (
               <View style={styles.avatarFallback}>
                 <Text style={styles.avatarInitial}>
@@ -333,27 +411,6 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* ── Active Consultation Banner ── */}
-        {activeConsultation && (
-          <Pressable
-            style={({ pressed }) => [styles.activeBanner, pressed && { opacity: 0.9 }]}
-            onPress={handleActiveBannerPress}
-          >
-            <View style={styles.activeBannerLeft}>
-              <View style={styles.activeBannerDot} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.activeBannerTitle} numberOfLines={1}>
-                  {activeConsultation.status === 'waiting_for_doctor'
-                    ? `Waiting for Dr. ${activeConsultation.doctorName}`
-                    : `Active session · Dr. ${activeConsultation.doctorName}`}
-                </Text>
-                <Text style={styles.activeBannerSub}>Tap to return</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.tealGreen} />
-          </Pressable>
-        )}
-
         {/* ── Quick Actions ── */}
         <View style={styles.quickActionsHeader}>
           <Text style={styles.sectionTitle}>{t('quickActions')}</Text>
@@ -380,42 +437,6 @@ export default function HomeScreen() {
           />
         </View>
 
-        {/* ── Specialties ── */}
-        <Text style={[styles.sectionTitle, styles.mt24]}>{t('specialties')}</Text>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.specialtiesRow}
-          style={styles.mt12}
-        >
-          {specialties.map((specialty) => {
-            const selected = selectedSpecialty === specialty
-            return (
-              <Pressable
-                key={specialty}
-                onPress={() => handleSpecialtyPress(specialty)}
-                style={({ pressed }) => [
-                  styles.pill,
-                  selected && styles.pillSelected,
-                  pressed && { opacity: 0.8 },
-                ]}
-              >
-                {selected && (
-                  <Ionicons
-                    name="checkmark"
-                    size={14}
-                    color={colors.mistWhite}
-                    style={styles.checkIcon}
-                  />
-                )}
-                <Text style={[styles.pillText, selected && styles.pillTextSelected]}>
-                  {specialty}
-                </Text>
-              </Pressable>
-            )
-          })}
-        </ScrollView>
-
         {/* ── Available Now ── */}
         <View style={[styles.sectionRow, styles.mt24]}>
           <Text style={styles.sectionTitle}>{t('availableNow')}</Text>
@@ -438,7 +459,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredOnline.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
+              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}
@@ -467,7 +488,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredTop.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} />
+              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}
@@ -518,6 +539,12 @@ export default function HomeScreen() {
         <View style={styles.bottomPad} />
       </ScrollView>
     </SafeAreaView>
+    <BookingModal
+      visible={bookingDoctor !== null}
+      doctor={bookingDoctor}
+      onClose={() => setBookingDoctor(null)}
+    />
+    </>
   )
 }
 
@@ -641,38 +668,6 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
-  // Specialties
-  specialtiesRow: {
-    gap: 10,
-    paddingRight: 20,
-    paddingBottom: 4,
-  },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: colors.mistWhite,
-    borderWidth: 1,
-    borderColor: colors.steelGrey,
-  },
-  pillSelected: {
-    backgroundColor: colors.tealGreen,
-    borderColor: colors.tealGreen,
-  },
-  checkIcon: {
-    marginRight: 4,
-  },
-  pillText: {
-    fontFamily: fonts.medium,
-    fontSize: 13,
-    color: '#374151',
-  },
-  pillTextSelected: {
-    color: colors.mistWhite,
-  },
-
   // Doctor lists
   doctorListContent: {
     paddingRight: 20,
@@ -754,18 +749,6 @@ const styles = StyleSheet.create({
   },
   emptyApptText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   emptyApptSub: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280' },
-
-  // Active consultation banner
-  activeBanner: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#ECFDF5', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14,
-    marginBottom: 16, borderWidth: 1, borderColor: colors.tealGreen,
-    ...shadow(colors.tealGreen, 0, 2, 8, 0.12, 2),
-  },
-  activeBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
-  activeBannerDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.tealGreen },
-  activeBannerTitle: { fontFamily: fonts.semiBold, fontSize: 14, color: '#065F46' },
-  activeBannerSub: { fontFamily: fonts.regular, fontSize: 12, color: '#10B981', marginTop: 2 },
 
   // Spacing utilities
   mt12: { marginTop: 12 },

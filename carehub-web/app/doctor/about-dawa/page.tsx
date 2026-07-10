@@ -19,7 +19,7 @@ const HOW_IT_WORKS = [
   { step: 1, icon: '📝', title: 'Complete your profile', desc: 'Upload your medical license, set your specialty, experience, and pricing.' },
   { step: 2, icon: '⏳', title: 'Wait for approval', desc: 'Our admin team reviews your application within 24–48 hours.' },
   { step: 3, icon: '🟢', title: 'Go online', desc: 'Toggle your status to online when you\'re ready to accept patients.' },
-  { step: 4, icon: '📩', title: 'Accept requests', desc: 'Receive consultation requests and accept within 30 seconds.' },
+  { step: 4, icon: '📩', title: 'Accept requests', desc: 'Receive consultation requests and accept as soon as you can.' },
   { step: 5, icon: '📋', title: 'Complete the session', desc: 'Fill in consultation notes — diagnosis, prescription, follow-up.' },
 ]
 

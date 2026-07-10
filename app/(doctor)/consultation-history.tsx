@@ -5,6 +5,7 @@ import { useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -24,12 +25,22 @@ interface ConsultRow {
   type: 'chat' | 'phone' | 'video'
   status: string
   patientName: string
+  patientPhotoUrl: string | null
   startedAt: string | null
+  scheduledAt: string | null
+  createdAt: string | null
   endedAt: string | null
   amount: number
 }
 
-const TYPE_ICONS: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+// Doctor-side "when did this happen" derivation, kept identical (in intent)
+// to the patient-side and website equivalents — prefer the real session
+// start time, fall back to the booking time, fall back to row creation.
+function displayTimestamp(row: ConsultRow): string | null {
+  return row.startedAt ?? row.scheduledAt ?? row.createdAt
+}
+
+const TYPE_ICONS: Record<string, string> = { chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam' }
 
 const STATUS_COLOR: Record<string, string> = {
   completed: colors.success,
@@ -62,8 +73,8 @@ export default function ConsultationHistoryScreen() {
         const { data } = await client
           .from('consultations')
           .select(`
-            id, type, status, patient_amount, started_at, ended_at,
-            patient:users!consultations_patient_id_fkey(full_name)
+            id, type, status, doctor_amount, started_at, scheduled_at, created_at, ended_at,
+            patient:users!consultations_patient_id_fkey(full_name, profile_photo_url)
           `)
           .order('created_at', { ascending: false })
 
@@ -73,9 +84,14 @@ export default function ConsultationHistoryScreen() {
             type: r.type ?? 'chat',
             status: r.status,
             patientName: r.patient?.full_name ?? 'Patient',
+            patientPhotoUrl: r.patient?.profile_photo_url ?? null,
             startedAt: r.started_at,
+            scheduledAt: r.scheduled_at,
+            createdAt: r.created_at,
             endedAt: r.ended_at,
-            amount: Number(r.patient_amount) || 0,
+            // Doctor's post-commission cut — matches the figure used by the
+            // Consultations tab, website, and Withdraw balance.
+            amount: Number(r.doctor_amount) || 0,
           })))
         }
       } catch {
@@ -149,18 +165,37 @@ export default function ConsultationHistoryScreen() {
             </View>
           ) : (
             filtered.map((row) => (
-              <View key={row.id} style={styles.rowCard}>
+              <Pressable
+                key={row.id}
+                style={({ pressed }) => [styles.rowCard, pressed && { opacity: 0.85 }]}
+                onPress={() => row.status === 'completed'
+                  ? router.push({ pathname: '/(doctor)/consultation-summary' as any, params: { consultationId: row.id, patientName: row.patientName } })
+                  : undefined
+                }
+              >
                 <View style={styles.rowLeft}>
-                  <Text style={styles.rowIcon}>{TYPE_ICONS[row.type] ?? '💬'}</Text>
+                  {row.patientPhotoUrl ? (
+                    <Image source={{ uri: row.patientPhotoUrl }} style={styles.rowAvatarPhoto} />
+                  ) : (
+                    <View style={styles.rowAvatarFallback}>
+                      <Text style={styles.rowAvatarInitial}>{row.patientName.charAt(0).toUpperCase()}</Text>
+                    </View>
+                  )}
+                  <View style={styles.rowTypeBadge}>
+                    <Ionicons name={(TYPE_ICONS[row.type] ?? 'chatbubble-ellipses') as any} size={10} color={colors.mistWhite} />
+                  </View>
                 </View>
                 <View style={styles.rowBody}>
                   <Text style={styles.rowPatient}>{row.patientName}</Text>
                   <Text style={styles.rowDate}>
-                    {row.startedAt
-                      ? new Date(row.startedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                    {displayTimestamp(row)
+                      ? new Date(displayTimestamp(row)!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
                       : 'Not started'}
-                    {row.endedAt && ` · ${Math.round((new Date(row.endedAt).getTime() - new Date(row.startedAt!).getTime()) / 60000)} min`}
+                    {row.endedAt && row.startedAt && ` · ${Math.round((new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()) / 60000)} min`}
                   </Text>
+                  {row.status === 'completed' && (
+                    <Text style={styles.viewSummaryHint}>Tap to view summary & prescription</Text>
+                  )}
                 </View>
                 <View style={styles.rowRight}>
                   <Text style={[styles.rowStatus, { color: STATUS_COLOR[row.status] ?? '#6B7280' }]}>
@@ -169,8 +204,11 @@ export default function ConsultationHistoryScreen() {
                   {row.status === 'completed' && (
                     <Text style={styles.rowAmount}>+ETB {row.amount}</Text>
                   )}
+                  {row.status === 'completed' && (
+                    <Ionicons name="chevron-forward" size={14} color={colors.steelGrey} />
+                  )}
                 </View>
-              </View>
+              </Pressable>
             ))
           )}
 
@@ -213,11 +251,19 @@ const styles = StyleSheet.create({
     ...shadow('#000', 0, 1, 4, 0.05, 1),
   },
   rowLeft: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center' },
-  rowIcon: { fontSize: 20 },
+  rowAvatarPhoto: { width: 42, height: 42, borderRadius: 12 },
+  rowAvatarFallback: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.careBlue, alignItems: 'center', justifyContent: 'center' },
+  rowAvatarInitial: { fontFamily: fonts.bold, fontSize: 16, color: colors.mistWhite },
+  rowTypeBadge: {
+    position: 'absolute', bottom: -3, right: -3, width: 18, height: 18, borderRadius: 9,
+    backgroundColor: colors.steelGrey, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: colors.mistWhite,
+  },
   rowBody: { flex: 1 },
   rowPatient: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
   rowDate: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginTop: 2 },
   rowRight: { alignItems: 'flex-end', gap: 4 },
   rowStatus: { fontFamily: fonts.semiBold, fontSize: 12 },
   rowAmount: { fontFamily: fonts.bold, fontSize: 13, color: colors.success },
+  viewSummaryHint: { fontFamily: fonts.regular, fontSize: 11, color: colors.careBlue, marginTop: 2 },
 })

@@ -14,7 +14,7 @@ export const metadata: Metadata = {
   title: 'Dawa — Trusted Care. Anywhere. Always.',
   description: 'Connect with verified doctors via chat, phone, or video call. Available 24/7 from any device.',
   keywords: ['telemedicine', 'online doctor', 'healthcare', 'consultation', 'Ethiopia', 'Africa'],
-  icons: { icon: '/logo.png', apple: '/logo.png' },
+  icons: { icon: '/logo-white.png', apple: '/logo-white.png' },
   openGraph: {
     title: 'Dawa — Trusted Care. Anywhere. Always.',
     description: 'Connect with verified doctors in minutes. Chat, phone, or video consultations.',

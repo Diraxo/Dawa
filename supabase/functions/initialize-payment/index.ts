@@ -36,6 +36,16 @@ const TYPE_LABEL: Record<string, string> = {
   video: 'Video Consultation',
 }
 
+// `doctor_name` is passed through as-is by whichever client screen calls this
+// function, and doctor registration invites free-text names that may already
+// contain "Dr." — strip any existing prefix before prepending our own so the
+// Chapa checkout page never shows "Dr. Dr. Name".
+function formatDoctorName(rawName: string | null | undefined): string {
+  const name = (rawName ?? '').trim()
+  if (!name) return 'your doctor'
+  return `Dr. ${name.replace(/^Dr\.?\s+/i, '').trim()}`
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS })
@@ -83,7 +93,7 @@ Deno.serve(async (req: Request) => {
     return_url,
     customization: {
       title:       'Dawa Health',
-      description: `${TYPE_LABEL[type] ?? 'Consultation'} with Dr. ${doctor_name}`,
+      description: `${TYPE_LABEL[type] ?? 'Consultation'} with ${formatDoctorName(doctor_name)}`,
       logo:        'https://ulrgkqjjiclulnuotifh.supabase.co/storage/v1/object/public/assets/icon.png',
     },
   }

@@ -96,6 +96,8 @@ export default function VerifyScreen() {
           ? 'Incorrect code. Please check and try again.'
           : lower.includes('expired')
           ? 'Code has expired. Tap "Resend code" below.'
+          : errCode === 'resource_not_found' || lower.includes('no sign in was found')
+          ? 'This session has expired or is no longer valid. Please start over.'
           : errMsg
       )
       setCode(Array(CODE_LENGTH).fill(''))

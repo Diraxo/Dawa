@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 
 export async function PATCH(req: NextRequest) {
   const { userId } = await auth()
@@ -43,6 +43,6 @@ export async function PATCH(req: NextRequest) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  await logAdminAction(userId, 'update_app_config', { platform, latest_version, min_required_version })
+  await logAdminAction(userId, 'config_updated', { platform, latest_version, min_required_version }, { entityType: 'app_config', ...getRequestContext(req) })
   return NextResponse.json({ success: true })
 }

@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   FlatList,
   Keyboard,
@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useAuthenticatedRedirect } from '@/hooks/useAuthenticatedRedirect'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useTranslation } from 'react-i18next'
@@ -153,26 +154,13 @@ export default function CountryScreen() {
   const { top, bottom } = useSafeAreaInsets()
   const { setSelectedCountry: persistCountry } = useAppStore()
 
+  useAuthenticatedRedirect()
+
   const searchRef = useRef<TextInput>(null)
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [enabledCodes, setEnabledCodes] = useState<string[] | null>(null)
 
-  // Fetch enabled countries from admin settings
-  useEffect(() => {
-    supabase
-      .from('platform_settings')
-      .select('value')
-      .eq('key', 'countries')
-      .maybeSingle()
-      .then(({ data }) => {
-        if (Array.isArray(data?.value)) setEnabledCodes(data.value as string[])
-      })
-  }, [])
-
-  const visibleCountries = enabledCodes
-    ? COUNTRIES.filter((c) => enabledCodes.includes(c.id))
-    : COUNTRIES
+  const visibleCountries = COUNTRIES
 
   const filteredCountries = searchQuery.trim()
     ? visibleCountries.filter((c) =>
@@ -186,12 +174,12 @@ export default function CountryScreen() {
     setSelectedCountry((prev) => (prev === name ? null : name))
   }
 
-  const handleContinue = (dest?: string) => {
+  const handleContinue = () => {
     Keyboard.dismiss()
     if (!selectedCountry) return
     persistCountry(selectedCountry)
     saveCountryToSupabase(selectedCountry)
-    router.push((dest ?? '/(auth)/language') as never)
+    router.push('/(auth)/language' as never)
   }
 
   const isActive = selectedCountry !== null
@@ -278,32 +266,20 @@ export default function CountryScreen() {
         </View>
       </View>
 
-      {/* ── FOOTER: Login + Sign Up buttons ── */}
+      {/* ── FOOTER: Continue button ── */}
       <View style={[styles.footer, { paddingBottom: Math.max(bottom, 20) }]}>
-        {/* Login — outline */}
         <Pressable
-          onPress={() => isActive && handleContinue('/(auth)/sign-in')}
-          style={[styles.loginWrapper, !isActive && styles.disabledOpacity]}
+          onPress={handleContinue}
           disabled={!isActive}
-        >
-          <View style={styles.loginButton}>
-            <Text style={styles.loginText}>{t('login')}</Text>
-          </View>
-        </Pressable>
-
-        {/* Sign Up — gradient */}
-        <Pressable
-          onPress={() => isActive && handleContinue('/(auth)/sign-up')}
-          style={[styles.signUpWrapper, !isActive && styles.disabledOpacity]}
-          disabled={!isActive}
+          style={[styles.continueWrapper, !isActive && styles.disabledOpacity]}
         >
           <LinearGradient
             colors={['#2962FF', '#00BFA5']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.signUpButton}
+            style={styles.continueButton}
           >
-            <Text style={styles.signUpText}>{t('signUp')}</Text>
+            <Text style={styles.continueText}>{t('continue')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -476,45 +452,23 @@ const styles = StyleSheet.create({
   // ── Footer ──
   footer: {
     backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    gap: 12,
     paddingHorizontal: 20,
     paddingTop: 8,
   },
   disabledOpacity: {
     opacity: 0.5,
   },
-  loginWrapper: {
-    flex: 1,
+  continueWrapper: {
     borderRadius: 16,
     overflow: 'hidden',
   },
-  loginButton: {
-    height: 52,
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: colors.steelGrey,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loginText: {
-    fontFamily: fonts.semiBold,
-    fontSize: 16,
-    color: colors.inkBlack,
-  },
-  signUpWrapper: {
-    flex: 1,
-    borderRadius: 16,
-    overflow: 'hidden',
-  },
-  signUpButton: {
+  continueButton: {
     height: 52,
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  signUpText: {
+  continueText: {
     fontFamily: fonts.bold,
     fontSize: 16,
     color: '#FFFFFF',

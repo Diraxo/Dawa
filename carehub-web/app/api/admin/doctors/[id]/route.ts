@@ -1,7 +1,9 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
+import { stripDrPrefix } from '@/lib/utils'
+import { sendDoctorStatusPush } from '@/lib/doctorStatusPush'
 
 async function sendEmail(to: string, subject: string, body: string) {
   const apiKey = process.env.RESEND_API_KEY
@@ -68,16 +70,17 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       .eq('id', profile.user_id)
       .single()
 
-    const doctorName = userRow?.full_name ?? 'Doctor'
+    const doctorName = stripDrPrefix(userRow?.full_name ?? 'Doctor')
 
     if (action === 'suspend') {
       await supabaseAdmin.from('notifications').insert({
         user_id: profile.user_id,
         title: 'Account Suspended',
-        body: 'Your Dawa doctor account has been suspended by an administrator. Please contact support for more information.',
+        body: 'Your account has been suspended. Please contact support.',
         type: 'doctor_suspended',
         data_json: { doctorProfileId: id },
       })
+      await sendDoctorStatusPush(profile.user_id, 'Account Suspended', 'Your account has been suspended. Please contact support.')
 
       if (userRow?.email) {
         await sendEmail(
@@ -94,6 +97,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         type: 'doctor_reinstated',
         data_json: { doctorProfileId: id },
       })
+      await sendDoctorStatusPush(profile.user_id, 'Account Reinstated', 'Your Dawa doctor account has been reinstated. You can now go online and accept consultations again.')
 
       if (userRow?.email) {
         await sendEmail(
@@ -105,6 +109,6 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     }
   }
 
-  await logAdminAction(userId, action === 'suspend' ? 'suspend_doctor' : 'reinstate_doctor', { doctorProfileId: id })
+  await logAdminAction(userId, action === 'suspend' ? 'suspend_doctor' : 'reinstate_doctor', { doctorProfileId: id }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
   return NextResponse.json({ success: true, status: newStatus })
 }

@@ -24,8 +24,10 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { waitForModalDismiss } from '@/lib/imagePicker'
 import { MIN_AGE_PATIENT, meetsAgeRequirement } from '@/lib/ageValidation'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { pushOwnPhotoToStream } from '@/lib/stream'
+import { getAuthClient } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useTranslation } from 'react-i18next'
 
@@ -473,6 +475,7 @@ function FormField({
   keyboardType,
   suffix,
   onPress,
+  multiline = false,
 }: {
   label: string
   value: string
@@ -482,19 +485,23 @@ function FormField({
   keyboardType?: React.ComponentProps<typeof TextInput>['keyboardType']
   suffix?: React.ReactNode
   onPress?: () => void
+  multiline?: boolean
 }) {
   const content = (
     <View style={fieldStyles.wrap}>
       <Text style={fieldStyles.label}>{label}</Text>
-      <View style={[fieldStyles.inputRow, !editable && fieldStyles.inputRowDisabled]}>
+      <View style={[fieldStyles.inputRow, multiline && fieldStyles.inputRowMultiline, !editable && fieldStyles.inputRowDisabled]}>
         <TextInput
-          style={[fieldStyles.input, !editable && fieldStyles.inputDisabled, { pointerEvents: onPress ? 'none' : 'auto' }]}
+          style={[fieldStyles.input, multiline && fieldStyles.inputMultiline, !editable && fieldStyles.inputDisabled, { pointerEvents: onPress ? 'none' : 'auto' }]}
           value={value}
           onChangeText={onChangeText}
           placeholder={placeholder}
           placeholderTextColor="#9CA3AF"
           editable={editable && !onPress}
           keyboardType={keyboardType}
+          multiline={multiline}
+          numberOfLines={multiline ? 3 : undefined}
+          textAlignVertical={multiline ? 'top' : 'center'}
         />
         {suffix}
       </View>
@@ -533,12 +540,21 @@ const fieldStyles = StyleSheet.create({
     backgroundColor: '#F3F4F6',
     borderColor: '#E5E7EB',
   },
+  inputRowMultiline: {
+    height: undefined,
+    minHeight: 80,
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+  },
   input: {
     flex: 1,
     fontFamily: fonts.regular,
     fontSize: 15,
     color: colors.inkBlack,
     padding: 0,
+  },
+  inputMultiline: {
+    minHeight: 56,
   },
   inputDisabled: { color: '#9CA3AF' },
   errorText: {
@@ -566,8 +582,11 @@ export default function EditPersonalInfoScreen() {
   const [phone, setPhone] = useState('')
   const [gender, setGender] = useState('')
   const [country, setCountry] = useState('')
+  const [address, setAddress] = useState('')
   const [localImageUri, setLocalImageUri] = useState<string | null>(null)
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
+  const [dbPhotoUrl, setDbPhotoUrl] = useState<string | null>(null)
+  const [photoRemoved, setPhotoRemoved] = useState(false)
 
   const defaultDob: DateValue = useMemo(() => ({ day: 1, month: 0, year: 10 }), [])
   const [dob, setDob] = useState<DateValue>(defaultDob)
@@ -592,7 +611,7 @@ export default function EditPersonalInfoScreen() {
 
       const { data: ud } = await client
         .from('users')
-        .select('id, phone, country')
+        .select('id, phone, country, address, profile_photo_url')
         .eq('clerk_id', user!.id)
         .single()
 
@@ -600,6 +619,8 @@ export default function EditPersonalInfoScreen() {
         setSupabaseUserId((ud as any).id)
         setPhone((ud as any).phone ?? '')
         setCountry((ud as any).country ?? selectedCountry ?? '')
+        setAddress((ud as any).address ?? '')
+        setDbPhotoUrl((ud as any).profile_photo_url ?? null)
 
         const { data: pp } = await client
           .from('patient_profiles')
@@ -629,6 +650,7 @@ export default function EditPersonalInfoScreen() {
 
   const handlePickPhoto = async (source: 'camera' | 'gallery') => {
     setShowPhotoPicker(false)
+    await waitForModalDismiss()
 
     if (source === 'camera') {
       const { status } = await ImagePicker.requestCameraPermissionsAsync()
@@ -644,6 +666,7 @@ export default function EditPersonalInfoScreen() {
       })
       if (!result.canceled && result.assets[0]) {
         setLocalImageUri(result.assets[0].uri)
+        setPhotoRemoved(false)
       }
     } else {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync()
@@ -659,8 +682,23 @@ export default function EditPersonalInfoScreen() {
       })
       if (!result.canceled && result.assets[0]) {
         setLocalImageUri(result.assets[0].uri)
+        setPhotoRemoved(false)
       }
     }
+  }
+
+  const handleDeletePhoto = () => {
+    Alert.alert(t('deletePhoto'), t('deletePhotoConfirm'), [
+      { text: t('cancel'), style: 'cancel' },
+      {
+        text: t('delete'),
+        style: 'destructive',
+        onPress: () => {
+          setLocalImageUri(null)
+          setPhotoRemoved(true)
+        },
+      },
+    ])
   }
 
   // ── Save ─────────────────────────────────────────────────────────────────────
@@ -687,21 +725,24 @@ export default function EditPersonalInfoScreen() {
       // Update Clerk name
       await user.update({ firstName, lastName })
 
-      // Upload profile photo if a new one was picked
-      let profilePhotoUrl: string | null = null
+      // Upload profile photo if a new one was picked, or clear it if deleted
+      let profilePhotoUrl: string | null | undefined = undefined
+      const avatarPath = `${user.id}/avatar.jpg`
       if (localImageUri) {
         try {
           const response = await fetch(localImageUri)
           const arrayBuffer = await response.arrayBuffer()
-          const fileName = `${user.id}.jpg`
-          await supabase.storage
-            .from('avatars')
-            .upload(fileName, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
-          const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(fileName)
-          profilePhotoUrl = urlData.publicUrl
+          await client.storage
+            .from('profile-photos')
+            .upload(avatarPath, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
+          const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(avatarPath)
+          profilePhotoUrl = `${urlData.publicUrl}?v=${Date.now()}`
         } catch {
           // Photo upload failed — save rest of profile anyway
         }
+      } else if (photoRemoved) {
+        await client.storage.from('profile-photos').remove([avatarPath]).catch(() => {})
+        profilePhotoUrl = null
       }
 
       // Upsert users table, get back the Supabase UUID
@@ -711,12 +752,15 @@ export default function EditPersonalInfoScreen() {
           full_name: `${firstName} ${lastName}`.trim(),
           phone,
           country,
-          ...(profilePhotoUrl ? { profile_photo_url: profilePhotoUrl } : {}),
+          address: address.trim() || null,
+          ...(profilePhotoUrl !== undefined ? { profile_photo_url: profilePhotoUrl } : {}),
         },
         { onConflict: 'clerk_id' }
       ).select('id').single()
 
       const uid = supabaseUserId ?? upserted?.id
+
+      if (profilePhotoUrl !== undefined) pushOwnPhotoToStream(profilePhotoUrl)
 
       // Build ISO date string
       const dobDate = dobLabel
@@ -740,7 +784,7 @@ export default function EditPersonalInfoScreen() {
     }
   }
 
-  const displayImageUri = localImageUri ?? user?.imageUrl
+  const displayImageUri = photoRemoved ? null : localImageUri ?? dbPhotoUrl ?? user?.imageUrl
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -786,6 +830,11 @@ export default function EditPersonalInfoScreen() {
             </LinearGradient>
           </Pressable>
           <Text style={styles.changePhotoText}>{t('tapToChangePhoto')}</Text>
+          {!!displayImageUri && (
+            <Pressable onPress={handleDeletePhoto} hitSlop={8} style={{ marginTop: 4 }}>
+              <Text style={styles.deletePhotoText}>{t('deletePhoto')}</Text>
+            </Pressable>
+          )}
         </View>
 
         {/* ── Personal Information ── */}
@@ -849,6 +898,13 @@ export default function EditPersonalInfoScreen() {
               suffix={<Ionicons name="lock-closed" size={14} color="#9CA3AF" />}
             />
           </View>
+          <FormField
+            label={t('address')}
+            value={address}
+            onChangeText={setAddress}
+            placeholder={t('enterAddress')}
+            multiline
+          />
         </View>
 
         {/* Save button */}
@@ -951,6 +1007,11 @@ const styles = StyleSheet.create({
     fontFamily: fonts.medium,
     fontSize: 13,
     color: colors.tealGreen,
+  },
+  deletePhotoText: {
+    fontFamily: fonts.medium,
+    fontSize: 13,
+    color: colors.error,
   },
 
   sectionLabel: {

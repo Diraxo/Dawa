@@ -28,7 +28,7 @@ const FAQS = [
     items: [
       {
         q: 'How do consultation requests work?',
-        a: 'When a patient books with you, you\'ll receive a push notification. You have 30 seconds to accept or decline. If no response, the request is automatically declined.',
+        a: 'When a patient books with you, you\'ll receive a push notification. Accept or decline whenever you\'re ready — if there\'s no response for an extended period, the request is automatically declined and the patient\'s payment is preserved as credit.',
       },
       {
         q: 'What happens after a consultation ends?',

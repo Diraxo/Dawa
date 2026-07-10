@@ -77,6 +77,8 @@ export default function UnderReviewScreen() {
               updated.rejection_reason ?? 'Your application was not approved. Please reapply with valid documents.'
             )
             setShowRejectionModal(true)
+          } else if (updated.status === 'suspended') {
+            Alert.alert('Account Suspended', 'Your account has been suspended. Please contact support.')
           }
         }
       )
@@ -105,6 +107,8 @@ export default function UnderReviewScreen() {
           profile.rejection_reason ?? 'Your application was not approved. Please reapply with valid documents.'
         )
         setShowRejectionModal(true)
+      } else if (profile?.status === 'suspended') {
+        Alert.alert('Account Suspended', 'Your account has been suspended. Please contact support.')
       } else {
         Alert.alert(t('stillUnderReview'), t('stillUnderReviewMsg'))
       }

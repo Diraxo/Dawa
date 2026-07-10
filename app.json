@@ -4,28 +4,46 @@
     "slug": "carehub",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/white logo.jpg",
+    "icon": "./assets/images/app-icon.png",
     "scheme": "carehub",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/white logo.jpg",
+      "image": "./assets/images/logo-white.png",
       "resizeMode": "contain",
       "backgroundColor": "#070E27"
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.carehub.app"
+      "bundleIdentifier": "com.carehub.app",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio",
+          "fetch",
+          "processing",
+          "remote-notification",
+          "voip"
+        ],
+        "NSMicrophoneUsageDescription": "Dawa needs microphone access for voice and video consultations.",
+        "NSCameraUsageDescription": "Dawa needs camera access for video consultations.",
+        "UIUserInterfaceStyle": "Light"
+      },
+      "entitlements": {
+        "aps-environment": "production",
+        "com.apple.developer.pushkit.unrestricted-voip": true
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/white logo.jpg",
+        "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#070E27"
       },
       "package": "com.carehub.app",
       "versionCode": 1,
       "allowBackup": false,
       "edgeToEdgeEnabled": true,
+      "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -36,15 +54,26 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.ACCESS_NETWORK_STATE",
-        "android.permission.BLUETOOTH"
-      ],
-      "googleServicesFile": "./google-services.json"
+        "android.permission.BLUETOOTH",
+        "android.permission.MANAGE_OWN_CALLS",
+        "android.permission.CALL_PHONE",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_PHONE_NUMBERS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.WAKE_LOCK",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.DISABLE_KEYGUARD",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ]
     },
     "web": {
       "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "./plugins/withFirebaseMessagingManifestFix.js",
       "expo-router",
       "expo-font",
       [
@@ -73,6 +102,41 @@
           "color": "#00BFA5",
           "defaultChannel": "appointments",
           "sounds": []
+        }
+      ],
+      "@react-native-firebase/app",
+      "@bacons/apple-targets",
+      [
+        "@config-plugins/react-native-callkeep",
+        {
+          "ios": {
+            "appName": "Dawa",
+            "hasVideo": true,
+            "imageName": "AppIcon",
+            "supportsVideo": true,
+            "maximumCallGroups": "1",
+            "maximumCallsPerCallGroup": "1",
+            "includesCallsInRecents": false,
+            "supportsHolding": false,
+            "supportsDTMF": false,
+            "supportsGrouping": false,
+            "supportsUngrouping": false
+          },
+          "android": {
+            "selfManaged": false,
+            "alertTitle": "Phone Account Required",
+            "alertDescription": "Dawa needs access to your phone accounts to show incoming consultation calls.",
+            "cancelButton": "Cancel",
+            "okButton": "Allow",
+            "imageName": "ic_launcher",
+            "additionalPermissions": [],
+            "foregroundService": {
+              "channelId": "dawa_incoming_call",
+              "channelName": "Incoming Consultations",
+              "notificationTitle": "Incoming Consultation",
+              "notificationIcon": "mipmap/ic_launcher"
+            }
+          }
         }
       ]
     ],

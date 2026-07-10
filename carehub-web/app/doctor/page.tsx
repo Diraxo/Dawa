@@ -1,13 +1,11 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
-import { useRouter } from 'next/navigation'
 import { getAuthClient, supabase } from '@/lib/supabase'
-import { getStreamClient, fetchStreamToken } from '@/lib/stream'
-import { RealtimeChannel } from '@supabase/supabase-js'
+import { writeDoctorOnlineStatus } from '@/lib/doctorOnline'
 import { getGreeting, stripDrPrefix } from '@/lib/utils'
-import { MessageCircle, Phone, Video, ClipboardList, CheckCircle2, Star, Wallet, Calendar, User } from 'lucide-react'
+import { ClipboardList, CheckCircle2, Star, Wallet, Calendar, User, XCircle, Clock, Ban, MessageCircle, Phone, Video } from 'lucide-react'
 
 interface DoctorStats {
   totalConsultations: number
@@ -17,14 +15,6 @@ interface DoctorStats {
   isOnline: boolean
   profileId: string | null
   status: string
-}
-
-interface IncomingRequest {
-  id: string
-  type: string
-  patientName: string
-  patientClerkId: string
-  amount: number
 }
 
 interface TodayAppointment {
@@ -38,28 +28,83 @@ interface TodayAppointment {
 export default function DoctorHomePage() {
   const { user } = useUser()
   const { getToken } = useAuth()
-  const router = useRouter()
   const [stats, setStats] = useState<DoctorStats>({
     totalConsultations: 0, completedToday: 0, rating: 0, earnings: 0, isOnline: false, profileId: null, status: ''
   })
   const [loading, setLoading] = useState(true)
   const [todaySchedule, setTodaySchedule] = useState<TodayAppointment[]>([])
-  const [request, setRequest] = useState<IncomingRequest | null>(null)
-  const channelRef = useRef<RealtimeChannel | null>(null)
-  const shownIds = useRef(new Set<string>())
 
   useEffect(() => {
     if (!user) return
     loadStats()
-    return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
-      }
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
+  // is_online is one shared state across Home, Schedule, and any other
+  // client (mobile, another tab) — without this the toggle here only ever
+  // updated local state, so it silently drifted out of sync with whatever
+  // the Schedule page (or another session) last wrote to the DB until this
+  // page was reloaded.
+  useEffect(() => {
+    if (!stats.profileId) return
+    const channel = supabase
+      .channel(`doctor-home-online-${stats.profileId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${stats.profileId}` },
+        (payload) => {
+          const isOnline = (payload.new as { is_online?: boolean })?.is_online
+          if (typeof isOnline === 'boolean') setStats(prev => ({ ...prev, isOnline }))
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [stats.profileId])
+
+  // Live-refresh Today's Schedule whenever any of this doctor's
+  // consultations change (new scheduled booking, reschedule, cancellation) —
+  // without this the page only ever loaded schedule once, on mount.
+  useEffect(() => {
+    if (!stats.profileId) return
+    const channel = supabase
+      .channel(`doctor-home-schedule-${stats.profileId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${stats.profileId}` },
+        async () => {
+          const token = await getToken()
+          if (!token) return
+          await loadTodaySchedule(getAuthClient(token), stats.profileId!)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats.profileId])
+
+  async function loadTodaySchedule(client: ReturnType<typeof getAuthClient>, doctorProfileId: string) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+
+    const { data: scheduleData } = await client
+      .from('consultations')
+      .select('id, type, status, scheduled_at, patient:users!patient_id(full_name)')
+      .eq('doctor_id', doctorProfileId)
+      .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress', 'scheduled'])
+      .gte('scheduled_at', today.toISOString())
+      .lt('scheduled_at', tomorrow.toISOString())
+      .order('scheduled_at', { ascending: true })
+
+    setTodaySchedule((scheduleData ?? []).map((c: any) => ({
+      id: c.id,
+      type: c.type,
+      patientName: c.patient?.full_name ?? 'Patient',
+      time: c.scheduled_at ? new Date(c.scheduled_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+      status: c.status,
+    })))
+  }
 
   async function loadStats() {
     const token = await getToken()
@@ -78,28 +123,12 @@ export default function DoctorHomePage() {
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
 
-    const [{ count: completedToday }, { data: earningsData }, { data: scheduleData }, { data: waitingData }] = await Promise.all([
+    const [{ count: completedToday }, { data: earningsData }] = await Promise.all([
       client.from('consultations').select('id', { count: 'exact', head: true })
         .eq('doctor_id', profile.id).eq('status', 'completed').gte('created_at', today.toISOString()),
       client.from('consultations').select('doctor_amount')
         .eq('doctor_id', profile.id).eq('status', 'completed'),
-      client.from('consultations')
-        .select('id, type, status, scheduled_at, patient:users!patient_id(full_name)')
-        .eq('doctor_id', profile.id)
-        .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress'])
-        .gte('scheduled_at', today.toISOString())
-        .lt('scheduled_at', tomorrow.toISOString())
-        .order('scheduled_at', { ascending: true }),
-      client.from('consultations')
-        .select('id, type, patient_id, patient_amount')
-        .eq('doctor_id', profile.id)
-        .eq('status', 'waiting_for_doctor')
-        .eq('payment_status', 'paid')
-        .order('created_at', { ascending: true })
-        .limit(1),
     ])
 
     const earnings = (earningsData ?? []).reduce((sum, r) => sum + (r.doctor_amount ?? 0), 0)
@@ -113,48 +142,8 @@ export default function DoctorHomePage() {
       profileId: profile.id,
       status: profile.status,
     })
-    setTodaySchedule((scheduleData ?? []).map((c: any) => ({
-      id: c.id,
-      type: c.type,
-      patientName: c.patient?.full_name ?? 'Patient',
-      time: c.scheduled_at ? new Date(c.scheduled_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
-      status: c.status,
-    })))
+    await loadTodaySchedule(client, profile.id)
     setLoading(false)
-
-    // Populate incoming request on page load so a refresh doesn't lose a waiting patient
-    if (waitingData && waitingData.length > 0) {
-      const w = waitingData[0]
-      if (!shownIds.current.has(w.id)) {
-        shownIds.current.add(w.id)
-        const { data: pat } = await client.from('users').select('full_name, clerk_id').eq('id', w.patient_id).single()
-        setRequest({ id: w.id, type: w.type, patientName: pat?.full_name ?? 'Patient', patientClerkId: pat?.clerk_id ?? '', amount: w.patient_amount ?? 0 })
-      }
-    }
-
-    if (profile.id) {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
-      }
-      channelRef.current = supabase
-        .channel(`doctor-home-${profile.id}`)
-        .on('postgres_changes', {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'consultations',
-          filter: `doctor_id=eq.${profile.id}`,
-        }, async payload => {
-          const c = payload.new as { id: string; type: string; status: string; patient_id: string; patient_amount: number; payment_status: string }
-          if (c.status !== 'waiting_for_doctor') return
-          if (c.payment_status !== 'paid') return
-          if (shownIds.current.has(c.id)) return
-          shownIds.current.add(c.id)
-          const { data: pat } = await client.from('users').select('full_name, clerk_id').eq('id', c.patient_id).single()
-          setRequest({ id: c.id, type: c.type, patientName: pat?.full_name ?? 'Patient', patientClerkId: pat?.clerk_id ?? '', amount: c.patient_amount ?? 0 })
-        })
-        .subscribe()
-    }
   }
 
   async function toggleOnline() {
@@ -163,108 +152,32 @@ export default function DoctorHomePage() {
     if (!token) return
     const client = getAuthClient(token)
     const newStatus = !stats.isOnline
-    await client.from('doctor_profiles').update({ is_online: newStatus }).eq('id', stats.profileId)
+    await writeDoctorOnlineStatus(client, stats.profileId, newStatus)
     setStats(prev => ({ ...prev, isOnline: newStatus }))
-  }
-
-  async function handleAccept(consultId: string) {
-    const token = await getToken()
-    const type = request?.type ?? 'chat'
-    const patientClerkId = request?.patientClerkId ?? ''
-
-    if (token) {
-      const client = getAuthClient(token)
-      await client.from('consultations').update({ status: 'accepted', started_at: new Date().toISOString() }).eq('id', consultId)
-    }
-
-    // For chat consultations, create the Stream channel immediately so the patient
-    // can enter without hitting a race condition where the channel doesn't exist yet.
-    if (type === 'chat' && user && patientClerkId) {
-      try {
-        const clerkToken = token ?? await getToken()
-        if (clerkToken) {
-          const streamToken = await fetchStreamToken(clerkToken)
-          const streamCli = getStreamClient()
-          if (!streamCli.userID) {
-            await streamCli.connectUser(
-              { id: user.id, name: user.fullName ?? user.firstName ?? 'Doctor' },
-              streamToken,
-            )
-          }
-          const ch = streamCli.channel('messaging', consultId, {
-            members: [user.id, patientClerkId],
-          })
-          await ch.create()
-        }
-      } catch {
-        // channel may already exist — not fatal
-      }
-    }
-
-    setRequest(null)
-    router.push(`/doctor/consultation/${type}/${consultId}`)
-  }
-
-  async function handleDecline(id: string) {
-    const token = await getToken()
-    if (token) {
-      const client = getAuthClient(token)
-      await client.from('consultations').update({ status: 'declined' }).eq('id', id)
-    }
-    setRequest(null)
   }
 
   const isPending = !loading && !!stats.status && stats.status !== 'approved'
 
   return (
     <div className="p-8 max-w-5xl relative">
-      {/* Incoming request overlay — only for approved doctors */}
-      {request && stats.status === 'approved' && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="card p-8 max-w-sm w-full text-center">
-            <div className="w-16 h-16 rounded-3xl bg-gradient-interactive flex items-center justify-center mx-auto mb-3 animate-bounce-sm">
-              {request.type === 'chat'
-                ? <MessageCircle size={30} className="text-white" />
-                : request.type === 'phone'
-                  ? <Phone size={30} className="text-white" />
-                  : <Video size={30} className="text-white" />}
-            </div>
-            <h2 className="font-montserrat font-black text-xl text-ink-black mb-1">Incoming Request</h2>
-            <p className="text-ink-black/60 text-sm mb-1">{request.patientName} wants a {request.type} consultation</p>
-            <p className="text-teal-green font-bold text-sm mb-4">ETB {request.amount}</p>
-
-            <div className="inline-flex items-center gap-1.5 bg-success/10 text-success border border-success/30 rounded-full px-3 py-1 text-xs font-semibold mb-6">
-              ✓ Payment Confirmed
-            </div>
-
-            <div className="flex gap-3">
-              <button onClick={() => handleDecline(request.id)}
-                className="flex-1 h-12 rounded-2xl bg-danger/10 text-danger font-bold border border-danger/20 hover:bg-danger/20 transition-colors">
-                Decline
-              </button>
-              <button onClick={() => handleAccept(request.id)}
-                className="flex-1 btn-primary h-12 rounded-2xl">
-                Accept ✅
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Pending / rejected banner */}
       {isPending && (
         <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl mb-6 text-sm font-montserrat border
-          ${stats.status === 'rejected'
+          ${stats.status === 'rejected' || stats.status === 'suspended'
             ? 'bg-[#FEE2E2] border-[#FECACA] text-[#991B1B]'
             : 'bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]'}`}>
-          <span className="text-lg shrink-0 mt-0.5">{stats.status === 'rejected' ? '❌' : '⏳'}</span>
+          <span className="shrink-0 mt-0.5">
+            {stats.status === 'rejected' ? <XCircle size={20} /> : stats.status === 'suspended' ? <Ban size={20} /> : <Clock size={20} />}
+          </span>
           <div>
             <p className="font-bold mb-0.5">
-              {stats.status === 'rejected' ? 'Application Not Approved' : 'Account Under Review'}
+              {stats.status === 'rejected' ? 'Application Not Approved' : stats.status === 'suspended' ? 'Account Suspended' : 'Account Under Review'}
             </p>
             <p className="opacity-80">
               {stats.status === 'rejected'
                 ? 'Your application was not approved. Please contact support to reapply.'
+                : stats.status === 'suspended'
+                ? 'Your account has been suspended. Please contact support.'
                 : 'Your account is being reviewed by our admin team. You cannot perform any actions until you are approved.'}
             </p>
           </div>
@@ -275,7 +188,7 @@ export default function DoctorHomePage() {
       <div className="mb-8 flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-montserrat font-black text-3xl text-ink-black">
-            {getGreeting()}, Dr. {stripDrPrefix(user?.firstName ?? 'Doctor')} 👋
+            {getGreeting()}, Dr. {stripDrPrefix(user?.firstName ?? 'Doctor')}
           </h1>
           <p className="text-ink-black/50 text-sm mt-1">Ready to help patients today?</p>
         </div>
@@ -345,17 +258,18 @@ export default function DoctorHomePage() {
           </div>
         ) : todaySchedule.length === 0 ? (
           <div className="card p-8 text-center">
-            <p className="text-3xl mb-2">📅</p>
+            <Calendar size={28} className="mx-auto mb-2 text-steel-grey" />
             <p className="text-ink-black/40 text-sm">No appointments scheduled for today</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2">
             {todaySchedule.map(appt => {
-              const typeIcons: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+              const typeIcons: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
+              const ApptIcon = typeIcons[appt.type] ?? ClipboardList
               return (
                 <div key={appt.id} className="card p-4 flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center text-xl flex-shrink-0">
-                    {typeIcons[appt.type] ?? '📋'}
+                  <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0">
+                    <ApptIcon size={20} className="text-ink-black/60" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-montserrat font-semibold text-sm text-ink-black">{appt.patientName}</p>

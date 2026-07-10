@@ -4,6 +4,16 @@ const { withNativewind } = require("nativewind/metro");
 
 const config = getDefaultConfig(__dirname);
 
+// carehub-web is a separate Next.js app, not part of the RN bundle. Metro still
+// crawls/watches it by default since it lives under the project root, and its
+// .next build output contains paths with "?" that crash Metro's file watcher on
+// Windows (lstat UNKNOWN on FallbackWatcher). Block the whole directory so Metro
+// never resolves or watches it.
+config.resolver.blockList = [
+  ...(Array.isArray(config.resolver.blockList) ? config.resolver.blockList : [config.resolver.blockList]),
+  /carehub-web[/\\].*/,
+];
+
 // Allow expo-image to load local .svg files as assets
 config.resolver.assetExts.push('svg');
 

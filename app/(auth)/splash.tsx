@@ -4,18 +4,35 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, StyleSheet, Text, View } from 'react-native';
 
 import { images } from '@/constants/images';
 import { colors } from '@/constants/colors';
+import { PENDING_PAYMENT_KEY, type PendingPayment } from '@/lib/pendingPayment';
 import { useAuthStore } from '@/store/authStore';
+
+// Clerk's isLoaded flips true once the SDK has initialized, but on a device
+// that previously had a session, the actual session restore (reading the
+// rotating client JWT back out of storage) can still be resolving for a
+// moment after that. If we trust isSignedIn=false the instant isLoaded
+// flips, a returning user can get misrouted into country/language/sign-in —
+// screens with no way back to Home — even though they're really still
+// signed in. Since store/authStore.ts persists userId across app restarts,
+// a cached userId here means this device was previously authenticated, so
+// we give Clerk a brief grace window to finish restoring before concluding
+// the user is genuinely signed out.
+const SIGNED_OUT_RETRY_MS = 400
+const MAX_SIGNED_OUT_RETRIES = 6 // ~2.4s total grace window
 
 export default function SplashScreen() {
   const router = useRouter();
   const { isSignedIn, isLoaded, userId: clerkUserId } = useAuth()
-  const { userRole, setUserRole } = useAuthStore()
+  const { userRole, userId: cachedUserId, setUserRole } = useAuthStore()
   const [timerDone, setTimerDone] = useState(false);
+  const [signedOutRetries, setSignedOutRetries] = useState(0);
+  const navigatedRef = useRef(false);
 
   // Always show splash for at least 2500ms
   useEffect(() => {
@@ -25,13 +42,62 @@ export default function SplashScreen() {
 
   // Navigate once both the timer has elapsed and Clerk has initialized
   useEffect(() => {
-    if (!timerDone || !isLoaded) return
+    if (!timerDone || !isLoaded || navigatedRef.current) return
+
+    // A cold-launch push notification tap (e.g. a doctor's incoming-request
+    // alert) already pushed its own destination on top of this screen — that
+    // happens synchronously well before this timer fires. Deferring here
+    // stops this effect from later replacing that screen with Home, which
+    // otherwise flashes Home in between the notification tap and the actual
+    // consultation screen opening.
+    if (useAuthStore.getState().pendingNotificationRoute) {
+      useAuthStore.getState().setPendingNotificationRoute(false)
+      navigatedRef.current = true
+      return
+    }
 
     const navigate = async () => {
+      // Guards against this effect firing more than once: it re-runs whenever
+      // `userRole` changes, and this same async function calls setUserRole()
+      // below — without this guard that state update would re-trigger a
+      // second, redundant navigation on top of whatever screen is now active.
+      navigatedRef.current = true
+
       if (!isSignedIn) {
+        if (cachedUserId && signedOutRetries < MAX_SIGNED_OUT_RETRIES) {
+          navigatedRef.current = false // haven't actually navigated yet — allow the retry re-run
+          setTimeout(() => setSignedOutRetries((n) => n + 1), SIGNED_OUT_RETRY_MS)
+          return
+        }
         router.replace('/(auth)/country' as never)
         return
       }
+
+      // A Chapa payment may still be verifying — this marker survives even a
+      // full app kill (e.g. the external banking-app hand-off suspended us
+      // mid-flow). Route straight back to payment-return so the patient
+      // always sees verification/confirmation, never a Home flash in between.
+      try {
+        const raw = await AsyncStorage.getItem(PENDING_PAYMENT_KEY)
+        if (raw) {
+          const pending = JSON.parse(raw) as PendingPayment
+          if (pending?.consultationId) {
+            router.replace({
+              pathname: '/(patient)/payment-return' as any,
+              params: {
+                consultationId:   pending.consultationId,
+                doctorId:         pending.doctorId,
+                doctorName:       pending.doctorName,
+                consultationType: pending.consultationType,
+                timing:           pending.timing,
+                scheduledAt:      pending.scheduledAt,
+                chapaStatus:      'unknown',
+              },
+            })
+            return
+          }
+        }
+      } catch {}
 
       // Always query Supabase for the authoritative role — don't rely on Zustand alone
       try {
@@ -82,7 +148,7 @@ export default function SplashScreen() {
     }
 
     navigate()
-  }, [timerDone, isLoaded, isSignedIn, userRole])
+  }, [timerDone, isLoaded, isSignedIn, userRole, cachedUserId, signedOutRetries])
 
   return (
     <View style={styles.root}>

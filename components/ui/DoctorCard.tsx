@@ -22,6 +22,7 @@ export type Doctor = {
   is_online: boolean
   profile_photo_url?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
+  languages?: string[] | null
 }
 
 type Props = {
@@ -53,47 +54,17 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
             {doctor.subtitle ? (
               <Text style={L.hospital} numberOfLines={1}>{doctor.subtitle}</Text>
             ) : null}
-            <View style={L.ratingRow}>
-              <Ionicons name="star" size={13} color={colors.warning} />
-              <Text style={L.ratingText}>{doctor.rating_average.toFixed(1)}</Text>
-              <Text style={L.reviewText}>({doctor.review_count} reviews)</Text>
-              {doctor.years_experience !== undefined ? (
-                <Text style={L.expText}>· {doctor.years_experience} yrs exp</Text>
-              ) : null}
-            </View>
+            {doctor.languages && doctor.languages.length > 0 ? (
+              <View style={L.languageRow}>
+                <Ionicons name="language-outline" size={13} color={colors.tealGreen} />
+                <Text style={L.languageText} numberOfLines={1}>{doctor.languages.join(', ')}</Text>
+              </View>
+            ) : null}
           </View>
         </View>
 
         {/* Divider */}
         <View style={L.divider} />
-
-        {/* Consulting prices */}
-        <Text style={L.consultLabel}>Consulting</Text>
-        <View style={L.priceRow}>
-          <View style={L.priceItem}>
-            <View style={L.priceIconRow}>
-              <Ionicons name="chatbubble-ellipses" size={13} color={colors.tealGreen} />
-              <Text style={L.priceType}>Chat</Text>
-            </View>
-            <Text style={L.priceVal}>ETB {doctor.chat_price}</Text>
-          </View>
-          <View style={L.priceSep} />
-          <View style={L.priceItem}>
-            <View style={L.priceIconRow}>
-              <Ionicons name="call" size={13} color={colors.careBlue} />
-              <Text style={L.priceType}>Phone</Text>
-            </View>
-            <Text style={L.priceVal}>ETB {doctor.phone_price}</Text>
-          </View>
-          <View style={L.priceSep} />
-          <View style={L.priceItem}>
-            <View style={L.priceIconRow}>
-              <Ionicons name="videocam" size={13} color="#7C3AED" />
-              <Text style={L.priceType}>Video</Text>
-            </View>
-            <Text style={L.priceVal}>ETB {doctor.video_price}</Text>
-          </View>
-        </View>
 
         {/* Action buttons */}
         <View style={L.btnRow}>
@@ -142,28 +113,25 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
         <Text style={G.subtitle} numberOfLines={1}>{doctor.subtitle}</Text>
       ) : null}
       <Text style={G.specialty} numberOfLines={1}>{doctor.specialty}</Text>
-      <View style={G.ratingRow}>
-        <Ionicons name="star" size={12} color={colors.warning} />
-        <Text style={G.ratingText}>{doctor.rating_average.toFixed(1)}</Text>
-        <Text style={G.reviewText}>{doctor.review_count} reviews</Text>
-      </View>
-      <View style={G.priceRow}>
-        <View style={G.priceItem}>
-          <Ionicons name="chatbubble-ellipses" size={10} color={colors.tealGreen} />
-          <Text style={G.priceText}>{doctor.chat_price}</Text>
+      {doctor.languages && doctor.languages.length > 0 ? (
+        <View style={G.languageRow}>
+          <Ionicons name="language-outline" size={12} color={colors.tealGreen} />
+          <Text style={G.languageText} numberOfLines={1}>{doctor.languages.join(', ')}</Text>
         </View>
-        <View style={G.priceDivider} />
-        <View style={G.priceItem}>
-          <Ionicons name="call" size={10} color={colors.careBlue} />
-          <Text style={G.priceText}>{doctor.phone_price}</Text>
-        </View>
-        <View style={G.priceDivider} />
-        <View style={G.priceItem}>
-          <Ionicons name="videocam" size={10} color="#7C3AED" />
-          <Text style={G.priceText}>{doctor.video_price}</Text>
-        </View>
-        <Text style={G.priceCurrency}> ETB</Text>
-      </View>
+      ) : null}
+      <Pressable
+        onPress={() => (onBook ? onBook(doctor) : onPress(doctor.id))}
+        style={({ pressed }) => [G.bookWrap, pressed && { opacity: 0.85 }]}
+      >
+        <LinearGradient
+          colors={gradients.interactive}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={G.bookBtn}
+        >
+          <Text style={G.bookBtnText}>Book</Text>
+        </LinearGradient>
+      </Pressable>
     </Pressable>
   )
 }
@@ -195,21 +163,9 @@ const L = StyleSheet.create({
   name: { fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack, marginBottom: 2 },
   specialty: { fontFamily: fonts.medium, fontSize: 13, color: colors.tealGreen, marginBottom: 2 },
   hospital: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
-  ratingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap' },
-  ratingText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.inkBlack },
-  reviewText: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF' },
-  expText: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF' },
+  languageRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  languageText: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', flexShrink: 1 },
   divider: { height: 1, backgroundColor: colors.cloudGrey, marginVertical: 12 },
-  consultLabel: {
-    fontFamily: fonts.semiBold, fontSize: 11, color: '#6B7280',
-    textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10,
-  },
-  priceRow: { flexDirection: 'row', alignItems: 'center' },
-  priceItem: { flex: 1, alignItems: 'center', gap: 4 },
-  priceIconRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  priceType: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
-  priceVal: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.inkBlack },
-  priceSep: { width: 1, height: 36, backgroundColor: colors.steelGrey },
   btnRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
   viewBtn: {
     flex: 1, height: 44, borderRadius: 12,
@@ -245,13 +201,10 @@ const G = StyleSheet.create({
   },
   name: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 2 },
   subtitle: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 2 },
-  specialty: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 8 },
-  ratingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 6 },
-  ratingText: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.inkBlack },
-  reviewText: { fontFamily: fonts.regular, fontSize: 11, color: '#9CA3AF' },
-  priceRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4, marginTop: 2 },
-  priceItem: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  priceText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.inkBlack },
-  priceDivider: { width: 1, height: 10, backgroundColor: colors.steelGrey },
-  priceCurrency: { fontFamily: fonts.medium, fontSize: 10, color: '#9CA3AF' },
+  specialty: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
+  languageRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 10 },
+  languageText: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', flexShrink: 1 },
+  bookWrap: { borderRadius: 10, overflow: 'hidden' },
+  bookBtn: { height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+  bookBtnText: { fontFamily: fonts.bold, fontSize: 13, color: colors.mistWhite },
 })

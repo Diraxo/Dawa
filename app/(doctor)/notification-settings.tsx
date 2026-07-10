@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '@clerk/clerk-expo'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Pressable,
   ScrollView,
@@ -14,6 +15,20 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { shadow } from '@/lib/shadow'
+import { getAuthClient } from '@/lib/supabase'
+
+// Maps this screen's toggle ids to notification_preferences columns.
+// new_request/messages/account reuse the patient-side columns (same
+// meaning); the rest are doctor-only columns added in migration 053.
+const COLUMN: Record<string, string> = {
+  new_request: 'consultation_request',
+  messages: 'messages',
+  consultation_update: 'consultation_update',
+  earnings: 'earnings',
+  reviews: 'reviews',
+  account: 'account',
+  announcements: 'announcements',
+}
 
 interface Setting {
   id: string
@@ -24,76 +39,133 @@ interface Setting {
   value: boolean
 }
 
+const DEFAULT_SETTINGS: Setting[] = [
+  {
+    id: 'new_request',
+    icon: 'medkit-outline',
+    iconColor: colors.tealGreen,
+    title: 'New Consultation Requests',
+    subtitle: 'When a patient books with you',
+    value: true,
+  },
+  {
+    id: 'messages',
+    icon: 'chatbubble-outline',
+    iconColor: colors.interactiveBlue,
+    title: 'Patient Messages',
+    subtitle: 'New messages in active consultations',
+    value: true,
+  },
+  {
+    id: 'consultation_update',
+    icon: 'refresh-circle-outline',
+    iconColor: colors.careBlue,
+    title: 'Consultation Updates',
+    subtitle: 'Status changes and cancellations',
+    value: true,
+  },
+  {
+    id: 'earnings',
+    icon: 'cash-outline',
+    iconColor: colors.success,
+    title: 'Earnings & Withdrawals',
+    subtitle: 'Payment confirmations and updates',
+    value: true,
+  },
+  {
+    id: 'reviews',
+    icon: 'star-outline',
+    iconColor: '#F59E0B',
+    title: 'New Patient Reviews',
+    subtitle: 'When a patient rates your consultation',
+    value: true,
+  },
+  {
+    id: 'account',
+    icon: 'shield-checkmark-outline',
+    iconColor: '#7C3AED',
+    title: 'Account & Security',
+    subtitle: 'Login alerts and policy updates',
+    value: true,
+  },
+  {
+    id: 'announcements',
+    icon: 'megaphone-outline',
+    iconColor: '#6B7280',
+    title: 'Platform Announcements',
+    subtitle: 'Updates, features, and news from Dawa',
+    value: false,
+  },
+]
+
 export default function DoctorNotificationSettingsScreen() {
   const router = useRouter()
+  const { getToken } = useAuth()
+  const userIdRef = useRef<string | null>(null)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const [settings, setSettings] = useState<Setting[]>([
-    {
-      id: 'new_request',
-      icon: 'medkit-outline',
-      iconColor: colors.tealGreen,
-      title: 'New Consultation Requests',
-      subtitle: 'When a patient books with you',
-      value: true,
-    },
-    {
-      id: 'messages',
-      icon: 'chatbubble-outline',
-      iconColor: colors.interactiveBlue,
-      title: 'Patient Messages',
-      subtitle: 'New messages in active consultations',
-      value: true,
-    },
-    {
-      id: 'consultation_update',
-      icon: 'refresh-circle-outline',
-      iconColor: colors.careBlue,
-      title: 'Consultation Updates',
-      subtitle: 'Status changes and cancellations',
-      value: true,
-    },
-    {
-      id: 'earnings',
-      icon: 'cash-outline',
-      iconColor: colors.success,
-      title: 'Earnings & Withdrawals',
-      subtitle: 'Payment confirmations and updates',
-      value: true,
-    },
-    {
-      id: 'reviews',
-      icon: 'star-outline',
-      iconColor: '#F59E0B',
-      title: 'New Patient Reviews',
-      subtitle: 'When a patient rates your consultation',
-      value: true,
-    },
-    {
-      id: 'account',
-      icon: 'shield-checkmark-outline',
-      iconColor: '#7C3AED',
-      title: 'Account & Security',
-      subtitle: 'Login alerts and policy updates',
-      value: true,
-    },
-    {
-      id: 'announcements',
-      icon: 'megaphone-outline',
-      iconColor: '#6B7280',
-      title: 'Platform Announcements',
-      subtitle: 'Updates, features, and news from Dawa',
-      value: false,
-    },
-  ])
+  const [settings, setSettings] = useState<Setting[]>(DEFAULT_SETTINGS)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const token = await getToken()
+      if (!token || cancelled) return
+      const client = getAuthClient(token)
+
+      const { data: me } = await client.from('users').select('id').maybeSingle()
+      if (!me || cancelled) return
+      userIdRef.current = (me as any).id
+
+      const { data } = await client
+        .from('notification_preferences')
+        .select(Object.values(COLUMN).join(', '))
+        .eq('user_id', (me as any).id)
+        .maybeSingle()
+
+      if (data && !cancelled) {
+        setSettings((prev) =>
+          prev.map((s) => {
+            const column = COLUMN[s.id]
+            const stored = (data as any)[column]
+            return typeof stored === 'boolean' ? { ...s, value: stored } : s
+          })
+        )
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const savePrefs = (next: Setting[]) => {
+    if (!userIdRef.current) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(async () => {
+      const token = await getToken()
+      if (!token) return
+      const client = getAuthClient(token)
+      const columns = Object.fromEntries(next.map((s) => [COLUMN[s.id], s.value]))
+      await client
+        .from('notification_preferences')
+        .upsert({ user_id: userIdRef.current!, ...columns }, { onConflict: 'user_id' })
+    }, 600)
+  }
 
   const toggle = (id: string) => {
-    setSettings((prev) => prev.map((s) => (s.id === id ? { ...s, value: !s.value } : s)))
+    setSettings((prev) => {
+      const next = prev.map((s) => (s.id === id ? { ...s, value: !s.value } : s))
+      savePrefs(next)
+      return next
+    })
   }
 
   const allEnabled = settings.every((s) => s.value)
   const toggleAll = () => {
     const next = !allEnabled
-    setSettings((prev) => prev.map((s) => ({ ...s, value: next })))
+    setSettings((prev) => {
+      const updated = prev.map((s) => ({ ...s, value: next }))
+      savePrefs(updated)
+      return updated
+    })
   }
 
   const sections = [

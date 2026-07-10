@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { File as ExpoFile } from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Alert,
   KeyboardAvoidingView,
@@ -24,7 +24,8 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { pushOwnPhotoToStream } from '@/lib/stream'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -77,7 +78,7 @@ async function uploadDocument(
 }
 
 interface PriceCardProps {
-  icon: string
+  icon: keyof typeof Ionicons.glyphMap
   title: string
   description: string
   value: string
@@ -89,7 +90,7 @@ function PriceCard({ icon, title, description, value, onChange }: PriceCardProps
     <View style={styles.priceCard}>
       <View style={styles.priceCardLeft}>
         <View style={styles.priceIconWrap}>
-          <Text style={styles.priceIcon}>{icon}</Text>
+          <Ionicons name={icon} size={20} color={colors.careBlue} />
         </View>
         <View style={styles.priceTextWrap}>
           <Text style={styles.priceTitle}>{title}</Text>
@@ -124,6 +125,13 @@ export default function RegistrationStep4() {
   const [phonePrice, setPhonePrice] = useState(store.regPhonePrice)
   const [videoPrice, setVideoPrice] = useState(store.regVideoPrice)
   const [submitting, setSubmitting] = useState(false)
+  const [commissionRate, setCommissionRate] = useState(20)
+
+  useEffect(() => {
+    supabase.rpc('get_commission_rate').then(({ data }) => {
+      if (typeof data === 'number') setCommissionRate(data)
+    })
+  }, [])
 
   const isValid = chatPrice.length > 0 && phonePrice.length > 0 && videoPrice.length > 0
 
@@ -169,17 +177,19 @@ export default function RegistrationStep4() {
           // Path must be clerk_id/filename so the RLS foldername policy passes
           const photoPath = `${user.id}/profile.${photoExt}`
           const { error: photoErr } = await client.storage
-            .from('avatars')
+            .from('profile-photos')
             .upload(photoPath, photoBuffer, {
               contentType: `image/${photoExt === 'jpg' ? 'jpeg' : photoExt}`,
               upsert: true,
             })
           if (!photoErr) {
-            uploadedDocs.push({ bucket: 'avatars', path: photoPath })
-            const { data: photoUrlData } = client.storage.from('avatars').getPublicUrl(photoPath)
+            uploadedDocs.push({ bucket: 'profile-photos', path: photoPath })
+            const { data: photoUrlData } = client.storage.from('profile-photos').getPublicUrl(photoPath)
+            const cacheBustedUrl = `${photoUrlData.publicUrl}?v=${Date.now()}`
             await client.from('users')
-              .update({ profile_photo_url: photoUrlData.publicUrl })
+              .update({ profile_photo_url: cacheBustedUrl })
               .eq('clerk_id', user.id)
+            pushOwnPhotoToStream(cacheBustedUrl)
           }
         } catch {
           // Photo upload failed — proceed without blocking registration
@@ -223,6 +233,7 @@ export default function RegistrationStep4() {
           years_experience: store.regYearsOfExperience,
           hospital_name: store.regHospitalName,
           bio: store.regBio,
+          languages: store.regLanguages,
           license_doc_url: licenseDocUrl,
           id_doc_url: idDocUrl,
           chat_price: parseInt(chatPrice, 10) || 0,
@@ -273,13 +284,13 @@ export default function RegistrationStep4() {
           {/* Revenue split note */}
           <View style={styles.revenueNote}>
             <Ionicons name="wallet-outline" size={18} color={colors.tealGreen} />
-            <Text style={styles.revenueText}>{t('revenueNoteText')}</Text>
+            <Text style={styles.revenueText}>{t('revenueNoteText', { keepPct: 100 - commissionRate, feePct: commissionRate })}</Text>
           </View>
 
           {/* Price Cards */}
-          <PriceCard icon="💬" title={t('chatConsultation')} description={t('chatConsultationDesc2')} value={chatPrice} onChange={setChatPrice} />
-          <PriceCard icon="📞" title={t('phoneCall')} description={t('phoneCallDesc')} value={phonePrice} onChange={setPhonePrice} />
-          <PriceCard icon="🎥" title={t('videoCall')} description={t('videoCallDesc')} value={videoPrice} onChange={setVideoPrice} />
+          <PriceCard icon="chatbubble-ellipses" title={t('chatConsultation')} description={t('chatConsultationDesc2')} value={chatPrice} onChange={setChatPrice} />
+          <PriceCard icon="call" title={t('phoneCall')} description={t('phoneCallDesc')} value={phonePrice} onChange={setPhonePrice} />
+          <PriceCard icon="videocam" title={t('videoCall')} description={t('videoCallDesc')} value={videoPrice} onChange={setVideoPrice} />
 
           <Text style={styles.priceNote}>{t('pricesChangeNote')}</Text>
 
@@ -287,16 +298,16 @@ export default function RegistrationStep4() {
           {isValid && (
             <View style={styles.earningsCard}>
               <Text style={styles.earningsTitle}>{t('earningsPreview')}</Text>
-              <Text style={styles.earningsSub}>{t('afterPlatformFee')}</Text>
+              <Text style={styles.earningsSub}>{t('afterPlatformFee', { feePct: commissionRate })}</Text>
               {[
-                { label: t('chatConsultation'), value: chatPrice, icon: '💬' },
-                { label: t('phoneCall'), value: phonePrice, icon: '📞' },
-                { label: t('videoCall'), value: videoPrice, icon: '🎥' },
+                { label: t('chatConsultation'), value: chatPrice, icon: 'chatbubble-ellipses' as const },
+                { label: t('phoneCall'), value: phonePrice, icon: 'call' as const },
+                { label: t('videoCall'), value: videoPrice, icon: 'videocam' as const },
               ].map(({ label, value, icon }) => {
-                const net = value ? Math.floor(Number(value) * 0.8) : 0
+                const net = value ? Math.floor(Number(value) * (100 - commissionRate) / 100) : 0
                 return (
                   <View key={label} style={styles.earningsRow}>
-                    <Text style={styles.earningsIcon}>{icon}</Text>
+                    <Ionicons name={icon} size={16} color={colors.careBlue} style={styles.earningsIcon} />
                     <Text style={styles.earningsLabel}>{label}</Text>
                     <Text style={styles.earningsAmount}>ETB {net.toLocaleString()}</Text>
                     <Text style={styles.earningsNote}>{t('perSession')}</Text>

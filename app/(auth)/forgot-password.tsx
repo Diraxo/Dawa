@@ -1,4 +1,4 @@
-﻿import { useSignIn } from '@clerk/clerk-expo'
+﻿import { useAuth, useSignIn } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -22,6 +22,7 @@ import { OTPInput } from '@/components/ui/OTPInput'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { otpLimiter } from '@/lib/otpLimiter'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
 
 type Step = 'email' | 'otp' | 'password'
@@ -35,6 +36,7 @@ export default function ForgotPasswordScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
+  const { getToken } = useAuth()
 
   const [step, setStep] = useState<Step>('email')
   const [email, setEmail] = useState('')
@@ -48,6 +50,7 @@ export default function ForgotPasswordScreen() {
   const [successAlert, setSuccessAlert] = useState(false)
   const [resendAlert, setResendAlert] = useState(false)
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const targetRouteRef = useRef<string>('/(auth)/role')
 
   useEffect(() => {
     return () => {
@@ -137,20 +140,40 @@ export default function ForgotPasswordScreen() {
       const result = await signIn.resetPassword({ password })
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive({ session: result.createdSessionId })
+        try {
+          const token = await getToken()
+          const client = token ? getAuthClient(token) : supabase
+          const { data } = await client
+            .from('users')
+            .select('role')
+            .eq('clerk_id', result.createdUserId)
+            .single()
+          if (data?.role === 'patient') targetRouteRef.current = '/(patient)/(tabs)/home'
+          else if (data?.role === 'doctor') targetRouteRef.current = '/(doctor)/(tabs)/home'
+          else targetRouteRef.current = '/(auth)/role'
+        } catch {
+          targetRouteRef.current = '/(auth)/role'
+        }
         setSuccessAlert(true)
         successTimerRef.current = setTimeout(() => {
           setSuccessAlert(false)
-          router.replace('/(auth)/role' as never)
+          router.replace(targetRouteRef.current as never)
         }, 2000)
       } else {
         setError('Failed to reset password. Please try again.')
       }
     } catch (err: any) {
-      setError(
-        err?.errors?.[0]?.longMessage ??
-          err?.errors?.[0]?.message ??
-          'Failed to reset password. Please try again.'
-      )
+      const code: string = err?.errors?.[0]?.code ?? ''
+      const message: string = err?.errors?.[0]?.message ?? ''
+      if (code === 'resource_not_found' || message.toLowerCase().includes('no sign in was found')) {
+        setError('This reset session has expired or is no longer valid. Please request a new reset code.')
+      } else {
+        setError(
+          err?.errors?.[0]?.longMessage ??
+            message ??
+            'Failed to reset password. Please try again.'
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -199,7 +222,7 @@ export default function ForgotPasswordScreen() {
             onPress: () => {
               if (successTimerRef.current) clearTimeout(successTimerRef.current)
               setSuccessAlert(false)
-              router.replace('/(auth)/role' as never)
+              router.replace(targetRouteRef.current as never)
             },
           },
         ]}
@@ -211,6 +234,7 @@ export default function ForgotPasswordScreen() {
         variant="info"
         title={t('codeResent')}
         message={t('codeResentMsg')}
+        onClose={() => setResendAlert(false)}
         buttons={[
           {
             text: t('gotIt'),

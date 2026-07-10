@@ -1,4 +1,4 @@
-﻿import { useSignIn } from "@clerk/clerk-expo"
+﻿import { useAuth, useSignIn } from "@clerk/clerk-expo"
 import { Ionicons } from "@expo/vector-icons"
 import { LinearGradient } from "expo-linear-gradient"
 import { useRouter } from "expo-router"
@@ -20,11 +20,13 @@ import { CareHubAlert } from "@/components/ui/CareHubAlert"
 import { CareHubLogo } from "@/components/ui/CareHubLogo"
 import { colors } from "@/constants/colors"
 import { fonts } from "@/constants/fonts"
+import { getAuthClient, supabase } from "@/lib/supabase"
 
 export default function ResetPasswordScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
+  const { getToken } = useAuth()
 
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -34,6 +36,7 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState("")
   const [successAlert, setSuccessAlert] = useState(false)
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const targetRouteRef = useRef<string>('/(auth)/role')
 
   const handleReset = async () => {
     if (!isLoaded || !signIn) return
@@ -51,20 +54,40 @@ export default function ResetPasswordScreen() {
       const result = await signIn.resetPassword({ password })
       if (result.status === "complete" && result.createdSessionId) {
         await setActive!({ session: result.createdSessionId })
+        try {
+          const token = await getToken()
+          const client = token ? getAuthClient(token) : supabase
+          const { data } = await client
+            .from("users")
+            .select("role")
+            .eq("clerk_id", result.createdUserId)
+            .single()
+          if (data?.role === "patient") targetRouteRef.current = "/(patient)/(tabs)/home"
+          else if (data?.role === "doctor") targetRouteRef.current = "/(doctor)/(tabs)/home"
+          else targetRouteRef.current = "/(auth)/role"
+        } catch {
+          targetRouteRef.current = "/(auth)/role"
+        }
         setSuccessAlert(true)
         successTimerRef.current = setTimeout(() => {
           setSuccessAlert(false)
-          router.replace("/(auth)/sign-in" as never)
+          router.replace(targetRouteRef.current as never)
         }, 2000)
       } else {
         setError("Failed to reset password. Please try again.")
       }
     } catch (err: any) {
-      setError(
-        err?.errors?.[0]?.longMessage ??
-          err?.errors?.[0]?.message ??
-          "Failed to reset password. Please try again."
-      )
+      const code: string = err?.errors?.[0]?.code ?? ""
+      const message: string = err?.errors?.[0]?.message ?? ""
+      if (code === "resource_not_found" || message.toLowerCase().includes("no sign in was found")) {
+        setError("This reset session has expired or is no longer valid. Please request a new reset code.")
+      } else {
+        setError(
+          err?.errors?.[0]?.longMessage ??
+            message ??
+            "Failed to reset password. Please try again."
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -79,12 +102,12 @@ export default function ResetPasswordScreen() {
         message="Your password has been reset successfully."
         buttons={[
           {
-            text: "Sign In",
+            text: "Continue",
             style: "primary",
             onPress: () => {
               if (successTimerRef.current) clearTimeout(successTimerRef.current)
               setSuccessAlert(false)
-              router.replace("/(auth)/sign-in" as never)
+              router.replace(targetRouteRef.current as never)
             },
           },
         ]}

@@ -1,7 +1,8 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
+import { stripDrPrefix } from '@/lib/utils'
 
 async function sendEmail(to: string, subject: string, body: string) {
   const apiKey = process.env.RESEND_API_KEY
@@ -76,7 +77,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         .eq('id', profile.user_id)
         .single()
 
-      const doctorName = userRow?.full_name ?? 'Doctor'
+      const doctorName = stripDrPrefix(userRow?.full_name ?? 'Doctor')
       const amount = `ETB ${withdrawal.amount}`
 
       if (action === 'approve') {
@@ -131,6 +132,6 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     }
   }
 
-  await logAdminAction(userId, `withdrawal_${action}`, { withdrawalId: id, amount: withdrawal?.amount })
+  await logAdminAction(userId, `withdrawal_${action}`, { withdrawalId: id, amount: withdrawal?.amount }, { entityType: 'withdrawal', entityId: id, ...getRequestContext(req) })
   return NextResponse.json({ success: true, status: newStatus })
 }

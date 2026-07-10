@@ -76,9 +76,18 @@ function VerifyContent() {
         if (result.status === 'needs_new_password') {
           router.push(`/reset-password?email=${encodeURIComponent(email)}`)
         }
+      } else if (type === 'signin_2fa' && siLoaded) {
+        // See sign-in/page.tsx cast comment — email_code second factor is
+        // valid at runtime but missing from this SDK version's types.
+        const result = await signIn!.attemptSecondFactor({ strategy: 'email_code', code: otp } as any)
+        if (result.status === 'complete') {
+          await siSetActive!({ session: result.createdSessionId })
+          router.push('/dashboard')
+        }
       }
     } catch (err: unknown) {
       const anyErr = err as any
+      const errCode: string = anyErr?.errors?.[0]?.code ?? ''
       const errMsg: string =
         anyErr?.errors?.[0]?.longMessage ?? anyErr?.errors?.[0]?.message ?? ''
       const lower = errMsg.toLowerCase()
@@ -87,6 +96,8 @@ function VerifyContent() {
           ? 'Incorrect code. Please try again.'
           : lower.includes('expired')
           ? 'Code has expired. Tap "Resend code" below.'
+          : errCode === 'resource_not_found' || lower.includes('no sign in was found')
+          ? 'This session has expired or is no longer valid. Please start over.'
           : (errMsg || 'Invalid code. Please try again.')
       )
     } finally {
@@ -107,6 +118,8 @@ function VerifyContent() {
         await signUp!.prepareEmailAddressVerification({ strategy: 'email_code' })
       } else if (type === 'forgot' && siLoaded) {
         await signIn!.create({ strategy: 'reset_password_email_code', identifier: email })
+      } else if (type === 'signin_2fa' && siLoaded) {
+        await signIn!.prepareSecondFactor({ strategy: 'email_code' } as any)
       }
       await otpLimiter.recordRequest(email)
       setResendTimer(30)

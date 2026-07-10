@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
-import { logAdminAction } from '@/lib/supabase/audit'
+import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 
 // PATCH /api/admin/consultations/[id]
 // body: { action: 'cancel' }
@@ -11,7 +11,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   const { data: caller } = await supabaseAdmin
     .from('users')
-    .select('role')
+    .select('id, role')
     .eq('clerk_id', userId)
     .single()
 
@@ -38,7 +38,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: 'Consultation not found' }, { status: 404 })
   }
 
-  if (consultation.status === 'completed' || consultation.status === 'cancelled') {
+  const TERMINAL_STATUSES = new Set([
+    'completed', 'cancelled', 'declined', 'missed', 'call_declined',
+    'doctor_missed', 'no_show', 'ended_abnormally',
+  ])
+  if (TERMINAL_STATUSES.has(consultation.status)) {
     return NextResponse.json(
       { error: `Cannot cancel a ${consultation.status} consultation` },
       { status: 400 }
@@ -47,7 +51,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   const { error } = await supabaseAdmin
     .from('consultations')
-    .update({ status: 'cancelled' })
+    .update({ status: 'cancelled', cancelled_by: caller.id })
     .eq('id', id)
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -82,7 +86,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     }
   }
 
-  await logAdminAction(userId, 'cancel_consultation', { consultationId: id, type: consultation.type })
+  await logAdminAction(userId, 'cancel_consultation', { consultationId: id, type: consultation.type }, { entityType: 'consultation', entityId: id, ...getRequestContext(req) })
   return NextResponse.json({ success: true })
 }
 
@@ -105,7 +109,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     .from('consultation_summaries')
     .select('*')
     .eq('consultation_id', params.id)
-    .single()
+    .maybeSingle()
 
   if (error) return NextResponse.json({ summary: null })
   return NextResponse.json({ summary: data })

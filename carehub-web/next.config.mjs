@@ -33,7 +33,7 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
       "img-src 'self' data: blob: https:",
-      "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.clerk.com https://*.clerk.accounts.dev https://challenges.cloudflare.com https://*.agora.io wss://*.agora.io https://*.stream-io-api.com wss://*.stream-io-api.com",
+      "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.clerk.com https://*.clerk.accounts.dev https://challenges.cloudflare.com https://*.agora.io wss://*.agora.io:* https://*.sd-rtn.com wss://*.sd-rtn.com:* https://*.stream-io-api.com wss://*.stream-io-api.com",
       "media-src 'self' blob:",
       "frame-src https://challenges.cloudflare.com https://*.clerk.accounts.dev",
       "worker-src 'self' blob:",

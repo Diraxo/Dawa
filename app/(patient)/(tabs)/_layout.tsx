@@ -23,6 +23,12 @@ function TabIcon({
 }
 
 export default function PatientTabsLayout() {
+  // Consultation recovery already runs continuously in the parent
+  // app/(patient)/_layout.tsx, which stays mounted underneath these tabs at
+  // all times — a second copy here just raced the same query/navigation and
+  // could redirect twice for the same status transition (seen as a
+  // "duplicate consultation" for the patient).
+
   return (
     <Tabs
       screenOptions={{

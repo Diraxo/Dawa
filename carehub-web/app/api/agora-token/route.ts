@@ -1,19 +1,17 @@
 import { auth } from '@clerk/nextjs/server'
 import { NextResponse } from 'next/server'
-import { rateLimit } from '@/lib/rateLimit'
+import { rateLimit, LIMITS, tooManyRequests } from '@/lib/rateLimit'
 
 // Proxies to the Supabase Edge Function which holds AGORA_APP_CERTIFICATE.
 // The certificate is never sent to the client — only the short-lived token is.
 export async function POST(request: Request) {
-  const { userId, getToken } = auth()
+  const { userId, getToken } = await auth()
   if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { allowed, message } = rateLimit(userId, 10)
-  if (!allowed) {
-    return NextResponse.json({ error: message }, { status: 429 })
-  }
+  const rl = rateLimit(`agora-token:${userId}`, LIMITS.agoraToken)
+  if (!rl.allowed) return tooManyRequests(rl)
 
   let channelName: string
   let uid: number

@@ -6,7 +6,6 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react'
 import { AuthCard } from '@/components/ui/AuthCard'
-import { getAuthClient, supabase } from '@/lib/supabase'
 
 function isValidEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
@@ -22,7 +21,7 @@ function Spinner() {
 }
 
 export default function SignInPage() {
-  const { isSignedIn, getToken } = useAuth()
+  const { isSignedIn } = useAuth()
   const { isLoaded, signIn, setActive } = useSignIn()
   const { isLoaded: suLoaded, signUp } = useSignUp()
   const router = useRouter()
@@ -61,15 +60,20 @@ export default function SignInPage() {
       })
       if (result.status === 'complete') {
         await setActive!({ session: result.createdSessionId })
-        const clerkId = result.createdUserId
-        if (!clerkId) { router.push('/role'); return }
-        const token = await getToken()
-        const client = token ? getAuthClient(token) : supabase
-        const { data } = await client.from('users').select('role').eq('clerk_id', clerkId).single()
-        if (data?.role === 'patient') router.push('/patient')
-        else if (data?.role === 'doctor') router.push('/doctor')
-        else if (data?.role === 'admin') router.push('/admin')
-        else router.push('/role')
+        router.push('/dashboard')
+      } else if (result.status === 'needs_second_factor') {
+        // Password was correct but the account has 2FA enabled — previously
+        // this branch didn't exist at all, so a valid password silently did
+        // nothing (no redirect, no error) for any 2FA-enabled account.
+        // Cast: this Clerk SDK's types only list phone_code as a second-factor
+        // strategy, but email_code is a valid second factor at the Clerk
+        // instance/account level (confirmed via the actual API response) —
+        // the TS union just hasn't caught up.
+        await signIn!.prepareSecondFactor({ strategy: 'email_code' } as any)
+        intendingSignInRef.current = false
+        router.push(`/verify?email=${encodeURIComponent(normalizedEmail)}&type=signin_2fa`)
+      } else {
+        intendingSignInRef.current = false
       }
     } catch (err: any) {
       intendingSignInRef.current = false
@@ -142,44 +146,57 @@ export default function SignInPage() {
 
   return (
     <AuthCard title="Welcome Back" subtitle="Sign in to your account">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4" aria-label="Sign in form" noValidate>
 
         {/* Email */}
         <div>
+          <label htmlFor="signin-email" className="sr-only">Email address</label>
           <div className="relative">
-            <Mail size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <Mail size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" aria-hidden="true" />
             <input
+              id="signin-email"
               type="email"
               value={email}
-              onChange={e => { setEmail(e.target.value); setEmailError(''); setGlobalError('') }}
+              onChange={e => { setEmail(e.target.value.toLowerCase()); setEmailError(''); setGlobalError('') }}
               placeholder="Type your email"
               autoFocus
+              autoComplete="email"
+              aria-required="true"
+              aria-invalid={!!emailError}
+              aria-describedby={emailError ? 'signin-email-error' : undefined}
               className={`w-full h-[52px] pl-7 pr-4 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${emailError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
           </div>
-          {emailError && <p className="text-danger text-xs mt-1.5">{emailError}</p>}
+          {emailError && <p id="signin-email-error" role="alert" className="text-danger text-xs mt-1.5">{emailError}</p>}
         </div>
 
         {/* Password */}
         <div>
+          <label htmlFor="signin-password" className="sr-only">Password</label>
           <div className="relative">
-            <Lock size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" />
+            <Lock size={18} className="absolute left-0 top-1/2 -translate-y-1/2 text-ink-black/40" aria-hidden="true" />
             <input
+              id="signin-password"
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={e => { setPassword(e.target.value); setPasswordError(''); setGlobalError('') }}
               placeholder="Password"
+              autoComplete="current-password"
+              aria-required="true"
+              aria-invalid={!!passwordError}
+              aria-describedby={passwordError ? 'signin-password-error' : undefined}
               className={`w-full h-[52px] pl-7 pr-10 bg-transparent border-0 border-b-2 font-montserrat text-sm text-ink-black placeholder:text-steel-grey focus:outline-none transition-colors ${passwordError ? 'border-danger' : 'border-steel-grey focus:border-int-blue'}`}
             />
             <button
               type="button"
               onClick={() => setShowPassword(p => !p)}
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
               className="absolute right-1 top-1/2 -translate-y-1/2 text-ink-black/40 hover:text-ink-black/70"
             >
-              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              {showPassword ? <EyeOff size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
             </button>
           </div>
-          {passwordError && <p className="text-danger text-xs mt-1.5">{passwordError}</p>}
+          {passwordError && <p id="signin-password-error" role="alert" className="text-danger text-xs mt-1.5">{passwordError}</p>}
         </div>
 
         {/* Forgot password */}
@@ -189,11 +206,12 @@ export default function SignInPage() {
           </Link>
         </div>
 
-        {globalError && <p className="text-danger text-xs font-medium">{globalError}</p>}
+        {globalError && <p role="alert" aria-live="polite" className="text-danger text-xs font-medium">{globalError}</p>}
 
         <button
           type="submit"
           disabled={loading || !isFormReady}
+          aria-disabled={loading || !isFormReady}
           className="btn-primary w-full disabled:opacity-50"
         >
           {loading ? 'Signing in…' : 'Sign In →'}

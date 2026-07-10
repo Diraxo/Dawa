@@ -20,7 +20,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 
 const TYPES = [
   { key: 'chat', icon: 'chatbubble-outline', label: 'Chat Consultation', desc: 'Real-time text, image and voice notes', color: colors.careBlue },
@@ -36,6 +36,7 @@ export default function MyPricingScreen() {
   const [phonePrice, setPhonePrice] = useState('')
   const [videoPrice, setVideoPrice] = useState('')
   const [saving, setSaving] = useState(false)
+  const [commissionRate, setCommissionRate] = useState(20)
 
   useEffect(() => {
     getToken().then(async (token) => {
@@ -49,6 +50,9 @@ export default function MyPricingScreen() {
         setPhonePrice(String((data as any).phone_price ?? ''))
         setVideoPrice(String((data as any).video_price ?? ''))
       }
+    })
+    supabase.rpc('get_commission_rate').then(({ data }) => {
+      if (typeof data === 'number') setCommissionRate(data)
     })
   }, [])
 
@@ -64,9 +68,14 @@ export default function MyPricingScreen() {
     try {
       const token = await getToken()
       if (!token) throw new Error('No token')
-      await getAuthClient(token)
+      const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
         .update({ chat_price: chatNum, phone_price: phoneNum, video_price: videoNum })
+        .select('id')
+      if (error) throw error
+      if (!updatedRows || updatedRows.length === 0) {
+        throw new Error('No doctor profile row matched — nothing was saved.')
+      }
       Alert.alert('Saved', 'Your consultation prices have been updated.')
       router.back()
     } catch {
@@ -124,7 +133,7 @@ export default function MyPricingScreen() {
           ))}
 
           <Text style={styles.note}>
-            Dawa takes a 20% platform fee from each consultation payment. The displayed price is what patients pay.
+            Dawa takes a {commissionRate}% platform fee from each consultation payment. The displayed price is what patients pay.
           </Text>
 
           <Pressable style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]} onPress={handleSave} disabled={saving}>

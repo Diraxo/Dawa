@@ -1,20 +1,32 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
+import { getAuthClient } from '@/lib/supabase'
 import { getStreamClient, fetchStreamToken } from '@/lib/stream'
+import { isChannelReadThrough } from '@/lib/readCache'
 import Link from 'next/link'
-import { stripDrPrefix } from '@/lib/utils'
+import { ConversationRow, ConversationDivider } from '@/components/chat/ConversationRow'
+import { MessageCircle, Search } from 'lucide-react'
 
 interface ChatThread {
   channelId: string
+  doctorId: string
   doctorName: string
   doctorPhotoUrl: string | null
   lastMessage: string | null
   lastMessageAt: Date | null
   unreadCount: number
-  consultationStatus: 'active' | 'completed'
-  consultationType: string
+  isOnline: boolean
+}
+
+function attachmentPreview(attachments: any[] | undefined): string | null {
+  if (!attachments?.length) return null
+  const att = attachments[0]
+  if (att.type === 'image') return 'Photo'
+  if (att.type === 'audio' || att.mime_type?.includes('audio')) return 'Voice message'
+  if (att.type === 'video') return 'Video'
+  return 'File'
 }
 
 function formatMsgTime(date: Date | null): string {
@@ -37,31 +49,21 @@ export default function PatientMessagesPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all')
+  const [matchingChannelIds, setMatchingChannelIds] = useState<Set<string>>(new Set())
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (!user || !clerkUserId) return
     let cancelled = false
 
+    const client = getStreamClient()
+
     async function load() {
       try {
-        const clerkToken = await getToken()
-        if (!clerkToken) return
-
-        const client = getStreamClient()
-
-        if (!client.userID) {
-          const streamToken = await fetchStreamToken(clerkToken)
-          await client.connectUser(
-            { id: clerkUserId!, name: user!.fullName ?? user!.firstName ?? 'Patient' },
-            streamToken
-          )
-        }
-
         const channels = await client.queryChannels(
           { type: 'messaging', members: { $in: [clerkUserId!] } },
           { last_message_at: -1 },
-          { watch: true, state: true, limit: 30 }
+          { watch: true, state: true, presence: true, limit: 30 }
         )
 
         if (cancelled) return
@@ -74,13 +76,16 @@ export default function PatientMessagesPage() {
 
           return {
             channelId: ch.id ?? '',
+            doctorId: (d?.doctorId as string | undefined) ?? otherMember?.user?.id ?? '',
             doctorName: (d?.doctorName as string | undefined) ?? otherMember?.user?.name ?? 'Doctor',
-            doctorPhotoUrl: (d?.doctorPhotoUrl as string | null | undefined) ?? null,
-            lastMessage: lastMsg?.text ?? null,
+            doctorPhotoUrl:
+              (otherMember?.user?.image as string | undefined) ??
+              (d?.doctorPhotoUrl as string | null | undefined) ??
+              null,
+            lastMessage: lastMsg?.text || attachmentPreview(lastMsg?.attachments) || null,
             lastMessageAt: lastMsg?.created_at ? new Date(lastMsg.created_at as string) : null,
-            unreadCount: ch.countUnread(),
-            consultationStatus: (d?.consultationStatus as string) === 'completed' ? 'completed' : 'active',
-            consultationType: (d?.consultationType as string | undefined) ?? 'chat',
+            unreadCount: isChannelReadThrough(ch.id ?? '', lastMsg?.id) ? 0 : ch.countUnread(),
+            isOnline: otherMember?.user?.online ?? false,
           }
         })
 
@@ -93,69 +98,154 @@ export default function PatientMessagesPage() {
       }
     }
 
-    load()
+    async function connectAndLoad() {
+      const clerkToken = await getToken()
+      if (cancelled || !clerkToken) return
+      if (!client.userID) {
+        const streamToken = await fetchStreamToken(clerkToken)
+        let ownPhotoUrl: string | null = null
+        try {
+          const { data: own } = await getAuthClient(clerkToken)
+            .from('users')
+            .select('profile_photo_url')
+            .eq('clerk_id', clerkUserId!)
+            .maybeSingle()
+          ownPhotoUrl = (own as any)?.profile_photo_url ?? null
+        } catch {}
+        await client.connectUser(
+          {
+            id: clerkUserId!,
+            name: user!.fullName ?? user!.firstName ?? 'Patient',
+            image: ownPhotoUrl ?? user?.imageUrl ?? undefined,
+          },
+          streamToken
+        )
+      }
+      if (!cancelled) await load()
+    }
 
-    // Real-time: refresh list when a new message arrives
-    const client = getStreamClient()
-    const sub = client.on('notification.message_new', () => {
+    connectAndLoad()
+
+    // In-place update when a new message arrives in a watched channel
+    const sub1 = client.on('message.new', event => {
+      if (!event.message || !event.cid) return
+      const channelId = event.cid.replace('messaging:', '')
+      const msg = event.message
+      setThreads(prev => {
+        const idx = prev.findIndex(t => t.channelId === channelId)
+        if (idx === -1) return prev
+        const updated = [...prev]
+        updated[idx] = {
+          ...updated[idx],
+          lastMessage: msg.text || attachmentPreview(msg.attachments) || 'Message',
+          lastMessageAt: msg.created_at ? new Date(msg.created_at as string) : updated[idx].lastMessageAt,
+          unreadCount: msg.user?.id === clerkUserId ? updated[idx].unreadCount : updated[idx].unreadCount + 1,
+        }
+        const [t] = updated.splice(idx, 1)
+        return [t, ...updated]
+      })
+    })
+
+    // Full refetch when a message arrives in a channel not yet being watched
+    const sub2 = client.on('notification.message_new', () => {
       if (!cancelled) load()
+    })
+
+    // Live online/offline dot — requires `presence: true` above to be populated.
+    const sub3 = client.on('user.presence.changed', event => {
+      const presenceUserId = event.user?.id
+      if (!presenceUserId) return
+      setThreads(prev =>
+        prev.map(t => (t.doctorId === presenceUserId ? { ...t, isOnline: !!event.user?.online } : t))
+      )
+    })
+
+    // Re-sync after a dropped socket resumes — a currently-open list stops
+    // getting live events until this fires or the page is reloaded.
+    const sub4 = client.on('connection.changed', event => {
+      if (event.online && !cancelled) load()
+    })
+
+    // Live avatar update — e.g. the doctor changes their profile photo
+    // while this list is open.
+    const sub5 = client.on('user.updated', event => {
+      const updatedUserId = event.user?.id
+      if (!updatedUserId) return
+      setThreads(prev =>
+        prev.map(t => (t.doctorId === updatedUserId ? { ...t, doctorPhotoUrl: (event.user as any)?.image ?? null } : t))
+      )
     })
 
     return () => {
       cancelled = true
-      sub.unsubscribe()
+      sub1.unsubscribe()
+      sub2.unsubscribe()
+      sub3.unsubscribe()
+      sub4.unsubscribe()
+      sub5.unsubscribe()
     }
   }, [user, clerkUserId])
 
-  const typeIcon = (type: string) =>
-    type === 'chat' ? '💬' : type === 'phone' ? '📞' : '🎥'
+  // Stream message content search (debounced 350ms, min 2 chars) — finds
+  // conversations whose message history (not just the last message) matches,
+  // so the single search bar covers both names and message content.
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    const q = search.trim()
+    if (!q || q.length < 2 || !clerkUserId) {
+      setMatchingChannelIds(new Set())
+      return
+    }
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        const client = getStreamClient()
+        const res = await client.search(
+          { type: 'messaging', members: { $in: [clerkUserId!] } },
+          q,
+          { limit: 20, offset: 0 }
+        )
+        const ids = ((res.results ?? []) as any[])
+          .map((r: any) => r.message?.channel_id as string | undefined)
+          .filter((id): id is string => !!id)
+        setMatchingChannelIds(new Set(ids))
+      } catch {
+        setMatchingChannelIds(new Set())
+      }
+    }, 350)
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
+  }, [search, clerkUserId])
 
   const filteredThreads = threads.filter(t => {
-    const nameMatch = !search || t.doctorName.toLowerCase().includes(search.toLowerCase())
-    const statusMatch = statusFilter === 'all' || t.consultationStatus === statusFilter
-    return nameMatch && statusMatch
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    const nameMatch =
+      t.doctorName.toLowerCase().includes(q) ||
+      (t.lastMessage ?? '').toLowerCase().includes(q)
+    return nameMatch || matchingChannelIds.has(t.channelId)
   })
 
   return (
     <div className="p-8 max-w-3xl">
       <div className="mb-6">
         <h1 className="font-montserrat font-black text-3xl text-ink-black">Messages</h1>
-        <p className="text-ink-black/50 text-sm mt-1">Your consultation conversations</p>
       </div>
 
-      {/* Search + filter */}
+      {/* Search */}
       {!loading && !error && threads.length > 0 && (
-        <div className="flex flex-col gap-3 mb-6">
-          <div className="relative">
-            <svg
-              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-black/30"
-              width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-            >
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search by doctor name…"
-              className="w-full h-11 pl-10 pr-4 rounded-xl border border-steel-grey bg-cloud-grey font-montserrat text-sm focus:outline-none focus:border-int-blue"
-            />
-          </div>
-          <div className="flex gap-2">
-            {(['all', 'active', 'completed'] as const).map(s => (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
-                className="px-4 py-1.5 rounded-full font-montserrat font-semibold text-xs transition-all capitalize"
-                style={statusFilter === s
-                  ? { background: 'linear-gradient(to right, #2962FF, #00BFA5)', color: '#fff' }
-                  : { background: '#F5F7FA', color: '#6B7280' }
-                }
-              >
-                {s === 'all' ? 'All' : s === 'active' ? 'Active' : 'Ended'}
-              </button>
-            ))}
-          </div>
+        <div className="relative mb-6">
+          <svg
+            className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-black/30"
+            width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          >
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search conversations…"
+            className="w-full h-11 pl-10 pr-4 rounded-xl border border-steel-grey bg-cloud-grey font-montserrat text-sm focus:outline-none focus:border-int-blue"
+          />
         </div>
       )}
 
@@ -164,12 +254,12 @@ export default function PatientMessagesPage() {
           <p className="text-danger text-sm">{error}</p>
         </div>
       ) : loading ? (
-        <div className="flex flex-col gap-3">
-          {[1, 2, 3].map(i => <div key={i} className="h-20 shimmer-bg rounded-3xl" />)}
+        <div className="flex flex-col gap-2">
+          {[1, 2, 3].map(i => <div key={i} className="h-[72px] shimmer-bg rounded-2xl" />)}
         </div>
       ) : threads.length === 0 ? (
         <div className="card p-14 text-center">
-          <p className="text-5xl mb-4">💬</p>
+          <MessageCircle size={44} className="mx-auto mb-4 text-steel-grey" />
           <p className="font-montserrat font-bold text-lg text-ink-black mb-2">No conversations yet</p>
           <p className="text-ink-black/50 text-sm mb-6">
             Start a chat consultation to message your doctor.
@@ -180,63 +270,29 @@ export default function PatientMessagesPage() {
         </div>
       ) : filteredThreads.length === 0 ? (
         <div className="card p-10 text-center">
-          <p className="text-3xl mb-3">🔍</p>
+          <Search size={30} className="mx-auto mb-3 text-steel-grey" />
           <p className="font-montserrat font-bold text-ink-black mb-1">No matches</p>
           <p className="text-ink-black/50 text-sm">Try a different name or filter.</p>
         </div>
       ) : (
-        <div className="flex flex-col gap-2">
-          {filteredThreads.map(t => (
-            <Link
-              key={t.channelId}
-              href={`/patient/consultation/chat/${t.channelId}`}
-              className="card card-hover p-4 flex items-center gap-4"
-            >
-              {/* Avatar */}
-              <div className="relative flex-shrink-0">
-                {t.doctorPhotoUrl ? (
-                  <img src={t.doctorPhotoUrl} alt={t.doctorName} className="w-12 h-12 rounded-2xl object-cover" />
-                ) : (
-                  <div className="w-12 h-12 rounded-2xl bg-gradient-hero flex items-center justify-center text-white font-black text-lg">
-                    {stripDrPrefix(t.doctorName).charAt(0)}
-                  </div>
-                )}
-                {t.unreadCount > 0 && (
-                  <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-teal-green flex items-center justify-center">
-                    <span className="text-white text-[10px] font-bold">{t.unreadCount}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="font-montserrat font-bold text-sm text-ink-black">
-                    Dr. {stripDrPrefix(t.doctorName)}
-                  </p>
-                  <span className="text-xs">{typeIcon(t.consultationType)}</span>
-                </div>
-                <p className="text-ink-black/50 text-xs truncate mt-0.5">
-                  {t.lastMessage ?? 'No messages yet — tap to open'}
-                </p>
-              </div>
-
-              {/* Meta */}
-              <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-                {t.lastMessageAt && (
-                  <p className="text-[10px] text-ink-black/40">
-                    {formatMsgTime(t.lastMessageAt)}
-                  </p>
-                )}
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  t.consultationStatus === 'active'
-                    ? 'bg-success/10 text-success'
-                    : 'bg-steel-grey/60 text-ink-black/50'
-                }`}>
-                  {t.consultationStatus === 'active' ? 'Active' : 'Ended'}
-                </span>
-              </div>
-            </Link>
+        <div className="card overflow-hidden">
+          {filteredThreads.map((t, idx) => (
+            <div key={t.channelId}>
+              <ConversationRow
+                href={`/patient/consultation/chat/${t.channelId}`}
+                data={{
+                  id: t.channelId,
+                  peerName: t.doctorName,
+                  peerPhotoUrl: t.doctorPhotoUrl,
+                  isDoctorPeer: true,
+                  lastMessage: t.lastMessage ?? 'No messages yet — tap to open',
+                  lastMessageTime: t.lastMessageAt ? formatMsgTime(t.lastMessageAt) : '',
+                  unreadCount: t.unreadCount,
+                  isOnline: t.isOnline,
+                }}
+              />
+              {idx < filteredThreads.length - 1 && <ConversationDivider />}
+            </div>
           ))}
         </div>
       )}

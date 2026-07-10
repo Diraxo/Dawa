@@ -53,6 +53,10 @@ export default function MyReviewsScreen() {
         if (!token) return
         const client = getAuthClient(token)
 
+        const { data: profile } = await client.from('doctor_profiles').select('id, rating_average').single()
+        if (!profile) return
+        const doctorId = (profile as any).id
+
         const { data } = await client
           .from('reviews')
           .select(`
@@ -60,6 +64,8 @@ export default function MyReviewsScreen() {
             consultation:consultations!reviews_consultation_id_fkey(type),
             patient:users!reviews_patient_id_fkey(full_name)
           `)
+          .eq('doctor_id', doctorId)
+          .eq('hidden', false)
           .order('created_at', { ascending: false })
 
         if (data) {
@@ -72,10 +78,10 @@ export default function MyReviewsScreen() {
             consultationType: r.consultation?.type ?? 'chat',
           }))
           setReviews(mapped)
-          if (mapped.length > 0) {
-            setAvgRating(mapped.reduce((s, r) => s + r.rating, 0) / mapped.length)
-          }
         }
+        // Authoritative average — same trigger-maintained column Home/Profile
+        // read, so this screen's stat never disagrees with the rest of the app.
+        setAvgRating(Number((profile as any).rating_average ?? 0))
       } catch {
         // silently fail
       } finally {
@@ -84,7 +90,9 @@ export default function MyReviewsScreen() {
     })()
   }, [user?.id])
 
-  const typeIcon: Record<string, string> = { chat: '💬', phone: '📞', video: '🎥' }
+  const typeIcon: Record<string, keyof typeof Ionicons.glyphMap> = {
+    chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam',
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -126,9 +134,12 @@ export default function MyReviewsScreen() {
                   </View>
                   <View style={styles.reviewMeta}>
                     <Text style={styles.patientName}>{review.patientName}</Text>
-                    <Text style={styles.reviewDate}>
-                      {typeIcon[review.consultationType] ?? '💬'} {new Date(review.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                      <Ionicons name={typeIcon[review.consultationType] ?? 'chatbubble-ellipses'} size={12} color="#6B7280" />
+                      <Text style={styles.reviewDate}>
+                        {new Date(review.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </Text>
+                    </View>
                   </View>
                   <StarRow rating={review.rating} />
                 </View>

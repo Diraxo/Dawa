@@ -157,6 +157,45 @@ Deno.serve(async (req: Request) => {
     return new Response('DB update failed', { status: 500 })
   }
 
+  // Resilience fallback: normally the client (payment-return screens) flips
+  // status from 'pending_payment' to 'scheduled'/'waiting_for_doctor' itself
+  // right after verifying payment. If the client is killed or loses network
+  // in that window, the row is stuck at 'pending_payment' forever — invisible
+  // to every doctor-facing query (Upcoming Appointments, Today's Schedule)
+  // and no booking/reschedule notification ever fires. Attempt the same flip
+  // here too, guarded to only ever touch a row still at 'pending_payment' —
+  // a no-op once the client's own fast path already ran.
+  try {
+    const { data: pendingRow } = await supabase
+      .from('consultations')
+      .select('id, created_at, scheduled_at')
+      .eq('chapa_tx_ref', trx_ref)
+      .eq('status', 'pending_payment')
+      .maybeSingle()
+
+    if (pendingRow?.scheduled_at && pendingRow?.created_at) {
+      // "Now" bookings are inserted with scheduled_at == the booking moment
+      // (see BookingModal: p_slot_start = new Date().toISOString() when
+      // timing === 'now'), so scheduled_at sitting within ~1 minute of
+      // created_at reliably identifies an on-demand booking without needing
+      // a dedicated column.
+      const isOnDemand = Math.abs(
+        new Date(pendingRow.scheduled_at).getTime() - new Date(pendingRow.created_at).getTime()
+      ) < 60_000
+
+      await supabase
+        .from('consultations')
+        .update({
+          status: isOnDemand ? 'waiting_for_doctor' : 'scheduled',
+          ...(isOnDemand ? { waiting_started_at: new Date().toISOString() } : {}),
+        })
+        .eq('id', pendingRow.id)
+        .eq('status', 'pending_payment')
+    }
+  } catch (err) {
+    console.error('[chapa-webhook] status-flip fallback failed:', err)
+  }
+
   // If this consultation is a partial-credit booking, mark the source credit as used now
   // that the difference payment has been confirmed by Chapa.
   try {

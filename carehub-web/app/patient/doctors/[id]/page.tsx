@@ -3,8 +3,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
+import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
+import { MessageCircle, Phone, Video, Search } from 'lucide-react'
 
 interface DoctorProfile {
   id: string
@@ -18,7 +21,9 @@ interface DoctorProfile {
   rating_average: number
   total_consultations: number
   is_online: boolean
-  user: { full_name: string; email: string; profile_photo_url: string | null } | null
+  languages: string[] | null
+  availability: Record<string, unknown> | null
+  user: { id: string; full_name: string; email: string; profile_photo_url: string | null } | null
 }
 
 interface Review {
@@ -30,9 +35,9 @@ interface Review {
 }
 
 const CONSULT_TYPES = [
-  { key: 'chat', icon: '💬', label: 'Chat Consultation', desc: 'Text messaging, images, voice notes', priceKey: 'chat_price' as const },
-  { key: 'phone', icon: '📞', label: 'Phone Call', desc: 'Audio-only consultation', priceKey: 'phone_price' as const },
-  { key: 'video', icon: '🎥', label: 'Video Call', desc: 'Face-to-face video consultation', priceKey: 'video_price' as const },
+  { key: 'chat', icon: MessageCircle, label: 'Chat Consultation', desc: 'Text messaging, images, voice notes', priceKey: 'chat_price' as const, iconBg: 'bg-teal-green/10', iconColor: 'text-teal-green' },
+  { key: 'phone', icon: Phone, label: 'Phone Call', desc: 'Audio-only consultation', priceKey: 'phone_price' as const, iconBg: 'bg-care-blue/10', iconColor: 'text-care-blue' },
+  { key: 'video', icon: Video, label: 'Video Call', desc: 'Face-to-face video consultation', priceKey: 'video_price' as const, iconBg: 'bg-purple-600/10', iconColor: 'text-purple-600' },
 ]
 
 export default function DoctorProfilePage() {
@@ -44,28 +49,59 @@ export default function DoctorProfilePage() {
   const [selectedType, setSelectedType] = useState<string | null>(null)
   const [imageFullscreen, setImageFullscreen] = useState(false)
 
-  useEffect(() => {
-    async function load() {
-      const [{ data: doc }, { data: revs }] = await Promise.all([
-        supabase
-          .from('doctor_profiles')
-          .select('id, specialty, years_experience, hospital_name, bio, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, user:users(full_name, email, profile_photo_url)')
-          .eq('id', id)
-          .eq('status', 'approved')
-          .single(),
-        supabase
-          .from('reviews')
-          .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
-          .eq('doctor_id', id)
-          .order('created_at', { ascending: false })
-          .limit(10),
-      ])
-      setDoctor(doc as unknown as DoctorProfile)
+  // Called on mount, then once more when the realtime channel below reaches
+  // SUBSCRIBED — reconciles a toggle that fired during the join-latency
+  // window (before SUBSCRIBED), which would otherwise be lost forever.
+  // Passed through `reconcile` so this fetch can't revert a live update that
+  // already applied while it was in flight.
+  function load() {
+    Promise.all([
+      supabase
+        .from('doctor_profiles')
+        .select('id, specialty, years_experience, hospital_name, bio, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, languages, availability, user:users(id, full_name, email, profile_photo_url)')
+        .eq('id', id)
+        .eq('status', 'approved')
+        .single(),
+      supabase
+        .from('reviews')
+        .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
+        .eq('doctor_id', id)
+        .order('created_at', { ascending: false })
+        .limit(10),
+    ]).then(([{ data: doc }, { data: revs }]) => {
+      setDoctor(doc ? reconcile(doc as unknown as DoctorProfile) : null)
       setReviews((revs ?? []) as unknown as Review[])
       setLoading(false)
-    }
+    })
+  }
+
+  useEffect(() => {
     load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
+
+  // Realtime: doctor online/offline status + availability → badge + CTA
+  // update live
+  const { reconcile } = useDoctorOnlineStatus((doctorId, fields) => {
+    if (doctorId !== id) return
+    setDoctor(prev => prev
+      ? {
+          ...prev,
+          is_online: fields.is_online,
+          languages: fields.languages ?? prev.languages,
+          availability: fields.availability ?? prev.availability,
+          bio: fields.bio ?? prev.bio,
+          specialty: fields.specialty ?? prev.specialty,
+          hospital_name: fields.hospital_name ?? prev.hospital_name,
+          years_experience: fields.years_experience ?? prev.years_experience,
+          chat_price: fields.chat_price,
+          phone_price: fields.phone_price,
+          video_price: fields.video_price,
+        }
+      : prev)
+  }, () => { load() })
+
+  const livePhotoUrl = useUserPhotoRealtime(doctor?.user?.id, doctor?.user?.profile_photo_url)
 
   function handleBook() {
     if (!selectedType) return
@@ -83,7 +119,7 @@ export default function DoctorProfilePage() {
   if (!doctor) {
     return (
       <div className="p-8 flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-4xl">🔍</p>
+        <Search size={40} className="text-steel-grey" />
         <p className="font-montserrat font-bold text-xl text-ink-black">Doctor not found</p>
         <Link href="/patient/doctors" className="btn-primary h-10 px-6 text-sm rounded-xl">
           Back to Doctors
@@ -100,7 +136,7 @@ export default function DoctorProfilePage() {
   return (
     <div className="p-8 max-w-6xl">
       {/* Fullscreen image overlay */}
-      {imageFullscreen && doctor.user?.profile_photo_url && (
+      {imageFullscreen && livePhotoUrl && (
         <div
           className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center"
           onClick={() => setImageFullscreen(false)}
@@ -113,8 +149,8 @@ export default function DoctorProfilePage() {
             ✕
           </button>
           <img
-            src={doctor.user.profile_photo_url}
-            alt={doctor.user.full_name ?? ''}
+            src={livePhotoUrl}
+            alt={doctor.user?.full_name ?? ''}
             className="max-w-full max-h-[85vh] object-contain rounded-2xl"
             onClick={e => e.stopPropagation()}
           />
@@ -131,15 +167,15 @@ export default function DoctorProfilePage() {
         <div className="lg:col-span-1">
           <div className="card p-6 flex flex-col items-center text-center gap-4">
             <div className="relative">
-              {doctor.user?.profile_photo_url ? (
+              {livePhotoUrl ? (
                 <button
                   onClick={() => setImageFullscreen(true)}
                   className="focus:outline-none"
                   title="View full image"
                 >
                   <img
-                    src={doctor.user.profile_photo_url}
-                    alt={doctor.user.full_name ?? ''}
+                    src={livePhotoUrl}
+                    alt={doctor.user?.full_name ?? ''}
                     className="w-24 h-24 rounded-3xl object-cover cursor-pointer hover:opacity-90 transition-opacity"
                   />
                 </button>
@@ -169,16 +205,6 @@ export default function DoctorProfilePage() {
                 <span className="text-ink-black/50">Experience</span>
                 <span className="font-semibold text-ink-black">{doctor.years_experience} years</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-ink-black/50">Consultations</span>
-                <span className="font-semibold text-ink-black">{doctor.total_consultations}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-ink-black/50">Rating</span>
-                <span className="font-bold text-ink-black">
-                  {doctor.rating_average ? `★ ${doctor.rating_average.toFixed(1)}` : 'No reviews'}
-                </span>
-              </div>
             </div>
           </div>
         </div>
@@ -190,6 +216,20 @@ export default function DoctorProfilePage() {
             <div className="card p-5">
               <h2 className="font-montserrat font-bold text-base text-ink-black mb-2">About</h2>
               <p className="text-ink-black/60 text-sm leading-relaxed">{doctor.bio}</p>
+            </div>
+          )}
+
+          {/* Languages */}
+          {doctor.languages && doctor.languages.length > 0 && (
+            <div className="card p-5">
+              <h2 className="font-montserrat font-bold text-base text-ink-black mb-2">Languages Spoken</h2>
+              <div className="flex flex-wrap gap-2">
+                {doctor.languages.map(lang => (
+                  <span key={lang} className="bg-teal-50 text-teal-green text-xs font-semibold font-montserrat px-3 py-1 rounded-full border border-teal-green/20">
+                    {lang}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
 
@@ -207,7 +247,9 @@ export default function DoctorProfilePage() {
                       : 'border-steel-grey hover:border-int-blue/40'
                   }`}
                 >
-                  <span className="text-2xl">{ct.icon}</span>
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${ct.iconBg}`}>
+                    <ct.icon size={22} className={ct.iconColor} />
+                  </div>
                   <div className="flex-1">
                     <p className="font-montserrat font-bold text-sm text-ink-black">{ct.label}</p>
                     <p className="text-ink-black/50 text-xs">{ct.desc}</p>
@@ -229,11 +271,16 @@ export default function DoctorProfilePage() {
 
             <button
               onClick={handleBook}
-              disabled={!selectedType || !doctor.is_online}
+              disabled={!selectedType}
               className="btn-primary w-full mt-4 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {!doctor.is_online ? 'Doctor is Offline' : !selectedType ? 'Select a Consultation Type' : 'Book Consultation →'}
+              {!selectedType ? 'Select a Consultation Type' : 'Book Consultation →'}
             </button>
+            {!doctor.is_online && (
+              <p className="text-xs text-ink-black/40 text-center mt-2">
+                Doctor is offline — you can still schedule for later
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -258,7 +305,7 @@ export default function DoctorProfilePage() {
 
         {reviews.length === 0 ? (
           <div className="text-center py-8">
-            <p className="text-3xl mb-2">💬</p>
+            <MessageCircle size={28} className="mx-auto mb-2 text-steel-grey" />
             <p className="text-ink-black/50 text-sm">No reviews yet. Be the first!</p>
           </div>
         ) : (

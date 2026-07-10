@@ -14,12 +14,12 @@ export default function LogoMark({ size = 40, className = '', variant = 'light' 
       style={{ width: size, height: size, borderRadius: Math.round(size * 0.22) }}
     >
       <Image
-        src={variant === 'dark' ? '/dark-logo.jpg' : '/white-logo.jpg'}
+        src={variant === 'dark' ? '/logo-dark.png' : '/logo-white.png'}
         alt="Dawa"
         width={size}
         height={size}
         priority
-        style={{ borderRadius: Math.round(size * 0.22), objectFit: 'cover' }}
+        style={{ borderRadius: Math.round(size * 0.22), objectFit: 'contain' }}
       />
     </span>
   )

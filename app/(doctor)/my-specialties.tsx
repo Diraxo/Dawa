@@ -70,9 +70,14 @@ export default function MySpecialtiesScreen() {
     try {
       const token = await getToken()
       if (!token) throw new Error('No token')
-      await getAuthClient(token)
+      const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
-        .update({ specialty: specialty.trim(), years_experience: yearsNum, license_number: licenseNumber.trim() })
+        .update({ specialty: specialty.trim(), years_experience: yearsNum })
+        .select('id')
+      if (error) throw error
+      if (!updatedRows || updatedRows.length === 0) {
+        throw new Error('No doctor profile row matched — nothing was saved.')
+      }
       Alert.alert('Saved', 'Your specialties have been updated.')
       router.back()
     } catch {
@@ -136,14 +141,18 @@ export default function MySpecialtiesScreen() {
               placeholderTextColor="#9CA3AF"
             />
             <View style={{ height: 16 }} />
-            <Text style={styles.fieldLabel}>Medical License Number</Text>
-            <TextInput
-              style={styles.input}
-              value={licenseNumber}
-              onChangeText={setLicenseNumber}
-              placeholder="e.g. ETH-12345"
-              placeholderTextColor="#9CA3AF"
-            />
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={styles.fieldLabel}>Medical License Number</Text>
+              <Ionicons name="lock-closed" size={13} color="#9CA3AF" />
+            </View>
+            {/* Read-only — matches the website, which locks this post-verification
+                so a doctor can't self-service change a credential admin approved. */}
+            <View style={[styles.input, { justifyContent: 'center' }]}>
+              <Text style={{ fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack }}>
+                {licenseNumber || '—'}
+              </Text>
+            </View>
+            <Text style={styles.lockedNote}>To update this, contact support@dawa.app.</Text>
           </View>
 
           <Pressable style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]} onPress={handleSave} disabled={saving}>
@@ -181,6 +190,7 @@ const styles = StyleSheet.create({
 
   fieldLabel: { fontFamily: fonts.semiBold, fontSize: 13, color: '#374151', marginBottom: 7 },
   input: { backgroundColor: colors.cloudGrey, borderRadius: 12, borderWidth: 1, borderColor: colors.steelGrey, paddingHorizontal: 14, height: 50, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack },
+  lockedNote: { fontFamily: fonts.regular, fontSize: 11, color: '#9CA3AF', marginTop: 6 },
 
   saveWrap: { borderRadius: 16, overflow: 'hidden', marginTop: 4 },
   saveGrad: { height: 52, alignItems: 'center', justifyContent: 'center' },

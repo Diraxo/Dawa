@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { supabase, getAuthClient } from '@/lib/supabase'
+import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
 import { getGreeting, stripDrPrefix } from '@/lib/utils'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { MessageCircle, Phone, Video } from 'lucide-react'
+import { MessageCircle, Phone, Video, Stethoscope, CalendarDays } from 'lucide-react'
 
 interface Doctor {
   id: string
@@ -15,8 +16,9 @@ interface Doctor {
   phone_price: number
   video_price: number
   rating_average: number
-  total_consultations: number
   is_online: boolean
+  languages: string[] | null
+  availability: Record<string, unknown> | null
   user: { full_name: string; profile_photo_url: string | null } | null
 }
 
@@ -45,38 +47,46 @@ export default function PatientHomePage() {
   const { getToken } = useAuth()
   const router = useRouter()
   const [search, setSearch] = useState('')
-  const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null)
-  const [specialties, setSpecialties] = useState<string[]>([])
   const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>([])
   const [topDoctors, setTopDoctors] = useState<Doctor[]>([])
   const [loading, setLoading] = useState(true)
   const [upcomingAppointment, setUpcomingAppointment] = useState<UpcomingAppointment | null>(null)
+  const [ownPhotoUrl, setOwnPhotoUrl] = useState<string | null>(null)
+  const [ownUserId, setOwnUserId] = useState<string | null>(null)
 
-  useEffect(() => {
+  // Fetches both sections. Called on mount, then once more when the realtime
+  // channel below reaches SUBSCRIBED — a doctor toggle that fired during the
+  // join-latency window (before SUBSCRIBED) is otherwise lost forever, so
+  // this reconciliation pass re-reads current state from the DB. Rows are
+  // passed through `reconcile` so a fetch that resolves after a live update
+  // already applied can't revert it.
+  function loadDoctors() {
     Promise.all([
       supabase
         .from('doctor_profiles')
-        .select('id, specialty, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, user:users(full_name, profile_photo_url)')
+        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, languages, availability, user:users(full_name, profile_photo_url)')
         .eq('status', 'approved')
         .eq('is_online', true)
         .order('rating_average', { ascending: false })
         .limit(8),
       supabase
         .from('doctor_profiles')
-        .select('id, specialty, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, user:users(full_name, profile_photo_url)')
+        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, languages, availability, user:users(full_name, profile_photo_url)')
         .eq('status', 'approved')
         .order('rating_average', { ascending: false })
         .limit(8),
-      supabase
-        .from('specialties')
-        .select('name')
-        .order('name', { ascending: true }),
-    ]).then(([onlineRes, topRes, specsRes]) => {
-      setOnlineDoctors((onlineRes.data ?? []) as unknown as Doctor[])
-      setTopDoctors((topRes.data ?? []) as unknown as Doctor[])
-      if (specsRes.data?.length) setSpecialties(specsRes.data.map((s: { name: string }) => s.name))
+    ]).then(([onlineRes, topRes]) => {
+      const online = ((onlineRes.data ?? []) as unknown as Doctor[]).map(reconcile).filter(d => d.is_online)
+      const top = ((topRes.data ?? []) as unknown as Doctor[]).map(reconcile)
+      setOnlineDoctors(online)
+      setTopDoctors(top)
       setLoading(false)
     })
+  }
+
+  useEffect(() => {
+    loadDoctors()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -85,8 +95,10 @@ export default function PatientHomePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      const { data: ud } = await client.from('users').select('id').eq('clerk_id', user!.id).single()
+      const { data: ud } = await client.from('users').select('id, profile_photo_url').eq('clerk_id', user!.id).single()
       if (!ud) return
+      setOwnPhotoUrl((ud as any).profile_photo_url ?? null)
+      setOwnUserId((ud as any).id)
       const { data } = await client
         .from('consultations')
         .select('id, type, status, scheduled_at, doctor:doctor_profiles!doctor_id(specialty, user:users(full_name))')
@@ -100,16 +112,79 @@ export default function PatientHomePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
+  // Live-sync the header avatar — a photo change made from another
+  // device/session (e.g. mobile, or this patient's own web profile page)
+  // should reflect here without a manual reload. ownUserId is set inside
+  // loadAppt() above once the users row is fetched.
+  useEffect(() => {
+    if (!ownUserId) return
+    const channel = supabase
+      .channel(`own-photo-${ownUserId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${ownUserId}` },
+        (payload) => {
+          setOwnPhotoUrl((payload.new as { profile_photo_url: string | null })?.profile_photo_url ?? null)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [ownUserId])
+
+  // Kept current via effect below so the realtime callback (subscribed once,
+  // stale-closure-prone) never reads an outdated topDoctors/onlineDoctors.
+  const topDoctorsRef = useRef<Doctor[]>([])
+  const onlineDoctorsRef = useRef<Doctor[]>([])
+  useEffect(() => { topDoctorsRef.current = topDoctors }, [topDoctors])
+  useEffect(() => { onlineDoctorsRef.current = onlineDoctors }, [onlineDoctors])
+
+  // Realtime: doctor online/offline status + availability → keep both
+  // sections live, no refresh. `onReady` re-runs the initial fetch once the
+  // channel is SUBSCRIBED, reconciling anything missed during the join gap.
+  const { reconcile } = useDoctorOnlineStatus((doctorId, fields) => {
+    setTopDoctors(prev => prev.map(d => d.id === doctorId
+      ? { ...d, is_online: fields.is_online, languages: fields.languages ?? d.languages, availability: fields.availability ?? d.availability }
+      : d))
+
+    if (!fields.is_online) {
+      setOnlineDoctors(prev => prev.filter(d => d.id !== doctorId))
+      return
+    }
+
+    if (onlineDoctorsRef.current.some(d => d.id === doctorId)) {
+      setOnlineDoctors(prev => prev.map(d => d.id === doctorId
+        ? { ...d, is_online: true, languages: fields.languages ?? d.languages, availability: fields.availability ?? d.availability }
+        : d))
+      return
+    }
+
+    // A doctor who just went online isn't in onlineDoctors yet (it was
+    // fetched with .eq('is_online', true) at page load) — reuse the profile
+    // from topDoctors if we already have it, otherwise fetch it fresh.
+    // Without this, a doctor who was offline at mount could never appear in
+    // "Available Now" until a manual reload.
+    const known = topDoctorsRef.current.find(d => d.id === doctorId)
+    if (known) {
+      setOnlineDoctors(prev => prev.some(d => d.id === doctorId) ? prev : [{ ...known, is_online: true }, ...prev])
+      return
+    }
+
+    supabase
+      .from('doctor_profiles')
+      .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, languages, availability, user:users(full_name, profile_photo_url)')
+      .eq('id', doctorId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!data) return
+        setOnlineDoctors(prev =>
+          prev.some(d => d.id === doctorId) ? prev : [data as unknown as Doctor, ...prev]
+        )
+      })
+  }, () => { loadDoctors() })
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
     if (search.trim()) router.push(`/patient/doctors?q=${encodeURIComponent(search.trim())}`)
-    else router.push('/patient/doctors')
-  }
-
-  const handleSpecialtyClick = (sp: string) => {
-    const next = selectedSpecialty === sp ? null : sp
-    setSelectedSpecialty(next)
-    if (next) router.push(`/patient/doctors?specialty=${encodeURIComponent(next)}`)
     else router.push('/patient/doctors')
   }
 
@@ -127,8 +202,8 @@ export default function PatientHomePage() {
         </div>
         <Link href="/patient/profile">
           <div className="w-11 h-11 rounded-full bg-gradient-hero flex items-center justify-center text-white font-bold text-base cursor-pointer hover:opacity-90 transition-opacity overflow-hidden">
-            {user?.imageUrl
-              ? <img src={user.imageUrl} alt="avatar" className="w-full h-full object-cover" />
+            {ownPhotoUrl || user?.imageUrl
+              ? <img src={ownPhotoUrl || user?.imageUrl} alt="avatar" className="w-full h-full object-cover" />
               : <span>{firstName.charAt(0).toUpperCase()}</span>
             }
           </div>
@@ -174,30 +249,6 @@ export default function PatientHomePage() {
         </div>
       </div>
 
-      {/* Specialties */}
-      <div className="mb-8">
-        <p className="font-montserrat font-bold text-lg text-ink-black mb-3">Specialties</p>
-        {specialties.length === 0 ? (
-          <div className="flex gap-2">{[1,2,3,4].map(i => <div key={i} className="h-9 w-24 shimmer-bg rounded-full" />)}</div>
-        ) : (
-          <div className="flex gap-2 flex-wrap">
-            {specialties.map(sp => (
-              <button
-                key={sp}
-                onClick={() => handleSpecialtyClick(sp)}
-                className={`h-9 px-4 rounded-full text-xs font-semibold transition-colors border ${
-                  selectedSpecialty === sp
-                    ? 'bg-teal-green text-white border-teal-green'
-                    : 'bg-white border-steel-grey text-ink-black/60 hover:border-teal-green'
-                }`}
-              >
-                {selectedSpecialty === sp && '✓ '}{sp}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* Available Now */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
@@ -239,7 +290,7 @@ export default function PatientHomePage() {
           </div>
         ) : topDoctors.length === 0 ? (
           <div className="card p-8 text-center">
-            <p className="text-3xl mb-2">🩺</p>
+            <Stethoscope size={28} className="mx-auto mb-2 text-steel-grey" />
             <p className="text-ink-black/50 text-sm">No approved doctors yet.</p>
           </div>
         ) : (
@@ -259,9 +310,7 @@ export default function PatientHomePage() {
             <div className="rounded-3xl p-6 text-white" style={{ background: 'linear-gradient(135deg, #1A4598, #00BFA5)' }}>
               <div className="flex items-center gap-4">
                 <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center flex-shrink-0">
-                  <span className="text-xl">
-                    {upcomingAppointment.type === 'chat' ? '💬' : upcomingAppointment.type === 'phone' ? '📞' : '🎥'}
-                  </span>
+                  {upcomingAppointment.type === 'chat' ? <MessageCircle size={20} /> : upcomingAppointment.type === 'phone' ? <Phone size={20} /> : <Video size={20} />}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="font-montserrat font-bold text-sm">
@@ -285,7 +334,7 @@ export default function PatientHomePage() {
         ) : (
           <Link href="/patient/doctors" className="block">
             <div className="card p-8 text-center border-2 border-dashed border-steel-grey hover:border-teal-green transition-colors">
-              <p className="text-3xl mb-2">📅</p>
+              <CalendarDays size={28} className="mx-auto mb-2 text-steel-grey" />
               <p className="font-montserrat font-bold text-base text-ink-black mb-1">No upcoming appointments</p>
               <p className="text-ink-black/50 text-sm">Book a consultation to get started</p>
             </div>
@@ -314,18 +363,15 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
       <div className="flex-1 min-w-0">
         <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {stripDrPrefix(doctor.user?.full_name ?? '')}</p>
         <p className="text-ink-black/50 text-xs">{doctor.specialty}</p>
-        <div className="flex items-center gap-2 mt-1">
-          {doctor.is_online && (
-            <>
-              <div className="w-1.5 h-1.5 rounded-full bg-success" />
-              <span className="text-success text-[10px] font-semibold">Online</span>
-              <span className="text-ink-black/30 text-[10px]">·</span>
-            </>
-          )}
-          <span className="text-yellow-500 text-[10px]">★ {doctor.rating_average?.toFixed(1) ?? 'New'}</span>
-          <span className="text-ink-black/30 text-[10px]">·</span>
-          <span className="text-ink-black/40 text-[10px]">{doctor.total_consultations} consults</span>
-        </div>
+        {doctor.languages && doctor.languages.length > 0 && (
+          <p className="text-ink-black/40 text-[11px] truncate mt-0.5">{doctor.languages.join(', ')}</p>
+        )}
+        {doctor.is_online && (
+          <div className="flex items-center gap-2 mt-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-success" />
+            <span className="text-success text-[10px] font-semibold">Online</span>
+          </div>
+        )}
       </div>
       <Link
         href={`/patient/doctors/${doctor.id}`}

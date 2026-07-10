@@ -1,0 +1,35 @@
+# EAS Build — files excluded from the upload archive
+# EAS installs node_modules itself; excluding them cuts upload from ~350 MB to ~10 MB
+
+node_modules/
+carehub-web/node_modules/
+
+# Generated native dirs (EAS prebuild recreates them)
+/android
+/ios
+.kotlin/
+
+# Dev/cache artifacts
+.expo/
+dist/
+web-build/
+*.orig.*
+
+# Logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# macOS
+.DS_Store
+
+# Secrets (never upload)
+*.pem
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*firebase-adminsdk*.json
+carehub-ce3e3-*.json

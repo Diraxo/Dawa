@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import { formatDate, stripDrPrefix } from '@/lib/utils'
+import { MessageCircle, Phone, Video } from 'lucide-react'
 
 type Tab = 'revenue' | 'withdrawals' | 'commission'
 
@@ -268,7 +269,9 @@ export default function AdminPaymentsPage() {
                     <td className="px-4 py-3 font-medium text-ink-black">{tx.patient?.full_name ?? '—'}</td>
                     <td className="px-4 py-3 text-ink-black/70">Dr. {stripDrPrefix(tx.doctor_profile?.user?.full_name ?? '—')}</td>
                     <td className="px-4 py-3">
-                      <span className="capitalize">{tx.type === 'chat' ? '💬' : tx.type === 'phone' ? '📞' : '🎥'} {tx.type}</span>
+                      <span className="capitalize inline-flex items-center gap-1.5">
+                        {tx.type === 'chat' ? <MessageCircle size={14} /> : tx.type === 'phone' ? <Phone size={14} /> : <Video size={14} />} {tx.type}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${

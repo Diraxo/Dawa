@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import * as Linking from 'expo-linking'
@@ -21,7 +22,16 @@ import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
+import {
+  SLOT_DURATION_MINS,
+  formatTimeMins,
+  isSlotPast,
+  getAvailableSlots,
+  getNextDays,
+  parseScheduledAt,
+} from '@/lib/slotGeneration'
 
 type ConsultationType = 'chat' | 'phone' | 'video'
 type TimingType = 'now' | 'schedule'
@@ -43,71 +53,19 @@ const CONSULT_TYPES: { id: ConsultationType; label: string; icon: string; color:
   { id: 'video', label: 'Video Call', icon: 'videocam', color: '#7C3AED' },
 ]
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-function parseTimeMins(t: string): number {
-  const [timePart, meridiem] = t.split(' ')
-  const [h, m] = timePart.split(':').map(Number)
-  let hour = h
-  if (meridiem === 'PM' && h !== 12) hour += 12
-  if (meridiem === 'AM' && h === 12) hour = 0
-  return hour * 60 + m
+// Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
+// supabase-js calls without an abortSignal) — without this, a stalled request
+// left the booking button stuck on its loading state forever with no error
+// and no way to recover.
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      err => { clearTimeout(timer); reject(err) },
+    )
+  })
 }
-
-function formatTimeMins(totalMins: number): string {
-  const h24 = Math.floor(totalMins / 60)
-  const m = totalMins % 60
-  const meridiem = h24 >= 12 ? 'PM' : 'AM'
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
-  return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
-}
-
-function getAvailableSlots(
-  availability: Doctor['availability'],
-  dayValue: string
-): string[] {
-  if (!availability) return []
-  const dayName = DAY_NAMES[new Date(dayValue + 'T12:00:00').getDay()]
-  const cfg = availability[dayName]
-  if (!cfg?.enabled || !cfg.startTime || !cfg.endTime) return []
-  const blocked: string[] = (availability as any).blocked_dates ?? []
-  if (blocked.includes(dayValue)) return []
-  const start = parseTimeMins(cfg.startTime)
-  const end = parseTimeMins(cfg.endTime)
-  const slots: string[] = []
-  for (let t = start; t < end; t += 60) slots.push(formatTimeMins(t))
-  return slots
-}
-
-function getNextDays(count: number, availability?: Doctor['availability']) {
-  const days = []
-  const now = new Date()
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now)
-    d.setDate(now.getDate() + i)
-    const value = d.toISOString().split('T')[0]
-    if (availability) {
-      const slots = getAvailableSlots(availability, value)
-      if (slots.length === 0) continue
-    }
-    days.push({
-      label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
-      value,
-    })
-  }
-  return days
-}
-
-function parseScheduledAt(dayValue: string, timeSlot: string): string {
-  const [timePart, meridiem] = timeSlot.split(' ')
-  const [hourStr, minStr] = timePart.split(':')
-  let hour = parseInt(hourStr, 10)
-  const min = parseInt(minStr, 10)
-  if (meridiem === 'PM' && hour !== 12) hour += 12
-  if (meridiem === 'AM' && hour === 12) hour = 0
-  return `${dayValue}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`
-}
-
 
 export function BookingModal({ visible, doctor, onClose }: Props) {
   const router = useRouter()
@@ -123,13 +81,98 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const [paying, setPaying] = useState(false)
   const [activeCredit, setActiveCredit] = useState<ActiveCredit | null>(null)
   const [creditLoading, setCreditLoading] = useState(false)
+  const [doctorBusy, setDoctorBusy] = useState(false)
+  const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
   const days = getNextDays(14, doctor?.availability ?? undefined)
+  const selectedDayValue = days[selectedDay]?.value
+
+  // Doctor-configured booking modes — default to true so existing profiles
+  // that never touched these toggles keep working as before.
+  const acceptOnDemand = (doctor?.availability as any)?.acceptOnDemand !== false
+  const acceptScheduled = (doctor?.availability as any)?.acceptScheduled !== false
+  const canStartNow = Boolean(doctor?.is_online) && acceptOnDemand && !doctorBusy
+
+  // Doctor is BUSY when they already have an accepted/in-progress consultation.
+  // Checked via RPC (not a direct table read) so a patient never needs SELECT
+  // access to another patient's consultation row just to see a boolean.
+  const checkDoctorBusy = async (doctorId: string) => {
+    const { data } = await supabase.rpc('is_doctor_busy', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
+  // Poll busy state while the sheet is open — mirrors the "Start Now stopped
+  // being valid" pattern below (doctor going offline/disabling on-demand),
+  // but for the busy condition, which can only be observed via the RPC.
+  useEffect(() => {
+    if (!visible || !doctor) return
+    let cancelled = false
+    checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
+    const interval = setInterval(() => {
+      checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
+    }, 10_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [visible, doctor?.id])
+
+  // Which generated time slots for the selected day are already booked, so
+  // they can be shown locked/disabled instead of only failing at submit time
+  // with the server's SLOT_TAKEN error (which remains as defense-in-depth).
+  // Re-runs whenever the doctor, sheet visibility, timing mode, or selected
+  // day changes. slot_locks (not consultations, which RLS restricts to a
+  // patient's own rows) is the readable-by-any-patient source of truth here.
+  useEffect(() => {
+    if (!visible || !doctor || timing !== 'schedule' || !selectedDayValue) {
+      setBookedTimes(new Set())
+      return
+    }
+    let cancelled = false
+    const dayStart = new Date(`${selectedDayValue}T00:00:00`)
+    const dayEnd = new Date(`${selectedDayValue}T23:59:59.999`)
+
+    const fetchBookedTimes = () => {
+      supabase
+        .from('slot_locks')
+        .select('slot_start')
+        .eq('doctor_id', doctor.id)
+        .gte('slot_start', dayStart.toISOString())
+        .lte('slot_start', dayEnd.toISOString())
+        .gt('expires_at', new Date().toISOString())
+        .then(({ data, error }) => {
+          if (cancelled) return
+          if (error || !data) {
+            setBookedTimes(new Set())
+            return
+          }
+          setBookedTimes(new Set(
+            data.map((row: any) => {
+              const d = new Date(row.slot_start)
+              return formatTimeMins(d.getHours() * 60 + d.getMinutes())
+            })
+          ))
+        })
+    }
+
+    fetchBookedTimes()
+
+    // Another patient booking/cancelling the same day while this sheet is
+    // already open must flip that slot's availability live — without this,
+    // only re-opening the sheet (or changing day and back) picked it up.
+    const channel = supabase
+      .channel(`booking-slot-locks-${doctor.id}-${selectedDayValue}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctor.id}` },
+        () => fetchBookedTimes()
+      )
+      .subscribe()
+
+    return () => { cancelled = true; supabase.removeChannel(channel) }
+  }, [visible, doctor?.id, timing, selectedDayValue])
 
   useEffect(() => {
     if (visible) {
       setStep(1)
       setConsultType('chat')
-      setTiming('now')
+      setTiming(canStartNow ? 'now' : 'schedule')
       setSelectedDay(0)
       setSelectedTime('')
       setConfirming(false)
@@ -140,7 +183,17 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
     } else {
       Animated.timing(slideAnim, { toValue: 300, duration: 220, useNativeDriver: true }).start()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible])
+
+  // "Start Now" stopped being valid while the modal is open (doctor went
+  // offline, or disabled on-demand) — fall back to scheduling for later.
+  useEffect(() => {
+    if (visible && !canStartNow && timing === 'now') {
+      setTiming('schedule')
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canStartNow, visible])
 
   // Check for active consultation credit when patient reaches the review step
   useEffect(() => {
@@ -201,20 +254,38 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const applyFullCredit = async (consultationId: string, creditConsultationId: string) => {
     const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
     const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+    const clerkToken      = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
 
-    const resp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
-      method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${supabaseAnonKey}`,
-        'apikey':        supabaseAnonKey,
-      },
-      body: JSON.stringify({
-        patient_clerk_id:       user?.id ?? '',
-        credit_consultation_id: creditConsultationId,
-        new_consultation_id:    consultationId,
-      }),
-    })
+    // Bounded with a timeout — without it, a stalled network/edge-function
+    // call left this promise unresolved forever, stranding the UI on
+    // "Applying your credit…" with no way to recover (see initialize-payment
+    // below, which has always had this same protection).
+    const controller = new AbortController()
+    const timeoutId  = setTimeout(() => controller.abort(), 20_000)
+
+    let resp: Response
+    try {
+      resp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${clerkToken}`,
+          'apikey':        supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          credit_consultation_id: creditConsultationId,
+          new_consultation_id:    consultationId,
+        }),
+      })
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('Applying your credit timed out. Please try again.')
+      }
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+    }
     const data = await resp.json()
     if (!resp.ok) throw new Error(data?.error ?? 'Failed to apply credit')
     return data
@@ -229,7 +300,9 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
     // carehub:// deep link even when Chapa's flow goes through an external
     // banking app (CBE Birr, Telebirr, etc.) that breaks the
     // ASWebAuthenticationSession context.
-    const deepLinkReturn = 'carehub://payment/return'
+    // carehub://payment-return matches app/(patient)/payment-return.tsx via
+    // Expo Router (route groups are transparent in URL paths).
+    const deepLinkReturn = 'carehub://payment-return'
     let capturedLinkingUrl: string | null = null
     let resolveLinking: (url: string) => void = () => {}
     const linkingPromise = new Promise<string>(res => { resolveLinking = res })
@@ -257,18 +330,36 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
     }
 
     try {
-      const token = await getToken()
+      const token = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
       if (!token || !user) throw new Error('Not authenticated')
 
       const client = getAuthClient(token)
 
-      const { data: userData, error: userErr } = await client
-        .from('users')
-        .select('id')
-        .eq('clerk_id', user.id)
-        .single()
+      const { data: userData, error: userErr } = await withTimeout(
+        client.from('users').select('id').eq('clerk_id', user.id).single(),
+        15000,
+        'Connection timed out. Please check your network and try again.',
+      )
 
       if (userErr || !userData) throw new Error('Could not find your user profile.')
+
+      // Final busy re-check right before payment — the periodic poll above
+      // could be stale by up to 10s, and the patient must never be charged
+      // for an On-Demand consultation with a doctor who became busy in that
+      // window. book_appointment_slot() also enforces this server-side
+      // (DOCTOR_BUSY below) as the authoritative last-resort guard.
+      if (timing === 'now' && await checkDoctorBusy(doctor.id)) {
+        setDoctorBusy(true)
+        Alert.alert(
+          'Doctor Busy',
+          'Doctor is currently in another consultation.',
+          [
+            { text: 'Choose Another Doctor', style: 'cancel', onPress: () => onClose() },
+            { text: 'Schedule for Later', onPress: () => { setTiming('schedule'); setStep(2) } },
+          ],
+        )
+        return
+      }
 
       const scheduledAt = timing === 'now'
         ? new Date().toISOString()
@@ -276,47 +367,81 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
 
       const price = getPrice(consultType)
 
-      const { data: consultation, error: consultErr } = await client
-        .from('consultations')
-        .insert({
-          patient_id: userData.id,
-          doctor_id:  doctor.id,
-          type:       consultType,
-          status:     'pending_payment',
-          scheduled_at:    scheduledAt,
-          patient_amount:  price,
-          doctor_amount:   Math.round(price * 0.8),
-          platform_amount: Math.round(price * 0.2),
-          payment_status:  'pending',
-        })
-        .select('id')
-        .single()
+      // Atomically claims the slot (prevents two patients double-booking the
+      // same doctor at the same scheduled time) before creating the row.
+      const { data: newConsultationId, error: consultErr } = await withTimeout(
+        client.rpc('book_appointment_slot', {
+          p_patient_id:      userData.id,
+          p_doctor_id:       doctor.id,
+          p_type:            consultType,
+          p_slot_start:      scheduledAt,
+          p_slot_duration:   SLOT_DURATION_MINS,
+          p_patient_amount:  price,
+          p_is_on_demand:    timing === 'now',
+        }),
+        15000,
+        'Booking request timed out. Please check your connection and try again.',
+      )
 
-      if (consultErr || !consultation) throw new Error('Failed to create booking. Please try again.')
-      consultationId = consultation.id
+      if (consultErr || !newConsultationId) {
+        const msg = consultErr?.message ?? ''
+        if (msg.includes('SLOT_TAKEN')) {
+          throw new Error('This time slot was just booked by someone else. Please pick another time.')
+        }
+        if (msg.includes('ON_DEMAND_DISABLED')) {
+          throw new Error('This doctor is not accepting on-demand consultations right now.')
+        }
+        if (msg.includes('DOCTOR_BUSY')) {
+          throw new Error('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+        }
+        if (msg.includes('PATIENT_BUSY')) {
+          throw new Error('You already have an active consultation. Please finish it before starting a new one.')
+        }
+        if (msg.includes('SCHEDULED_DISABLED')) {
+          throw new Error('This doctor is not accepting scheduled appointments right now.')
+        }
+        if (msg.includes('DAY_OFF')) {
+          throw new Error('This doctor is not available on the selected day.')
+        }
+        if (msg.includes('DATE_BLOCKED')) {
+          throw new Error('This doctor is unavailable on the selected date.')
+        }
+        if (msg.includes('OUTSIDE_HOURS')) {
+          throw new Error('This time is outside the doctor\'s working hours. Please pick another time.')
+        }
+        throw new Error('Failed to create booking. Please try again.')
+      }
+      consultationId = newConsultationId as string
 
       const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
       const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
       // ── Full credit coverage — skip Chapa entirely ───────────────────────
       if (creditCoversAll && activeCredit) {
-        await applyFullCredit(consultation.id, activeCredit.creditConsultationId)
+        await applyFullCredit(consultationId, activeCredit.creditConsultationId)
         onClose()
-        router.push({
-          pathname: '/(patient)/waiting-room',
-          params: {
-            consultationId:   consultation.id,
-            doctorId:         doctor.id,
-            doctorName:       doctor.name,
-            consultationType: consultType,
-          },
-        })
+        // "Now" bookings go straight to the waiting room. Scheduled bookings
+        // must not — apply-credit already left status='scheduled' for these,
+        // matching the Chapa path in payment-return.tsx.
+        if (timing === 'now') {
+          router.push({
+            pathname: '/(patient)/waiting-room',
+            params: {
+              consultationId,
+              doctorId:         doctor.id,
+              doctorName:       doctor.name,
+              consultationType: consultType,
+            },
+          })
+        } else {
+          router.push('/(patient)/(tabs)/appointments')
+        }
         return
       }
 
       // ── Partial credit — call apply-credit first (stores credit_source_id) ─
       if (activeCredit) {
-        await applyFullCredit(consultation.id, activeCredit.creditConsultationId)
+        await applyFullCredit(consultationId, activeCredit.creditConsultationId)
           .catch(() => { /* partial credit already stored even if marking fails */ })
       }
 
@@ -340,7 +465,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
             'apikey':        supabaseAnonKey,
           },
           body: JSON.stringify({
-            consultation_id:  consultation.id,
+            consultation_id:  consultationId,
             amount:           chargeAmount > 0 ? chargeAmount : price,
             email:            user.primaryEmailAddress?.emailAddress ?? '',
             first_name:       user.firstName  ?? 'Patient',
@@ -368,6 +493,21 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
         throw new Error(msg)
       }
 
+      // Persist before opening the checkout — if the app gets killed while
+      // an external banking app (CBE Birr, Telebirr) is in front and the OS
+      // later relaunches us fresh, splash.tsx reads this to route straight
+      // back to payment-return instead of defaulting to Home.
+      try {
+        await AsyncStorage.setItem(PENDING_PAYMENT_KEY, JSON.stringify({
+          consultationId,
+          doctorId:         doctor.id,
+          doctorName:       doctor.name,
+          consultationType: consultType,
+          timing,
+          scheduledAt: timing !== 'now' ? scheduledAt : '',
+        }))
+      } catch {}
+
       // Open Chapa checkout. deepLinkReturn is the sentinel: when the web
       // return page does window.location.replace('carehub://...'), the
       // in-app browser catches it and resolves with type:'success'.
@@ -380,7 +520,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
           const urlObj = new URL(result.url ?? '')
           chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
         } catch {}
-        navigateToReturn(chapaStatus, consultation.id, scheduledAt)
+        navigateToReturn(chapaStatus, consultationId, scheduledAt)
         return
       }
 
@@ -402,7 +542,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
           const urlObj = new URL(capturedLinkingUrl)
           chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
         } catch {}
-        navigateToReturn(chapaStatus, consultation.id, scheduledAt)
+        navigateToReturn(chapaStatus, consultationId, scheduledAt)
         return
       }
 
@@ -411,7 +551,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       // payment-return which polls the DB for up to 60 s and cancels only after
       // confirming the webhook never arrived. The verifying screen also has a
       // manual "I didn't pay" button for users who genuinely cancelled.
-      navigateToReturn('unknown', consultation.id, scheduledAt)
+      navigateToReturn('unknown', consultationId, scheduledAt)
     } catch (err: any) {
       if (consultationId) {
         const token = await getToken().catch(() => null)
@@ -435,9 +575,13 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   }
 
   const canGoNext = () => {
+    if (step === 2 && timing === 'now') return canStartNow
     if (step === 2 && timing === 'schedule') {
-      if (days.length === 0) return false
-      return selectedTime !== ''
+      if (!acceptScheduled || days.length === 0) return false
+      if (selectedTime === '') return false
+      if (bookedTimes.has(selectedTime)) return false
+      if (isSlotPast(days[selectedDay]?.value ?? '', selectedTime)) return false
+      return true
     }
     return true
   }
@@ -485,7 +629,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
                   onPress={() => setConsultType(type.id)}
                 >
                   <View style={[styles.typeIconWrap, { backgroundColor: `${type.color}18` }]}>
-                    <Ionicons name={type.icon as any} size={24} color={type.color} />
+                    <Ionicons name={type.icon as any} size={26} color={type.color} />
                   </View>
                   <View style={styles.typeInfo}>
                     <Text style={styles.typeLabel}>{type.label}</Text>
@@ -505,20 +649,34 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
               <Text style={styles.stepLabel}>When do you want to consult?</Text>
               <View style={styles.timingRow}>
                 <Pressable
-                  style={[styles.timingCard, timing === 'now' && styles.timingCardSelected]}
+                  style={[
+                    styles.timingCard,
+                    timing === 'now' && styles.timingCardSelected,
+                    !canStartNow && styles.timingCardDisabled,
+                  ]}
+                  disabled={!canStartNow}
                   onPress={() => setTiming('now')}
                 >
                   <Ionicons name="flash" size={22} color={timing === 'now' ? colors.mistWhite : colors.tealGreen} />
                   <Text style={[styles.timingLabel, timing === 'now' && styles.timingLabelSelected]}>On-Demand</Text>
-                  <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>Start Now</Text>
+                  <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>
+                    {!doctor.is_online ? 'Doctor Offline' : !acceptOnDemand ? 'Not Accepted' : doctorBusy ? 'In Another Consultation' : 'Start Now'}
+                  </Text>
                 </Pressable>
                 <Pressable
-                  style={[styles.timingCard, timing === 'schedule' && styles.timingCardSelected]}
+                  style={[
+                    styles.timingCard,
+                    timing === 'schedule' && styles.timingCardSelected,
+                    !acceptScheduled && styles.timingCardDisabled,
+                  ]}
+                  disabled={!acceptScheduled}
                   onPress={() => setTiming('schedule')}
                 >
                   <Ionicons name="calendar" size={22} color={timing === 'schedule' ? colors.mistWhite : colors.careBlue} />
                   <Text style={[styles.timingLabel, timing === 'schedule' && styles.timingLabelSelected]}>Schedule</Text>
-                  <Text style={[styles.timingSub, timing === 'schedule' && styles.timingSubSelected]}>Pick a time</Text>
+                  <Text style={[styles.timingSub, timing === 'schedule' && styles.timingSubSelected]}>
+                    {acceptScheduled ? 'Pick a time' : 'Not Accepted'}
+                  </Text>
                 </Pressable>
               </View>
 
@@ -555,19 +713,45 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
                             <Text style={styles.noSlotsText}>No time slots available for this day.</Text>
                           </View>
                         ) : (
-                          <View style={styles.timeGrid}>
-                            {slots.map(slot => (
-                              <Pressable
-                                key={slot}
-                                onPress={() => setSelectedTime(slot)}
-                                style={[styles.timeChip, selectedTime === slot && styles.timeChipSelected]}
-                              >
-                                <Text style={[styles.timeText, selectedTime === slot && styles.timeTextSelected]}>
-                                  {slot}
-                                </Text>
-                              </Pressable>
-                            ))}
-                          </View>
+                          <>
+                            <View style={styles.legendRow}>
+                              <View style={styles.legendItem}>
+                                <View style={[styles.legendSwatch, styles.legendSwatchAvailable]} />
+                                <Text style={styles.legendText}>Available</Text>
+                              </View>
+                              <View style={styles.legendItem}>
+                                <View style={[styles.legendSwatch, styles.legendSwatchBooked]} />
+                                <Text style={styles.legendText}>Booked</Text>
+                              </View>
+                            </View>
+                            <View style={styles.timeGrid}>
+                              {slots.map(slot => {
+                                const isBooked = bookedTimes.has(slot)
+                                const isPast = !isBooked && isSlotPast(days[selectedDay]?.value ?? '', slot)
+                                return (
+                                  <Pressable
+                                    key={slot}
+                                    onPress={() => setSelectedTime(slot)}
+                                    disabled={isBooked || isPast}
+                                    style={[
+                                      styles.timeChip,
+                                      selectedTime === slot && styles.timeChipSelected,
+                                      isBooked && styles.timeChipDisabled,
+                                      isPast && styles.timeChipPast,
+                                    ]}
+                                  >
+                                    <Text style={[
+                                      styles.timeText,
+                                      selectedTime === slot && styles.timeTextSelected,
+                                      (isBooked || isPast) && styles.timeTextDisabled,
+                                    ]}>
+                                      {slot}
+                                    </Text>
+                                  </Pressable>
+                                )
+                              })}
+                            </View>
+                          </>
                         )}
                       </>
                     )
@@ -729,7 +913,7 @@ const styles = StyleSheet.create({
     padding: 14, marginBottom: 10, backgroundColor: colors.mistWhite,
   },
   typeCardSelected: { borderColor: colors.tealGreen, backgroundColor: '#F0FDFB' },
-  typeIconWrap: { width: 48, height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  typeIconWrap: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   typeInfo: { flex: 1 },
   typeLabel: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   typePrice: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginTop: 2 },
@@ -748,6 +932,7 @@ const styles = StyleSheet.create({
     padding: 18, alignItems: 'center', gap: 6,
   },
   timingCardSelected: { borderColor: colors.tealGreen, backgroundColor: colors.tealGreen },
+  timingCardDisabled: { opacity: 0.4 },
   timingLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
   timingLabelSelected: { color: colors.mistWhite },
   timingSub: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
@@ -766,14 +951,30 @@ const styles = StyleSheet.create({
   dayChipSelected: { backgroundColor: colors.careBlue, borderColor: colors.careBlue },
   dayText: { fontFamily: fonts.medium, fontSize: 13, color: '#374151' },
   dayTextSelected: { color: colors.mistWhite },
+  legendRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 10 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendSwatch: {
+    width: 14, height: 14, borderRadius: 4,
+    borderWidth: 1.5,
+  },
+  legendSwatchAvailable: { borderColor: colors.success, backgroundColor: 'rgba(0,203,83,0.12)' },
+  legendSwatchBooked: { borderColor: colors.error, backgroundColor: 'rgba(211,47,47,0.12)' },
+  legendText: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
   timeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   timeChip: {
     paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12,
-    borderWidth: 1.5, borderColor: colors.steelGrey, backgroundColor: colors.mistWhite,
+    borderWidth: 1.5, borderColor: colors.success, backgroundColor: 'rgba(0,203,83,0.08)',
   },
   timeChipSelected: { backgroundColor: colors.careBlue, borderColor: colors.careBlue },
+  // Red tint mirrors legendSwatchBooked so the grid matches the legend;
+  // opacity keeps the existing dampened/disabled affordance on top of it.
+  timeChipDisabled: { borderColor: colors.error, backgroundColor: 'rgba(211,47,47,0.08)', opacity: 0.7 },
+  // Neutral grey (not red) — a past slot isn't "taken by someone else", so it
+  // shouldn't read the same as timeChipDisabled.
+  timeChipPast: { borderColor: colors.steelGrey, backgroundColor: 'rgba(212,217,225,0.3)', opacity: 0.6 },
   timeText: { fontFamily: fonts.medium, fontSize: 13, color: '#374151' },
   timeTextSelected: { color: colors.mistWhite },
+  timeTextDisabled: { color: '#9CA3AF' },
 
   // Summary
   summaryCard: {

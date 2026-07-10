@@ -18,6 +18,7 @@ import { CareHubAlert } from '@/components/ui/CareHubAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
@@ -88,7 +89,7 @@ export default function DoctorProfileScreen() {
   const initial = (user?.firstName?.[0] ?? fullName[0] ?? 'D').toUpperCase()
 
   const [profile, setProfile] = useState<ProfileData>(DEFAULT_PROFILE)
-  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null)
+  const { photoUrl: profilePhotoUrl } = useOwnProfilePhoto()
   const [showLogoutAlert, setShowLogoutAlert] = useState(false)
   const [showComingSoonAlert, setShowComingSoonAlert] = useState(false)
 
@@ -102,7 +103,7 @@ export default function DoctorProfileScreen() {
         const now = new Date()
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
-        const [profileRes, userRes, totalRes, monthRes] = await Promise.all([
+        const [profileRes, totalRes, monthRes] = await Promise.all([
           client
             .from('doctor_profiles')
             .select(`
@@ -111,7 +112,6 @@ export default function DoctorProfileScreen() {
               chat_price, phone_price, video_price
             `)
             .single(),
-          client.from('users').select('profile_photo_url').eq('clerk_id', userId).single(),
           client.from('consultations').select('doctor_amount').eq('status', 'completed'),
           client.from('consultations').select('doctor_amount').eq('status', 'completed').gte('ended_at', monthStart.toISOString()),
         ])
@@ -136,10 +136,6 @@ export default function DoctorProfileScreen() {
             videoPrice: p.video_price ?? 0,
           })
         }
-
-        if ((userRes.data as any)?.profile_photo_url) {
-          setProfilePhotoUrl((userRes.data as any).profile_photo_url)
-        }
       })
     }, [userId])
   )
@@ -163,6 +159,14 @@ export default function DoctorProfileScreen() {
             style: 'danger',
             onPress: async () => {
               setShowLogoutAlert(false)
+              try {
+                const token = await getToken()
+                if (token) {
+                  await getAuthClient(token).from('doctor_profiles').update({ is_online: false })
+                }
+              } catch {
+                // best-effort; the heartbeat TTL cleanup is the safety net
+              }
               await disconnectStream()
               await supabaseEmailAuth.auth.signOut()
               clearAuth()
@@ -208,9 +212,14 @@ export default function DoctorProfileScreen() {
             {/* Stats row */}
             <View style={styles.statsRow}>
               <View style={styles.statItem}>
-                <Text style={styles.statValue}>
-                  {profile.rating > 0 ? `⭐ ${profile.rating.toFixed(1)}` : '—'}
-                </Text>
+                {profile.rating > 0 ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <Ionicons name="star" size={13} color={colors.mistWhite} />
+                    <Text style={styles.statValue}>{profile.rating.toFixed(1)}</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.statValue}>—</Text>
+                )}
                 <Text style={styles.statLabel}>{t('rating')}</Text>
               </View>
               <View style={styles.statDivider} />
@@ -308,13 +317,13 @@ export default function DoctorProfileScreen() {
           <Text style={styles.sectionTitle}>{t('myPricing')}</Text>
           <View style={styles.pricingCard}>
             {[
-              { icon: '💬', label: t('chat'), price: profile.chatPrice },
-              { icon: '📞', label: t('phoneCall'), price: profile.phonePrice },
-              { icon: '🎥', label: t('videoCall'), price: profile.videoPrice },
+              { icon: 'chatbubble-ellipses' as const, label: t('chat'), price: profile.chatPrice },
+              { icon: 'call' as const, label: t('phoneCall'), price: profile.phonePrice },
+              { icon: 'videocam' as const, label: t('videoCall'), price: profile.videoPrice },
             ].map(({ icon, label, price }, idx, arr) => (
               <View key={label}>
                 <View style={styles.pricingRow}>
-                  <Text style={styles.pricingIcon}>{icon}</Text>
+                  <Ionicons name={icon} size={18} color={colors.careBlue} style={styles.pricingIcon} />
                   <Text style={styles.pricingLabel}>{label}</Text>
                   <Text style={styles.pricingValue}>
                     {hasPricing ? `ETB ${price.toLocaleString()}` : '—'}
@@ -443,7 +452,7 @@ const styles = StyleSheet.create({
   // Pricing card
   pricingCard: { backgroundColor: colors.mistWhite, marginHorizontal: 16, borderRadius: 16, padding: 16, ...shadow('#000', 0, 1, 4, 0.05, 1) },
   pricingRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, gap: 12 },
-  pricingIcon: { fontSize: 20, width: 28, textAlign: 'center' },
+  pricingIcon: { width: 28, textAlign: 'center' },
   pricingLabel: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack, flex: 1 },
   pricingValue: { fontFamily: fonts.bold, fontSize: 15, color: colors.careBlue },
   pricingDivider: { height: 1, backgroundColor: colors.cloudGrey, marginLeft: 40 },

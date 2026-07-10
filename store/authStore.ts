@@ -4,6 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware'
 
 import { streamClient } from '@/lib/stream'
 import { logger } from '@/lib/logger'
+import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 
 type UserRole = 'patient' | 'doctor' | null
 
@@ -14,6 +15,12 @@ interface AuthState {
   userPhotoUrl: string | null
   isStreamConnected: boolean
   _hasHydrated: boolean
+  // Set synchronously (before any await) the instant a cold-launch push
+  // notification tap is about to route somewhere specific (e.g. the doctor's
+  // incoming-request screen). Not persisted — splash.tsx reads it once via
+  // getState() to skip its own default role-based redirect, so a queued
+  // notification's navigation is never stomped by splash landing on Home.
+  pendingNotificationRoute: boolean
 
   setUserRole: (role: UserRole) => void
   setUser: (userId: string, name: string, photoUrl: string | null) => void
@@ -21,6 +28,7 @@ interface AuthState {
   disconnectStream: () => Promise<void>
   clearAuth: () => void
   setHasHydrated: (v: boolean) => void
+  setPendingNotificationRoute: (v: boolean) => void
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -32,9 +40,11 @@ export const useAuthStore = create<AuthState>()(
       userPhotoUrl: null,
       isStreamConnected: false,
       _hasHydrated: false,
+      pendingNotificationRoute: false,
 
       setUserRole: (role) => set({ userRole: role }),
       setHasHydrated: (v) => set({ _hasHydrated: v }),
+      setPendingNotificationRoute: (v) => set({ pendingNotificationRoute: v }),
 
       setUser: (userId, name, photoUrl) =>
         set({ userId, userName: name, userPhotoUrl: photoUrl }),
@@ -75,6 +85,13 @@ export const useAuthStore = create<AuthState>()(
           userPhotoUrl: null,
           isStreamConnected: false,
         })
+        // The "active consultation" banner state is persisted to AsyncStorage
+        // independently of this store and is device-scoped, not account-scoped.
+        // Without clearing it here, signing out (or deleting the account) left
+        // a stale "Resume" banner pointing at a dead consultation, visible even
+        // on the signed-out sign-in screen and surviving into the next account
+        // signed into on the same device.
+        useActiveConsultationStore.getState().setActive(null)
       },
     }),
     {

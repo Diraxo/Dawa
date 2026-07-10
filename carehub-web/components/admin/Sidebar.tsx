@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation'
 import { useClerk } from '@clerk/nextjs'
 import {
   LayoutDashboard, BadgeCheck, Stethoscope, Users,
-  ClipboardList, Wallet, Settings, LogOut, Tags, Bell, ShieldCheck,
+  ClipboardList, Wallet, Settings, LogOut, Tags, Bell, ShieldCheck, Star,
 } from 'lucide-react'
 import LogoMark from '@/components/ui/LogoMark'
 import { supabase } from '@/lib/supabase'
@@ -26,6 +26,7 @@ const NAV_ITEMS = [
   { icon: ClipboardList, label: 'Consultations', href: '/admin/consultations', hasBadge: false },
   { icon: Wallet, label: 'Payments', href: '/admin/payments', hasBadge: false },
   { icon: Tags, label: 'Specialties', href: '/admin/specialties', hasBadge: false },
+  { icon: Star, label: 'Reviews', href: '/admin/reviews', hasBadge: false },
   { icon: ShieldCheck, label: 'Audit Log', href: '/admin/audit', hasBadge: false },
   { icon: Settings, label: 'Settings', href: '/admin/settings', hasBadge: false },
 ]

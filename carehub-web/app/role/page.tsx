@@ -61,6 +61,7 @@ export default function RolePage() {
             clerk_id: user.id,
             email: user.emailAddresses[0]?.emailAddress ?? '',
             full_name: user.fullName ?? '',
+            profile_photo_url: user.imageUrl ?? null,
             role: selected,
             country: '',
             language: 'en',

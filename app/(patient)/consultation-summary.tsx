@@ -1,5 +1,7 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
+import { Asset } from 'expo-asset'
+import * as FileSystem from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
@@ -20,8 +22,9 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { images } from '@/constants/images'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
 
 interface SummaryData {
@@ -30,6 +33,7 @@ interface SummaryData {
   prescription: string | null
   followup_recommendation: string | null
   referral_needed: boolean | null
+  referral_specialty: string | null
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -56,20 +60,116 @@ export default function ConsultationSummaryScreen() {
   const [summary, setSummary] = useState<SummaryData | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
 
+  // Existing rating for this consultation — if found, show a read-only
+  // "already rated" summary with Edit Rating/Edit Review instead of the
+  // blank star form, and update that row on submit instead of inserting a
+  // second one.
+  const [existingReviewId, setExistingReviewId] = useState<string | null>(null)
+  const [reviewLoading, setReviewLoading] = useState(true)
+  const [editingRating, setEditingRating] = useState(false)
+
+  // Real consultation date, fetched from the DB — previously this screen
+  // rendered `new Date()` at render time, so a summary opened days later
+  // showed today's date instead of when the consultation actually happened.
+  const [consultationDate, setConsultationDate] = useState<Date | null>(null)
+
   useEffect(() => {
-    if (!consultationId) { setSummaryLoading(false); return }
-    getToken().then(token => {
-      if (!token) { setSummaryLoading(false); return }
-      getAuthClient(token)
-        .from('consultation_summaries')
-        .select('chief_complaint,diagnosis,prescription,followup_recommendation,referral_needed')
-        .eq('consultation_id', consultationId)
-        .maybeSingle()
-        .then(({ data }) => { setSummary(data); setSummaryLoading(false) })
-    })
+    if (!consultationId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || cancelled) return
+        const { data } = await getAuthClient(token)
+          .from('consultations')
+          .select('started_at, scheduled_at, created_at')
+          .eq('id', consultationId)
+          .maybeSingle()
+        if (cancelled || !data) return
+        // Same started_at ?? scheduled_at ?? created_at priority used by the
+        // doctor/patient list screens, so this detail view agrees with them.
+        const iso = (data as any).started_at ?? (data as any).scheduled_at ?? (data as any).created_at
+        if (iso) setConsultationDate(new Date(iso))
+      } catch {
+        // best-effort — falls back to today's date if this fails
+      }
+    })()
+    return () => { cancelled = true }
   }, [consultationId])
 
-  const dateStr = new Date().toLocaleDateString('en-US', {
+  useEffect(() => {
+    if (!consultationId) { setReviewLoading(false); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || !user?.id) { if (!cancelled) setReviewLoading(false); return }
+        const client = getAuthClient(token)
+        const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!userData?.id) { if (!cancelled) setReviewLoading(false); return }
+        const { data: review } = await client
+          .from('reviews')
+          .select('id, rating, comment')
+          .eq('consultation_id', consultationId)
+          .eq('patient_id', userData.id)
+          .maybeSingle()
+        if (cancelled) return
+        if (review) {
+          setExistingReviewId(review.id)
+          setRating(review.rating)
+          setComment(review.comment ?? '')
+        }
+      } finally {
+        if (!cancelled) setReviewLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [consultationId])
+
+  useEffect(() => {
+    if (!consultationId) { setSummaryLoading(false); return }
+    let cancelled = false
+    let attempts = 0
+
+    // Retries transient failures (Clerk session still hydrating on cold
+    // launch, brief network blip) instead of permanently showing "not
+    // submitted yet" for a summary that actually exists — a fetch error is
+    // never treated as "no summary."
+    const fetchSummary = async () => {
+      const token = await getToken()
+      if (cancelled) return
+      if (!token) {
+        if (attempts < 5) { attempts += 1; setTimeout(fetchSummary, 400); return }
+        setSummaryLoading(false)
+        return
+      }
+      const { data, error } = await getAuthClient(token)
+        .from('consultation_summaries')
+        .select('chief_complaint,diagnosis,prescription,followup_recommendation,referral_needed,referral_specialty')
+        .eq('consultation_id', consultationId)
+        .maybeSingle()
+      if (cancelled) return
+      if (error && attempts < 3) { attempts += 1; setTimeout(fetchSummary, 600); return }
+      setSummary(data)
+      setSummaryLoading(false)
+    }
+
+    fetchSummary()
+
+    // Live-refresh if the doctor edits the summary while this screen is
+    // open — always show the latest version, never a stale cached copy.
+    const channel = supabase
+      .channel(`patient-summary-${consultationId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'consultation_summaries', filter: `consultation_id=eq.${consultationId}` }, () => {
+        attempts = 0
+        fetchSummary()
+      })
+      .subscribe()
+
+    return () => { cancelled = true; supabase.removeChannel(channel) }
+  }, [consultationId])
+
+  const dateStr = (consultationDate ?? new Date()).toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
   })
   const TYPE_LABELS: Record<string, string> = {
@@ -101,13 +201,21 @@ export default function ConsultationSummaryScreen() {
           .single()
 
         if (userData?.id && doctorId) {
-          await client.from('reviews').insert({
-            consultation_id: consultationId,
-            patient_id: userData.id,
-            doctor_id: doctorId,
-            rating,
-            comment: comment.trim() || null,
-          })
+          if (existingReviewId) {
+            await client.from('reviews').update({
+              rating,
+              comment: comment.trim() || null,
+            }).eq('id', existingReviewId)
+          } else {
+            const { data: inserted } = await client.from('reviews').insert({
+              consultation_id: consultationId,
+              patient_id: userData.id,
+              doctor_id: doctorId,
+              rating,
+              comment: comment.trim() || null,
+            }).select('id').single()
+            if (inserted?.id) setExistingReviewId(inserted.id)
+          }
         }
       }
     } catch {
@@ -115,13 +223,26 @@ export default function ConsultationSummaryScreen() {
     }
 
     setSubmitting(false)
+    setEditingRating(false)
     Alert.alert(t('thankYou'), t('ratingSubmitted'), [
-      { text: t('done'), onPress: () => router.replace('/(patient)/(tabs)/appointments') },
+      { text: t('done'), onPress: () => router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } }) },
     ])
   }
 
   const handleDownload = async () => {
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+    let logoImgTag = ''
+    try {
+      const asset = Asset.fromModule(images.darkLogo)
+      await asset.downloadAsync()
+      if (asset.localUri) {
+        const base64 = await FileSystem.readAsStringAsync(asset.localUri, { encoding: FileSystem.EncodingType.Base64 })
+        logoImgTag = `<img src="data:image/jpeg;base64,${base64}" style="height:36px;margin-bottom:8px" />`
+      }
+    } catch {
+      // Logo is a nice-to-have — proceed without it if it can't be loaded.
+    }
 
     const prescriptionHtml = (() => {
       if (!summary?.prescription) return '<p style="color:#6B7280">No prescription issued.</p>'
@@ -160,6 +281,7 @@ export default function ConsultationSummaryScreen() {
   </style>
 </head>
 <body>
+  ${logoImgTag}
   <h1>DAWA — Consultation Summary</h1>
   <p class="sub">This document is a confidential medical record generated by the Dawa Health Platform.</p>
 
@@ -185,7 +307,7 @@ export default function ConsultationSummaryScreen() {
     <div class="section-label">Follow-up Recommendation</div>
     <div class="section-body">${esc(summary?.followup_recommendation ?? 'None')}</div>
   </div>
-  ${summary?.referral_needed ? '<div class="referral">📋 Doctor recommends a specialist referral.</div>' : ''}
+  ${summary?.referral_needed ? `<div class="referral">📋 Doctor recommends a specialist referral${summary?.referral_specialty ? ` (${esc(summary.referral_specialty)})` : ''}.</div>` : ''}
 
   <div class="footer">Powered by Dawa Health Platform · ${esc(dateStr)}</div>
 </body>
@@ -203,9 +325,28 @@ export default function ConsultationSummaryScreen() {
       } else {
         Alert.alert('PDF Saved', `Your consultation summary PDF has been saved to:\n${uri}`)
       }
+
+      // Best-effort: persist the report to Supabase Storage so it's viewable
+      // later on the web summary page too. Never blocks/delays the share above.
+      persistReportToStorage(uri).catch(() => {})
     } catch {
       Alert.alert('Error', 'Could not generate PDF. Please try again.')
     }
+  }
+
+  const persistReportToStorage = async (fileUri: string) => {
+    if (!consultationId) return
+    const token = await getToken()
+    if (!token) return
+    const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 })
+    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0))
+    const client = getAuthClient(token)
+    const path = `${consultationId}/report.pdf`
+    const { error: uploadError } = await client.storage
+      .from('consultation-reports')
+      .upload(path, bytes, { contentType: 'application/pdf', upsert: true })
+    if (uploadError) return
+    await client.from('consultation_summaries').update({ report_pdf_path: path }).eq('consultation_id', consultationId)
   }
 
   return (
@@ -284,7 +425,11 @@ export default function ConsultationSummaryScreen() {
             {summary?.referral_needed ? (
               <View style={styles.referralBadge}>
                 <Ionicons name="arrow-forward-circle" size={16} color={colors.careBlue} />
-                <Text style={styles.referralText}>{t('referralRecommended')}</Text>
+                <Text style={styles.referralText}>
+                  {summary?.referral_specialty
+                    ? `${t('referralRecommended')} — ${summary.referral_specialty}`
+                    : t('referralRecommended')}
+                </Text>
               </View>
             ) : null}
           </>
@@ -301,30 +446,65 @@ export default function ConsultationSummaryScreen() {
 
         {/* Rating section */}
         <View style={styles.ratingSection}>
-          <Text style={styles.ratingTitle}>{t('rateYourDoctor')}</Text>
-          <Text style={styles.ratingSub}>
-            {t('howWasExperience')} {doctorName ?? t('doctorLabel')}?
-          </Text>
-          <View style={styles.starsRow}>
-            {[1, 2, 3, 4, 5].map(star => (
-              <Pressable key={star} onPress={() => setRating(star)}>
-                <Ionicons
-                  name={star <= rating ? 'star' : 'star-outline'}
-                  size={38}
-                  color={star <= rating ? colors.warning : colors.steelGrey}
-                />
-              </Pressable>
-            ))}
-          </View>
-          <TextInput
-            style={styles.commentInput}
-            placeholder={t('leaveComment')}
-            placeholderTextColor="#9CA3AF"
-            value={comment}
-            onChangeText={setComment}
-            multiline
-            maxLength={300}
-          />
+          {!reviewLoading && existingReviewId && !editingRating ? (
+            <>
+              <Text style={styles.ratingTitle}>You have already rated this consultation</Text>
+              <View style={styles.starsRow}>
+                {[1, 2, 3, 4, 5].map(star => (
+                  <Ionicons
+                    key={star}
+                    name={star <= rating ? 'star' : 'star-outline'}
+                    size={30}
+                    color={star <= rating ? colors.warning : colors.steelGrey}
+                  />
+                ))}
+              </View>
+              {comment ? <Text style={styles.noteText}>{comment}</Text> : null}
+              <View style={styles.editReviewRow}>
+                <Pressable
+                  style={({ pressed }) => [styles.editReviewBtn, pressed && { opacity: 0.8 }]}
+                  onPress={() => setEditingRating(true)}
+                >
+                  <Ionicons name="star-outline" size={16} color={colors.careBlue} />
+                  <Text style={styles.editReviewText}>Edit Rating</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.editReviewBtn, pressed && { opacity: 0.8 }]}
+                  onPress={() => setEditingRating(true)}
+                >
+                  <Ionicons name="create-outline" size={16} color={colors.careBlue} />
+                  <Text style={styles.editReviewText}>Edit Review</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.ratingTitle}>{t('rateYourDoctor')}</Text>
+              <Text style={styles.ratingSub}>
+                {t('howWasExperience')} {doctorName ?? t('doctorLabel')}?
+              </Text>
+              <View style={styles.starsRow}>
+                {[1, 2, 3, 4, 5].map(star => (
+                  <Pressable key={star} onPress={() => setRating(star)}>
+                    <Ionicons
+                      name={star <= rating ? 'star' : 'star-outline'}
+                      size={38}
+                      color={star <= rating ? colors.warning : colors.steelGrey}
+                    />
+                  </Pressable>
+                ))}
+              </View>
+              <TextInput
+                style={styles.commentInput}
+                placeholder={t('leaveComment')}
+                placeholderTextColor="#9CA3AF"
+                value={comment}
+                onChangeText={setComment}
+                multiline
+                maxLength={300}
+              />
+            </>
+          )}
         </View>
 
         <View style={styles.bottomPad} />
@@ -334,7 +514,11 @@ export default function ConsultationSummaryScreen() {
       <View style={styles.footer}>
         <Pressable
           style={({ pressed }) => [styles.doneWrap, pressed && { opacity: 0.88 }]}
-          onPress={handleDone}
+          onPress={
+            !reviewLoading && existingReviewId && !editingRating
+              ? () => router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } })
+              : handleDone
+          }
           disabled={submitting}
         >
           <LinearGradient
@@ -343,7 +527,13 @@ export default function ConsultationSummaryScreen() {
             style={styles.doneBtn}
           >
             <Text style={styles.doneBtnText}>
-              {submitting ? t('submitting') : t('submitAndDone')}
+              {submitting
+                ? t('submitting')
+                : !reviewLoading && existingReviewId && !editingRating
+                  ? t('done')
+                  : existingReviewId
+                    ? 'Update Rating'
+                    : t('submitAndDone')}
             </Text>
           </LinearGradient>
         </Pressable>
@@ -440,6 +630,14 @@ const styles = StyleSheet.create({
     padding: 14, fontFamily: fonts.regular, fontSize: 14,
     color: colors.inkBlack, minHeight: 80, textAlignVertical: 'top',
   },
+
+  editReviewRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  editReviewBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    height: 40, borderRadius: 10, borderWidth: 1.5, borderColor: colors.careBlue,
+    backgroundColor: '#EFF6FF',
+  },
+  editReviewText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.careBlue },
 
   bottomPad: { height: 16 },
 

@@ -10,6 +10,7 @@ interface Patient {
   full_name: string
   email: string
   country: string
+  address: string | null
   created_at: string
   profile_photo_url: string | null
   is_suspended: boolean
@@ -32,7 +33,7 @@ export default function AdminPatientsPage() {
     async function load() {
       const { data } = await supabase
         .from('users')
-        .select('id, full_name, email, country, created_at, profile_photo_url, is_suspended')
+        .select('id, full_name, email, country, address, created_at, profile_photo_url, is_suspended')
         .eq('role', 'patient')
         .order('created_at', { ascending: false })
       setPatients((data ?? []) as unknown as Patient[])
@@ -127,16 +128,16 @@ export default function AdminPatientsPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-steel-grey">
-                {['Photo', 'Name', 'Email', 'Country', 'Joined', 'Status', 'Action'].map(h => (
+                {['Photo', 'Name', 'Email', 'Country', 'Address', 'Joined', 'Status', 'Action'].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-[11px] font-bold text-ink-black/40 uppercase tracking-wider">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-ink-black/40 text-sm">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-ink-black/40 text-sm">Loading…</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-ink-black/40 text-sm">No patients found.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-ink-black/40 text-sm">No patients found.</td></tr>
               ) : filtered.map((p, i) => {
                 const name = p.full_name || '—'
                 const photoUrl = p.profile_photo_url ?? null
@@ -161,6 +162,7 @@ export default function AdminPatientsPage() {
                     <td className="px-4 py-3 font-semibold text-sm text-ink-black">{name}</td>
                     <td className="px-4 py-3 text-sm text-ink-black/60">{p.email}</td>
                     <td className="px-4 py-3 text-sm text-ink-black/60">{p.country || '—'}</td>
+                    <td className="px-4 py-3 text-sm text-ink-black/60 max-w-[200px] truncate" title={p.address || undefined}>{p.address || '—'}</td>
                     <td className="px-4 py-3 text-sm text-ink-black/60">{formatDate(p.created_at)}</td>
                     <td className="px-4 py-3">
                       <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${

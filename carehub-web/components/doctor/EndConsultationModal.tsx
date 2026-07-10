@@ -3,7 +3,6 @@
 import { useState } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
-import { getStreamClient } from '@/lib/stream'
 
 interface Prescription {
   medicine: string
@@ -32,6 +31,7 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
   const [referralNeeded, setReferralNeeded] = useState(false)
   const [referralSpecialty, setReferralSpecialty] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const isValid = chiefComplaint.trim().length > 0 && diagnosis.trim().length > 0
 
@@ -46,18 +46,17 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
   async function handleSubmit() {
     if (!isValid) return
     setSubmitting(true)
+    setError(null)
     const token = await getToken()
-    if (!token) { setSubmitting(false); return }
+    if (!token) { setSubmitting(false); setError('Could not authenticate. Please try again.'); return }
     const client = getAuthClient(token)
 
-    const prescriptionText = prescriptionEnabled
-      ? prescriptions
-          .filter(rx => rx.medicine.trim())
-          .map(rx => `${rx.medicine} — ${rx.dosage}, ${rx.duration}. ${rx.instructions}`.trim())
-          .join('\n')
+    const validRx = prescriptions.filter(rx => rx.medicine.trim())
+    const prescriptionText = prescriptionEnabled && validRx.length > 0
+      ? JSON.stringify(validRx)
       : null
 
-    await client.from('consultation_summaries').insert({
+    const { error: summaryError } = await client.from('consultation_summaries').upsert({
       consultation_id: consultationId,
       chief_complaint: chiefComplaint.trim(),
       diagnosis: diagnosis.trim(),
@@ -65,29 +64,29 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
       followup_recommendation: followUp.trim() || null,
       referral_needed: referralNeeded,
       referral_specialty: referralNeeded && referralSpecialty.trim() ? referralSpecialty.trim() : null,
-    })
+    }, { onConflict: 'consultation_id' })
 
-    await client.from('consultations').update({
+    if (summaryError) {
+      setSubmitting(false)
+      setError('Could not save the consultation summary. Please try again.')
+      return
+    }
+
+    const { error: statusError } = await client.from('consultations').update({
       status: 'completed',
       ended_at: new Date().toISOString(),
       duration_minutes: elapsedSeconds ? Math.ceil(elapsedSeconds / 60) : null,
     }).eq('id', consultationId)
 
-    try {
-      const stream = getStreamClient()
-      const ch = stream.channel('messaging', consultationId)
-      await ch.updatePartial({ set: { consultationStatus: 'completed' } as object })
-    } catch {}
+    if (statusError) {
+      setSubmitting(false)
+      setError('Summary saved, but could not close out the consultation. Please try again.')
+      return
+    }
 
-    // Notify patient that the summary is ready
-    try {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-      await fetch(`${supabaseUrl}/functions/v1/handle-consultation-notification`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ event: 'summary_ready', consultation_id: consultationId }),
-      })
-    } catch {}
+    // Stream channel locking is now handled server-side by a DB trigger
+    // (on_consultation_change → freeze-consultation-channel Edge Function)
+    // the instant status flips to 'completed' above — no client call needed.
 
     setSubmitting(false)
     onDone()
@@ -243,6 +242,10 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
               )}
             </div>
           </div>
+
+          {error && (
+            <p className="mt-4 text-sm text-danger text-center">{error}</p>
+          )}
 
           <button
             onClick={handleSubmit}

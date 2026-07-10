@@ -31,8 +31,8 @@ const FAQ_SECTIONS: Section[] = [
     id: 'consultations',
     title: 'Consultations',
     items: [
-      { q: 'How do I receive consultation requests?', a: 'Set yourself as online on your home screen. When a patient books with you, you receive a push notification and an in-app popup with a 30-second timer to accept or decline.' },
-      { q: 'What if I miss a consultation request?', a: 'If you do not respond within 30 seconds, the request is automatically declined and the patient is notified. The consultation moves to your history as cancelled.' },
+      { q: 'How do I receive consultation requests?', a: 'Set yourself as online on your home screen. When a patient books with you, you receive a push notification and an in-app popup to accept or decline.' },
+      { q: 'What if I miss a consultation request?', a: 'If you do not respond within a reasonable time, the request is automatically declined and the patient is notified. The consultation moves to your history as cancelled.' },
       { q: 'How do I end a consultation?', a: 'Tap the "End Consultation" button during any active session. You will then be prompted to fill in consultation notes including diagnosis, prescription notes, and follow-up recommendations.' },
       { q: 'Can patients schedule consultations?', a: 'Yes. During booking patients can choose on-demand (now) or schedule a specific date and time. Scheduled consultations appear in your Schedule tab.' },
     ],

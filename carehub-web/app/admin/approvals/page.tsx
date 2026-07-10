@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
+import { MessageCircle, Phone, Video, type LucideIcon } from 'lucide-react'
 
 interface DoctorApplication {
   id: string
@@ -352,9 +353,9 @@ export default function ApprovalsPage() {
                     {/* Step 4 — Pricing */}
                     <Section label="Step 4 — Consultation Pricing" step={4}>
                       <div className="grid grid-cols-3 gap-4">
-                        <PriceCard icon="💬" label="Chat" price={app.chat_price} />
-                        <PriceCard icon="📞" label="Phone Call" price={app.phone_price} />
-                        <PriceCard icon="🎥" label="Video Call" price={app.video_price} />
+                        <PriceCard icon={MessageCircle} label="Chat" price={app.chat_price} />
+                        <PriceCard icon={Phone} label="Phone Call" price={app.phone_price} />
+                        <PriceCard icon={Video} label="Video Call" price={app.video_price} />
                       </div>
                     </Section>
 
@@ -423,11 +424,11 @@ function Field({ label, value, mono }: { label: string; value?: string | number 
   )
 }
 
-function PriceCard({ icon, label, price }: { icon: string; label: string; price: number }) {
+function PriceCard({ icon: Icon, label, price }: { icon: LucideIcon; label: string; price: number }) {
   const net = Math.floor((price ?? 0) * 0.8)
   return (
     <div className="bg-white rounded-2xl border border-steel-grey p-4 text-center">
-      <div className="text-2xl mb-1">{icon}</div>
+      <div className="flex justify-center mb-1"><Icon size={22} className="text-int-blue" /></div>
       <p className="text-[10px] font-bold text-ink-black/40 uppercase tracking-wider mb-1">{label}</p>
       <p className="text-lg font-black text-ink-black">ETB {price ?? 0}</p>
       <p className="text-[10px] text-teal-green font-semibold mt-0.5">Doctor earns ETB {net}</p>

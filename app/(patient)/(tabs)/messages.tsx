@@ -1,12 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
-import { useRouter } from 'expo-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useFocusEffect, useRouter } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -25,6 +23,15 @@ import { useTranslation } from 'react-i18next'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function attachmentPreview(attachments: readonly any[] | undefined): string | null {
+  if (!attachments?.length) return null
+  const att = attachments[0] as any
+  if (att.type === 'image') return 'Photo'
+  if (att.type === 'audio' || (att.mime_type as string | undefined)?.includes('audio')) return 'Voice message'
+  if (att.type === 'video') return 'Video'
+  return 'File'
+}
+
 function formatMsgTime(date: string | Date | null | undefined): string {
   if (!date) return ''
   const d = typeof date === 'string' ? new Date(date) : date
@@ -39,6 +46,10 @@ function formatMsgTime(date: string | Date | null | undefined): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type ListItem = Conversation & { type: 'conv' }
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function MessagesScreen() {
@@ -50,100 +61,214 @@ export default function MessagesScreen() {
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all')
 
-  // ── Fetch real channels from Stream ─────────────────────────────────────────
+  const [matchingChannelIds, setMatchingChannelIds] = useState<Set<string>>(new Set())
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // ── Focus effect: fetch + real-time subscriptions ─────────────────────────
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!isStreamConnected || !userId) return
+      const cancelled = { value: false }
+
+      const loadConversations = async () => {
+        try {
+          const channels = await streamClient.queryChannels(
+            { type: 'messaging', members: { $in: [userId] } },
+            { last_message_at: -1 },
+            { watch: true, state: true, presence: true, limit: 30 }
+          )
+          if (cancelled.value) return
+
+          const convos: Conversation[] = channels.map((ch) => {
+            const msgs = ch.state.messages
+            const lastMsg = msgs[msgs.length - 1]
+            const doctorMember = Object.values(ch.state.members).find(
+              (m) => m.user?.id !== userId
+            )
+            const d = ch.data as Record<string, unknown> | undefined
+
+            return {
+              id: ch.id ?? '',
+              peerId:
+                (d?.doctorId as string | undefined) ??
+                doctorMember?.user?.id ??
+                '',
+              peerName:
+                (d?.doctorName as string | undefined) ??
+                doctorMember?.user?.name ??
+                'Doctor',
+              peerSubtitle: (d?.doctorSubtitle as string | undefined) ?? '',
+              peerPhotoUrl:
+                (doctorMember?.user?.image as string | undefined) ??
+                (d?.doctorPhotoUrl as string | null | undefined) ??
+                null,
+              lastMessage:
+                lastMsg?.text ||
+                attachmentPreview(lastMsg?.attachments) ||
+                'No messages yet',
+              lastMessageTime: formatMsgTime(lastMsg?.created_at),
+              unreadCount: ch.countUnread(),
+              isOnline: doctorMember?.user?.online ?? false,
+              isPinned: !!(d as any)?.pinned,
+              consultationStatus: (
+                (d?.consultationStatus as string) === 'completed'
+                  ? 'completed'
+                  : 'active'
+              ) as 'active' | 'completed',
+            }
+          })
+          setConversations(convos)
+        } catch (err) {
+          logger.error('[Messages] queryChannels error:', err)
+        } finally {
+          if (!cancelled.value) setLoading(false)
+        }
+      }
+
+      setLoading(true)
+      loadConversations()
+
+      // In-place update when a new message arrives in a watched channel
+      const sub1 = streamClient.on('message.new', (event) => {
+        if (!event.message || !event.cid) return
+        const channelId = event.cid.replace('messaging:', '')
+        const msg = event.message
+        setConversations((prev) => {
+          const idx = prev.findIndex((c) => c.id === channelId)
+          if (idx === -1) return prev
+          const updated = [...prev]
+          updated[idx] = {
+            ...updated[idx],
+            lastMessage:
+              msg.text || attachmentPreview(msg.attachments) || 'Message',
+            lastMessageTime: formatMsgTime(msg.created_at),
+            unreadCount:
+              msg.user?.id === userId
+                ? updated[idx].unreadCount
+                : updated[idx].unreadCount + 1,
+          }
+          const [conv] = updated.splice(idx, 1)
+          return [conv, ...updated]
+        })
+      })
+
+      // Full refetch when a message arrives in a channel not yet being watched
+      const sub2 = streamClient.on('notification.message_new', () => {
+        if (!cancelled.value) loadConversations()
+      })
+
+      // Live online/offline dot — requires `presence: true` above to be populated.
+      const sub3 = streamClient.on('user.presence.changed', (event) => {
+        const presenceUserId = event.user?.id
+        if (!presenceUserId) return
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.peerId === presenceUserId ? { ...c, isOnline: !!event.user?.online } : c
+          )
+        )
+      })
+
+      // Keep the "Completed" pill live while sitting on this tab — the doctor
+      // ending the consultation flips the channel's consultationStatus field
+      // (see freeze-consultation-channel edge function), but without this the
+      // row wouldn't reflect it until the user navigates away and back.
+      const sub4 = streamClient.on('channel.updated', (event) => {
+        if (!event.cid) return
+        const channelId = event.cid.replace('messaging:', '')
+        const status = (event.channel as any)?.consultationStatus
+        if (status !== 'completed') return
+        setConversations((prev) =>
+          prev.map((c) => (c.id === channelId ? { ...c, consultationStatus: 'completed' } : c))
+        )
+      })
+
+      // Live avatar update — e.g. the doctor changes their profile photo
+      // while this list is open.
+      const sub5 = streamClient.on('user.updated', (event) => {
+        const updatedUserId = event.user?.id
+        if (!updatedUserId) return
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.peerId === updatedUserId ? { ...c, peerPhotoUrl: (event.user as any)?.image ?? null } : c
+          )
+        )
+      })
+
+      return () => {
+        cancelled.value = true
+        sub1.unsubscribe()
+        sub2.unsubscribe()
+        sub3.unsubscribe()
+        sub4.unsubscribe()
+        sub5.unsubscribe()
+      }
+    }, [isStreamConnected, userId])
+  )
+
+  // ── Stream message content search ─────────────────────────────────────────
+  // Finds conversations whose message history (not just the last message)
+  // contains the query, so the unified search covers names AND content.
 
   useEffect(() => {
-    if (!isStreamConnected || !userId) return
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
 
-    let cancelled = false
-
-    const fetchChannels = async () => {
-      setLoading(true)
-      try {
-        const channels = await streamClient.queryChannels(
-          { type: 'messaging', members: { $in: [userId] } },
-          { last_message_at: -1 },
-          { watch: true, state: true, limit: 30 }
-        )
-
-        if (cancelled) return
-
-        const convos: Conversation[] = channels.map((ch) => {
-          const msgs = ch.state.messages
-          const lastMsg = msgs[msgs.length - 1]
-          const doctorMember = Object.values(ch.state.members).find(
-            (m) => m.user?.id !== userId
-          )
-          // Custom fields stored when the consultation channel was created
-          const d = ch.data as Record<string, unknown> | undefined
-
-          return {
-            id: ch.id ?? '',
-            doctorId: (d?.doctorId as string | undefined) ?? doctorMember?.user?.id ?? '',
-            doctorName:
-              (d?.doctorName as string | undefined) ??
-              doctorMember?.user?.name ??
-              'Doctor',
-            doctorSubtitle: (d?.doctorSubtitle as string | undefined) ?? '',
-            doctorPhotoUrl:
-              (d?.doctorPhotoUrl as string | null | undefined) ??
-              (doctorMember?.user?.image as string | undefined) ??
-              null,
-            lastMessage: lastMsg?.text ?? 'No messages yet',
-            lastMessageTime: formatMsgTime(lastMsg?.created_at),
-            unreadCount: ch.countUnread(),
-            isOnline: doctorMember?.user?.online ?? false,
-            isPinned: false,
-            consultationStatus:
-              ((d?.consultationStatus as string) === 'completed'
-                ? 'completed'
-                : 'active') as 'active' | 'completed',
-          }
-        })
-
-        setConversations(convos)
-      } catch (err) {
-        logger.error('[Messages] queryChannels error:', err)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+    const q = searchQuery.trim()
+    if (!q || q.length < 2 || !isStreamConnected || !userId) {
+      setMatchingChannelIds(new Set())
+      return
     }
 
-    fetchChannels()
-
-    // Real-time: refresh list when a new message arrives in any channel
-    const sub = streamClient.on('notification.message_new', () => {
-      if (!cancelled) fetchChannels()
-    })
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await streamClient.search(
+          { type: 'messaging', members: { $in: [userId] } },
+          q,
+          { limit: 20, offset: 0 }
+        )
+        const ids = (res.results ?? [])
+          .map((r: any) => r.message?.channel_id as string | undefined)
+          .filter((id): id is string => !!id)
+        setMatchingChannelIds(new Set(ids))
+      } catch {
+        setMatchingChannelIds(new Set())
+      }
+    }, 350)
 
     return () => {
-      cancelled = true
-      sub.unsubscribe()
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     }
-  }, [isStreamConnected, userId])
+  }, [searchQuery, isStreamConnected, userId])
 
-  // ── Derived data ────────────────────────────────────────────────────────────
+  // ── Derived data ──────────────────────────────────────────────────────────
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
+    if (!q) return conversations
     return conversations.filter((c) => {
-      const nameMatch = !q || c.doctorName.toLowerCase().includes(q) || c.doctorSubtitle.toLowerCase().includes(q)
-      const statusMatch = statusFilter === 'all' || c.consultationStatus === statusFilter
-      return nameMatch && statusMatch
+      const nameMatch =
+        c.peerName.toLowerCase().includes(q) ||
+        c.peerSubtitle.toLowerCase().includes(q) ||
+        c.lastMessage.toLowerCase().includes(q)
+      return nameMatch || matchingChannelIds.has(c.id)
     })
-  }, [conversations, searchQuery, statusFilter])
+  }, [conversations, searchQuery, matchingChannelIds])
 
-  const pinned = useMemo(() => filtered.filter((c) => c.isPinned), [filtered])
-  const others = useMemo(() => filtered.filter((c) => !c.isPinned), [filtered])
+  // Pinned conversations float to the top of the single flat list — no
+  // section headers, per the "clean list, no banners" navigation-only design.
+  const listItems = useMemo<ListItem[]>(() => {
+    const pinned = filtered.filter((c) => c.isPinned)
+    const others = filtered.filter((c) => !c.isPinned)
+    return [...pinned, ...others].map((c) => ({ type: 'conv', ...c }))
+  }, [filtered])
 
   const totalUnread = useMemo(
     () => conversations.reduce((sum, c) => sum + c.unreadCount, 0),
     [conversations]
   )
 
-  // ── Handlers ────────────────────────────────────────────────────────────────
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handlePress = (id: string) => {
     const convo = conversations.find((c) => c.id === id)
@@ -151,13 +276,19 @@ export default function MessagesScreen() {
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, unreadCount: 0 } : c))
     )
+    try {
+      const ch = Object.values(streamClient.activeChannels).find(
+        (c: any) => c.id === convo.id
+      )
+      ch?.markRead().catch(() => {})
+    } catch {}
     router.push({
       pathname: '/(patient)/chat-consultation',
       params: {
         channelId: convo.id,
-        doctorId: convo.doctorId,
-        doctorName: convo.doctorName,
-        doctorSubtitle: convo.doctorSubtitle,
+        doctorId: convo.peerId,
+        doctorName: convo.peerName,
+        doctorSubtitle: convo.peerSubtitle,
         consultationStatus: convo.consultationStatus,
       },
     })
@@ -173,9 +304,7 @@ export default function MessagesScreen() {
         {},
         { state: false, watch: false, limit: 1 }
       )
-      if (channels.length > 0) {
-        await channels[0].hide()
-      }
+      if (channels.length > 0) await channels[0].hide()
     } catch (err) {
       logger.error('[Messages] hide channel error:', err)
     }
@@ -209,46 +338,31 @@ export default function MessagesScreen() {
         {},
         { state: false, watch: false, limit: 1 }
       )
-      if (channels.length > 0) {
-        await channels[0].hide()
-      }
+      if (channels.length > 0) await channels[0].hide()
     } catch (err) {
       logger.error('[Messages] archive channel error:', err)
     }
     setConversations((prev) => prev.filter((c) => c.id !== id))
   }
 
-  // ── Item render ─────────────────────────────────────────────────────────────
+  // ── Render helpers ────────────────────────────────────────────────────────
 
-  const renderItem = ({ item }: { item: Conversation }) => (
-    <ConversationItem
-      item={item}
-      menuVisible={openMenuId === item.id}
-      onPress={handlePress}
-      onLongPress={handleLongPress}
-      onMenuClose={handleMenuClose}
-      onDelete={handleDelete}
-      onPin={handlePin}
-      onArchive={handleArchive}
-    />
-  )
-
-  // ── Empty / loading states ───────────────────────────────────────────────────
-
-  if (loading) {
+  const renderItem = ({ item }: { item: ListItem }) => {
     return (
-      <SafeAreaView style={styles.safe} edges={['top']}>
-        <View style={styles.header}>
-          <Text style={styles.title}>{t('messages')}</Text>
-        </View>
-        <View style={styles.centerWrap}>
-          <ActivityIndicator color={colors.careBlue} size="large" />
-        </View>
-      </SafeAreaView>
+      <ConversationItem
+        item={item}
+        menuVisible={openMenuId === item.id}
+        onPress={handlePress}
+        onLongPress={handleLongPress}
+        onMenuClose={handleMenuClose}
+        onDelete={handleDelete}
+        onPin={handlePin}
+        onArchive={handleArchive}
+      />
     )
   }
 
-  const EmptyState = () => (
+  const EmptyState = (
     <View style={styles.emptyWrap}>
       <View style={styles.emptyIcon}>
         <Ionicons name="chatbubbles-outline" size={48} color={colors.steelGrey} />
@@ -266,7 +380,7 @@ export default function MessagesScreen() {
     </View>
   )
 
-  // ── Render ───────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -303,64 +417,20 @@ export default function MessagesScreen() {
         </View>
       </View>
 
-      {/* ── Status filter chips ── */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipsRow}>
-        {([['all', t('allChats')], ['active', t('activeChats')], ['completed', t('endedChats')]] as const).map(([key, label]) => (
-          <Pressable
-            key={key}
-            onPress={() => setStatusFilter(key)}
-            style={[styles.filterChip, statusFilter === key && styles.filterChipActive]}
-          >
-            <Text style={[styles.filterChipText, statusFilter === key && styles.filterChipTextActive]}>{label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
       {/* ── Conversation list ── */}
-      {filtered.length === 0 ? (
-        <EmptyState />
+      {loading && conversations.length === 0 ? (
+        <View style={styles.centerWrap}>
+          <ActivityIndicator color={colors.careBlue} size="large" />
+        </View>
       ) : (
         <FlatList
-          data={[]}
-          keyExtractor={() => 'dummy'}
-          renderItem={null}
-          ListHeaderComponent={
-            <>
-              {pinned.length > 0 && (
-                <>
-                  <View style={styles.sectionHeader}>
-                    <Ionicons name="pin" size={13} color={colors.tealGreen} />
-                    <Text style={styles.sectionLabel}>Pinned</Text>
-                  </View>
-                  {pinned.map((item) => (
-                    <View key={item.id}>
-                      {renderItem({ item })}
-                      <View style={styles.separator} />
-                    </View>
-                  ))}
-                </>
-              )}
-
-              {others.length > 0 && (
-                <>
-                  {pinned.length > 0 && (
-                    <View style={styles.sectionHeader}>
-                      <Text style={styles.sectionLabel}>All Messages</Text>
-                    </View>
-                  )}
-                  {others.map((item, index) => (
-                    <View key={item.id}>
-                      {renderItem({ item })}
-                      {index < others.length - 1 && (
-                        <View style={styles.separator} />
-                      )}
-                    </View>
-                  ))}
-                </>
-              )}
-
-              <View style={styles.bottomPad} />
-            </>
+          data={listItems}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          ItemSeparatorComponent={() => <View style={styles.separator} />}
+          ListEmptyComponent={EmptyState}
+          contentContainerStyle={
+            listItems.length === 0 ? styles.emptyContainer : styles.listContent
           }
           showsVerticalScrollIndicator={false}
           style={styles.list}
@@ -409,12 +479,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.mistWhite,
   },
-  searchIconBtn: {
-    width: 36,
-    height: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
 
   searchWrap: {
     paddingHorizontal: 16,
@@ -439,21 +503,9 @@ const styles = StyleSheet.create({
   },
 
   list: { flex: 1 },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 6,
-  },
-  sectionLabel: {
-    fontFamily: fonts.semiBold,
-    fontSize: 12,
-    color: '#9CA3AF',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-  },
+  listContent: { paddingBottom: 24 },
+  emptyContainer: { flexGrow: 1 },
+
   separator: {
     height: 1,
     backgroundColor: colors.cloudGrey,
@@ -494,16 +546,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 21,
   },
-
-  bottomPad: { height: 24 },
-
-  filterChipsRow: { paddingHorizontal: 16, paddingBottom: 10, gap: 8 },
-  filterChip: {
-    borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6,
-    backgroundColor: colors.mistWhite,
-    borderWidth: 1, borderColor: colors.steelGrey,
-  },
-  filterChipActive: { borderColor: 'transparent', backgroundColor: colors.careBlue },
-  filterChipText: { fontFamily: fonts.medium, fontSize: 13, color: '#6B7280' },
-  filterChipTextActive: { color: colors.mistWhite },
 })

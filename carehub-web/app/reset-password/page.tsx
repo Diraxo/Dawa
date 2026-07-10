@@ -62,8 +62,11 @@ function ResetPasswordContent() {
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
-      const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
-      if (code?.includes('password')) {
+      const rawMsg: string = err?.errors?.[0]?.message ?? ''
+      const msg: string = err?.errors?.[0]?.longMessage ?? rawMsg
+      if (code === 'resource_not_found' || rawMsg.toLowerCase().includes('no sign in was found')) {
+        setGlobalError('This reset session has expired or is no longer valid. Please request a new reset code.')
+      } else if (code?.includes('password')) {
         setPasswordError(msg || 'Please choose a stronger password.')
       } else {
         setGlobalError(msg || 'Something went wrong. Please try again.')

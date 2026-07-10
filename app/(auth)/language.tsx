@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useAuthenticatedRedirect } from '@/hooks/useAuthenticatedRedirect'
 import i18n from '@/lib/i18n'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
@@ -109,6 +110,8 @@ export default function LanguageScreen() {
   const { t } = useTranslation()
   const { setSelectedLanguage: persistLanguage } = useAppStore()
 
+  useAuthenticatedRedirect()
+
   // English is the default — buttons start enabled
   const [selectedId, setSelectedId] = useState<string>('en')
   const [enabledLangCodes, setEnabledLangCodes] = useState<string[] | null>(null)
@@ -135,10 +138,10 @@ export default function LanguageScreen() {
     i18n.changeLanguage(id)
   }
 
-  const handleContinue = () => {
+  const handleContinue = (dest: string) => {
     persistLanguage(selectedId)
     saveLanguageToSupabase(selectedId)
-    router.push('/(auth)/sign-up' as never)
+    router.push(dest as never)
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -151,8 +154,6 @@ export default function LanguageScreen() {
       onPress={() => handleSelect(item.id)}
     />
   )
-
-  const isActive = selectedId !== null
 
   return (
     <View style={styles.root}>
@@ -192,20 +193,30 @@ export default function LanguageScreen() {
         />
       </View>
 
-      {/* ── FOOTER: Continue button ── */}
+      {/* ── FOOTER: Login + Sign Up buttons ── */}
       <View style={[styles.footer, { paddingBottom: Math.max(bottom, 20) }]}>
+        {/* Login — outline */}
         <Pressable
-          onPress={handleContinue}
-          disabled={!isActive}
-          style={[styles.continueWrapper, !isActive && styles.disabledOpacity]}
+          onPress={() => handleContinue('/(auth)/sign-in')}
+          style={styles.loginWrapper}
+        >
+          <View style={styles.loginButton}>
+            <Text style={styles.loginText}>{t('login')}</Text>
+          </View>
+        </Pressable>
+
+        {/* Sign Up — gradient */}
+        <Pressable
+          onPress={() => handleContinue('/(auth)/sign-up')}
+          style={styles.signUpWrapper}
         >
           <LinearGradient
             colors={['#2962FF', '#00BFA5']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.continueButton}
+            style={styles.signUpButton}
           >
-            <Text style={styles.continueText}>{t('continue')}</Text>
+            <Text style={styles.signUpText}>{t('signUp')}</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -348,22 +359,42 @@ const styles = StyleSheet.create({
   footer: {
     paddingHorizontal: 20,
     paddingTop: 16,
+    paddingBottom: 0,
     backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
+    gap: 12,
   },
-  disabledOpacity: {
-    opacity: 0.5,
-  },
-  continueWrapper: {
+  loginWrapper: {
+    flex: 1,
     borderRadius: 16,
     overflow: 'hidden',
   },
-  continueButton: {
+  loginButton: {
+    height: 52,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: colors.steelGrey,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loginText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 16,
+    color: colors.inkBlack,
+  },
+  signUpWrapper: {
+    flex: 1,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  signUpButton: {
     height: 52,
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  continueText: {
+  signUpText: {
     fontFamily: fonts.bold,
     fontSize: 16,
     color: '#FFFFFF',
