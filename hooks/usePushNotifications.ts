@@ -7,6 +7,7 @@ import { useUser } from '@clerk/clerk-expo'
 import { supabase } from '@/lib/supabase'
 import { registerCallTokens } from '@/lib/voipPush'
 import { logger } from '@/lib/logger'
+import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 
 // Show notification alert/sound even when the app is in the foreground.
 // Incoming-call pushes (VoIP / FCM data) bypass this handler entirely —
@@ -19,6 +20,18 @@ Notifications.setNotificationHandler({
     if (data?.callType === 'incoming_call') {
       return { shouldPlaySound: false, shouldSetBadge: false, shouldShowBanner: false, shouldShowList: false }
     }
+
+    // Every consultation-status push (accepted, patient_joined, patient_left,
+    // completed, summary_ready, the "tap to join" reminder, etc.) carries
+    // consultationId in its data payload. If the user is already looking at
+    // that exact chat/phone/video screen, it already reflects the update
+    // live via its own Realtime subscription — showing the banner too would
+    // just be a redundant "Tap to join" for a consultation they're already in.
+    const consultationId = data?.consultationId as string | undefined
+    if (consultationId && consultationId === useActiveConsultationScreenStore.getState().activeConsultationId) {
+      return { shouldPlaySound: false, shouldSetBadge: false, shouldShowBanner: false, shouldShowList: false }
+    }
+
     return { shouldPlaySound: true, shouldSetBadge: true, shouldShowBanner: true, shouldShowList: true }
   },
 })
@@ -45,7 +58,7 @@ async function _register(clerkUserId: string) {
         lightColor: '#00BFA5',
         sound: 'default',
         enableVibrate: true,
-        lockScreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
         showBadge: true,
       })
       await Notifications.setNotificationChannelAsync('appointments', {
@@ -105,6 +118,15 @@ async function _register(clerkUserId: string) {
       logger.warn('[PushNotifications] Permission denied by user')
       return
     }
+
+    // One-time cleanup: earlier app versions client-scheduled a local
+    // "Tap to join" / 5-minute reminder for every scheduled booking
+    // (payment-return.tsx), duplicating the server-side reminder cron.
+    // Devices upgrading from those versions may still have one of those
+    // stale, unfireable-till-later notifications pending — nothing in the
+    // app schedules a future-dated local notification anymore, so this is
+    // safe to clear unconditionally.
+    Notifications.cancelAllScheduledNotificationsAsync().catch(() => {})
 
     // Get the Expo push token — Expo routes this through FCM on Android, APNs on iOS
     const projectId =

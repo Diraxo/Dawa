@@ -12,6 +12,7 @@ import { images } from '@/constants/images';
 import { colors } from '@/constants/colors';
 import { PENDING_PAYMENT_KEY, type PendingPayment } from '@/lib/pendingPayment';
 import { useAuthStore } from '@/store/authStore';
+import { resolveActiveConsultationRoute } from '@/lib/activeConsultationRecovery';
 
 // Clerk's isLoaded flips true once the SDK has initialized, but on a device
 // that previously had a session, the actual session restore (reading the
@@ -109,7 +110,15 @@ export default function SplashScreen() {
 
         if (userData?.role === 'patient') {
           setUserRole('patient')
-          router.replace('/(patient)/(tabs)/home' as never)
+          // Check for an active consultation BEFORE landing on Home — a
+          // returning patient with a live/waiting consultation must go
+          // straight there (Splash → Consultation), never flash Home first.
+          const active = await resolveActiveConsultationRoute(supabase, 'patient', userData.id).catch(() => null)
+          if (active) {
+            router.replace({ pathname: active.pathname as any, params: active.params })
+          } else {
+            router.replace('/(patient)/(tabs)/home' as never)
+          }
         } else if (userData?.role === 'doctor') {
           setUserRole('doctor')
           try {
@@ -120,7 +129,14 @@ export default function SplashScreen() {
               .single()
 
             if (dp?.status === 'approved') {
-              router.replace('/(doctor)/(tabs)/home' as never)
+              // Same check for a returning doctor — an active/waiting
+              // consultation must open directly, never behind Home.
+              const active = await resolveActiveConsultationRoute(supabase, 'doctor', userData.id).catch(() => null)
+              if (active) {
+                router.replace({ pathname: active.pathname as any, params: active.params })
+              } else {
+                router.replace('/(doctor)/(tabs)/home' as never)
+              }
             } else if (dp?.status === 'pending') {
               router.replace('/(doctor)/registration/under-review' as never)
             } else if (dp?.status === 'rejected' || dp?.status === 'suspended') {

@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 
-const LAST_UPDATED = 'June 2026'
+const LAST_UPDATED = 'July 17, 2026'
 
 type Block =
   | { type: 'text'; text: string }
@@ -61,10 +61,13 @@ const SECTIONS: Section[] = [
         type: 'subsection',
         label: 'Technical Information:',
         items: [
-          'Device type and operating system',
-          'App usage data and crash reports',
-          'IP address and approximate location (country level only)',
+          'Device type, operating system version, and push notification tokens',
+          'Country selected at sign-up (used to localize the app)',
         ],
+      },
+      {
+        type: 'text',
+        text: 'Dawa does not use third-party analytics or crash-reporting SDKs, so we do not track which screens you visit, which features you use, or how long you use the app.',
       },
     ],
   },
@@ -162,7 +165,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'Dawa is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
+        text: 'Dawa requires all patient accounts to belong to someone 18 years of age or older and all doctor accounts to belong to someone 24 years of age or older — we do not offer parental- or guardian-consent accounts for minors. Dawa is not directed at children, and we do not knowingly collect personal information from anyone under 18. If we learn that a minor has created an account, we will suspend it and delete the associated data.',
       },
     ],
   },

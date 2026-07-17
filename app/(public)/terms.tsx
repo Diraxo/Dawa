@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 
-const LAST_UPDATED = 'June 2025'
+const LAST_UPDATED = 'July 17, 2026'
 
 type Block =
   | { type: 'text'; text: string }
@@ -64,7 +64,7 @@ const SECTIONS: Section[] = [
         items: [
           'You must provide accurate personal information',
           'You are responsible for keeping your account secure',
-          'You must be 18 or older, or have parental consent',
+          'You must be 18 years of age or older to create a patient account — Dawa does not offer parental/guardian-consent accounts for minors',
           'One account per person',
         ],
       },
@@ -72,6 +72,7 @@ const SECTIONS: Section[] = [
         type: 'subsection',
         label: 'Healthcare Professionals:',
         items: [
+          'You must be at least 24 years old to register as a healthcare professional',
           'You must hold a valid medical license in your country',
           'You must provide authentic documents during registration',
           'Providing false credentials will result in permanent ban and may be reported to medical authorities',
@@ -109,17 +110,18 @@ const SECTIONS: Section[] = [
   },
   {
     num: '6',
-    title: 'PAYMENTS AND REFUNDS',
+    title: 'PAYMENTS, CREDITS, AND REFUNDS',
     blocks: [
       {
         type: 'bullets',
         items: [
-          'Consultation fees are charged per session',
-          'Dawa takes a 20% platform commission',
-          'Doctors receive 80% of each consultation fee',
-          'Refunds are available if a doctor does not respond to a request within a reasonable time',
-          'Refunds are NOT available once a consultation has started',
-          'Withdrawal requests are processed within 3-5 business days',
+          'Consultation fees are charged per session and processed before the consultation begins',
+          'Dawa takes a platform commission (currently 20%) from each completed consultation, shown to doctors in their Earnings Preview and pricing screen',
+          'Doctors receive the remainder of each consultation fee after the platform commission',
+          'Cash refunds are not currently available. If a doctor does not respond to a request within a reasonable time, or declines it, the amount you paid is issued to you as an in-app credit',
+          'A credit can only be applied toward a new consultation of the same type (chat, phone, or video) that the original payment was for',
+          'Once a consultation has started, no credit or refund is issued',
+          'Withdrawal requests are processed within 1-3 business days',
         ],
       },
     ],

@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { formatCallDuration } from '@/lib/callDuration'
 
 interface CallInfoPanelProps {
   visible: boolean
@@ -15,12 +17,6 @@ interface CallInfoPanelProps {
   startedAtIso: string | null
   elapsedSeconds: number
   networkQuality: number // Agora 0-6 scale — 0 unknown, 1-2 excellent, 3-4 fair, 5-6 poor
-}
-
-function formatElapsed(seconds: number) {
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
 function formatStartedAt(iso: string | null) {
@@ -46,6 +42,7 @@ export function CallInfoPanel({
   visible, onClose, consultationId, consultationType, counterpartLabel,
   counterpartName, counterpartPhotoUrl, startedAtIso, elapsedSeconds, networkQuality,
 }: CallInfoPanelProps) {
+  const insets = useSafeAreaInsets()
   if (!visible) return null
 
   const q = qualityMeta(networkQuality)
@@ -53,7 +50,7 @@ export function CallInfoPanel({
   return (
     <>
       <Pressable style={styles.backdrop} onPress={onClose} />
-      <View style={styles.sheet}>
+      <View style={[styles.sheet, { paddingBottom: Math.max(28, insets.bottom + 16) }]}>
         <View style={styles.handle} />
         <View style={styles.header}>
           <Text style={styles.title}>Consultation Info</Text>
@@ -94,7 +91,7 @@ export function CallInfoPanel({
           </View>
           <View style={[styles.row, { borderBottomWidth: 0 }]}>
             <Text style={styles.label}>Duration</Text>
-            <Text style={[styles.value, styles.mono]}>{formatElapsed(elapsedSeconds)}</Text>
+            <Text style={[styles.value, styles.mono]}>{formatCallDuration(elapsedSeconds)}</Text>
           </View>
           <View style={styles.connectionRow}>
             <Text style={styles.label}>Connection</Text>

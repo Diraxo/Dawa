@@ -206,6 +206,7 @@
   emailAddress: 'Email Address',
   contactInformation: 'Contact Information',
   selectGender: 'Select Gender',
+  selectCountry: 'Select Country',
   address: 'Address',
   country: 'Country',
   saveChanges: 'Save Changes',
@@ -221,6 +222,8 @@
   galleryPermissionMsg: 'Photo library access is needed to choose a photo.',
   profileSaved: 'Saved',
   profileSavedMsg: 'Your profile has been updated.',
+  change: 'Change',
+  emailUpdatedMsg: 'Your email address has been updated.',
   profileSaveError: 'Error',
   profileSaveErrorMsg: 'Failed to save profile. Please try again.',
   ageTooYoung: 'You must be at least {{minAge}} years old to use Dawa as a patient.',
@@ -407,7 +410,9 @@
   weeklyAvailability: 'Weekly Availability',
   availableHoursNote: 'Available Mon–Fri, 9 AM – 5 PM',
   patientReviews: 'Patient Reviews',
-  noReviewsYet: 'No reviews yet',
+  noReviewsYet: 'No reviews yet. Be the first patient to review this doctor.',
+  showMoreReviews: 'Show More',
+  verifiedConsultation: 'Verified Consultation',
   bookConsultation: 'Book Consultation',
 
   // Incoming request
@@ -443,7 +448,7 @@
   downloadAsPDF: 'Share Summary',
   rateYourDoctor: 'Rate Your Doctor',
   howWasExperience: 'How was your experience with',
-  leaveComment: 'Leave a comment (optional)...',
+  leaveComment: 'Leave a comment...',
   submitAndDone: 'Submit & Done',
   submitting: 'Submitting...',
   thankYou: 'Thank you!',
@@ -451,6 +456,10 @@
   done: 'Done',
   rateYourExperience: 'Rate Your Experience',
   pleaseRateFirst: 'Please rate your consultation before submitting.',
+  commentRequiredError: 'Please leave a comment before submitting your review.',
+  ratingSuccessTitle: 'Thank You!',
+  ratingSuccessMessage: 'Your review has been submitted successfully. Your feedback helps improve the quality of care for other patients.',
+  continueButton: 'Continue',
 
   // Notification settings note
   notifDeviceSettingsNote: 'Push notification permissions are managed in your device settings.',
@@ -542,7 +551,6 @@
   notifyMeMsg: "You'll be the first to know when payments launch!",
 
   // Chat consultation screen
-  upcomingAppointment: 'Upcoming Appointment',
   consultationHasntStarted: "Consultation Hasn't Started",
   appointmentBeginsIn: 'Your appointment begins in',
   chatUnlockNote: 'The chat will unlock only once the doctor starts the session at the scheduled time.',
@@ -581,7 +589,6 @@
   // Doctor chat screen
   connectingToConsultation: 'Connecting to consultation...',
   activeSession: 'Active session',
-  done: 'Done',
   consultationEndedChatReadOnly: 'Consultation ended · Chat is read-only',
   chatRequiresDevelopmentBuild: 'Chat requires a development build.',
   waitingForChannelConnection: 'Waiting for channel connection...',

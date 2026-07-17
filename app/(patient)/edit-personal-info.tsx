@@ -7,9 +7,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Image,
+  KeyboardAvoidingView,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +22,8 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { ChangeEmailModal } from '@/components/ui/ChangeEmailModal'
+import { CountryPickerModal } from '@/components/ui/CountryPickerModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -290,6 +294,21 @@ const GENDER_LABEL_MAP: Record<string, 'male' | 'female' | 'preferNotToSay'> = {
   'Prefer not to say': 'preferNotToSay',
 }
 
+// patient_profiles.gender has a CHECK constraint accepting only these lowercase
+// values ('other' is the DB's neutral option — there is no literal "prefer not
+// to say" value) — the UI's capitalized labels must be translated before writing,
+// and back on read, or every save silently violates the constraint and is dropped.
+const GENDER_UI_TO_DB: Record<string, string> = {
+  'Male': 'male',
+  'Female': 'female',
+  'Prefer not to say': 'other',
+}
+const GENDER_DB_TO_UI: Record<string, string> = {
+  male: 'Male',
+  female: 'Female',
+  other: 'Prefer not to say',
+}
+
 function GenderPickerModal({
   visible,
   selected,
@@ -500,7 +519,7 @@ function FormField({
           editable={editable && !onPress}
           keyboardType={keyboardType}
           multiline={multiline}
-          numberOfLines={multiline ? 3 : undefined}
+          numberOfLines={multiline ? 2 : undefined}
           textAlignVertical={multiline ? 'top' : 'center'}
         />
         {suffix}
@@ -542,7 +561,8 @@ const fieldStyles = StyleSheet.create({
   },
   inputRowMultiline: {
     height: undefined,
-    minHeight: 80,
+    minHeight: 54,
+    maxHeight: 90,
     alignItems: 'flex-start',
     paddingVertical: 12,
   },
@@ -554,7 +574,7 @@ const fieldStyles = StyleSheet.create({
     padding: 0,
   },
   inputMultiline: {
-    minHeight: 56,
+    minHeight: 30,
   },
   inputDisabled: { color: '#9CA3AF' },
   errorText: {
@@ -593,7 +613,9 @@ export default function EditPersonalInfoScreen() {
   const [dobError, setDobError] = useState('')
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [showGenderPicker, setShowGenderPicker] = useState(false)
+  const [showCountryPicker, setShowCountryPicker] = useState(false)
   const [showPhotoPicker, setShowPhotoPicker] = useState(false)
+  const [showChangeEmail, setShowChangeEmail] = useState(false)
   const [saving, setSaving] = useState(false)
 
   const dobLabel = useMemo(() => {
@@ -629,7 +651,7 @@ export default function EditPersonalInfoScreen() {
           .single()
 
         if (pp) {
-          setGender(pp.gender ?? '')
+          setGender(pp.gender ? (GENDER_DB_TO_UI[pp.gender] ?? '') : '')
           if (pp.date_of_birth) {
             const d = new Date(pp.date_of_birth)
             setDob({
@@ -727,38 +749,43 @@ export default function EditPersonalInfoScreen() {
 
       // Upload profile photo if a new one was picked, or clear it if deleted
       let profilePhotoUrl: string | null | undefined = undefined
+      let photoUploadFailed = false
       const avatarPath = `${user.id}/avatar.jpg`
       if (localImageUri) {
         try {
           const response = await fetch(localImageUri)
           const arrayBuffer = await response.arrayBuffer()
-          await client.storage
+          const { error: uploadError } = await client.storage
             .from('profile-photos')
             .upload(avatarPath, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
+          if (uploadError) throw uploadError
           const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(avatarPath)
           profilePhotoUrl = `${urlData.publicUrl}?v=${Date.now()}`
-        } catch {
-          // Photo upload failed — save rest of profile anyway
+        } catch (e) {
+          console.error('Failed to upload profile photo:', e)
+          photoUploadFailed = true
         }
       } else if (photoRemoved) {
         await client.storage.from('profile-photos').remove([avatarPath]).catch(() => {})
         profilePhotoUrl = null
       }
 
-      // Upsert users table, get back the Supabase UUID
-      const { data: upserted } = await client.from('users').upsert(
-        {
-          clerk_id: user.id,
+      // Update users table, get back the Supabase UUID
+      const { data: updated, error: userError } = await client
+        .from('users')
+        .update({
           full_name: `${firstName} ${lastName}`.trim(),
           phone,
           country,
           address: address.trim() || null,
           ...(profilePhotoUrl !== undefined ? { profile_photo_url: profilePhotoUrl } : {}),
-        },
-        { onConflict: 'clerk_id' }
-      ).select('id').single()
+        })
+        .eq('clerk_id', user.id)
+        .select('id')
+        .single()
+      if (userError) throw userError
 
-      const uid = supabaseUserId ?? upserted?.id
+      const uid = supabaseUserId ?? updated?.id
 
       if (profilePhotoUrl !== undefined) pushOwnPhotoToStream(profilePhotoUrl)
 
@@ -769,13 +796,18 @@ export default function EditPersonalInfoScreen() {
 
       // Upsert patient_profiles using Supabase UUID
       if (uid) {
-        await client.from('patient_profiles').upsert(
-          { user_id: uid, gender, date_of_birth: dobDate },
+        const { error: profileError } = await client.from('patient_profiles').upsert(
+          { user_id: uid, gender: gender ? GENDER_UI_TO_DB[gender] ?? null : null, date_of_birth: dobDate },
           { onConflict: 'user_id' }
         )
+        if (profileError) throw profileError
       }
 
-      Alert.alert(t('profileSaved'), t('profileSavedMsg'))
+      if (photoUploadFailed) {
+        Alert.alert('Saved with a Problem', 'Your profile was updated, but the photo failed to upload. Please try again.')
+      } else {
+        Alert.alert(t('profileSaved'), t('profileSavedMsg'))
+      }
       router.back()
     } catch {
       Alert.alert(t('profileSaveError'), t('profileSaveErrorMsg'))
@@ -801,11 +833,17 @@ export default function EditPersonalInfoScreen() {
         <View style={{ width: 36 }} />
       </View>
 
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 60 : 0}
+      >
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
       >
         {/* Avatar */}
         <View style={styles.avatarSection}>
@@ -886,16 +924,17 @@ export default function EditPersonalInfoScreen() {
             <FormField
               label={t('emailAddress')}
               value={user?.primaryEmailAddress?.emailAddress ?? ''}
-              editable={false}
-              suffix={<Ionicons name="lock-closed" size={14} color="#9CA3AF" />}
+              onPress={() => setShowChangeEmail(true)}
+              suffix={<Text style={styles.changeLinkText}>{t('change')}</Text>}
             />
           </View>
           <View style={fieldStyles.fieldSpacing}>
             <FormField
               label={t('country')}
               value={country}
-              editable={false}
-              suffix={<Ionicons name="lock-closed" size={14} color="#9CA3AF" />}
+              placeholder={t('selectCountry')}
+              onPress={() => setShowCountryPicker(true)}
+              suffix={<Ionicons name="chevron-down" size={16} color="#9CA3AF" />}
             />
           </View>
           <FormField
@@ -925,6 +964,7 @@ export default function EditPersonalInfoScreen() {
 
         <View style={{ height: 40 }} />
       </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Modals */}
       <DatePickerModal
@@ -942,6 +982,21 @@ export default function EditPersonalInfoScreen() {
         selected={gender}
         onSelect={setGender}
         onClose={() => setShowGenderPicker(false)}
+      />
+      <CountryPickerModal
+        visible={showCountryPicker}
+        selected={country}
+        onSelect={setCountry}
+        onClose={() => setShowCountryPicker(false)}
+      />
+      <ChangeEmailModal
+        visible={showChangeEmail}
+        onClose={() => setShowChangeEmail(false)}
+        onSuccess={() => {
+          setShowChangeEmail(false)
+          user?.reload()
+          Alert.alert(t('profileSaved'), t('emailUpdatedMsg'))
+        }}
       />
       <PhotoPickerModal
         visible={showPhotoPicker}
@@ -1012,6 +1067,11 @@ const styles = StyleSheet.create({
     fontFamily: fonts.medium,
     fontSize: 13,
     color: colors.error,
+  },
+  changeLinkText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 13,
+    color: colors.tealGreen,
   },
 
   sectionLabel: {

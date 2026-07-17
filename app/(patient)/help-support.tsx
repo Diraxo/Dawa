@@ -123,12 +123,6 @@ export default function HelpSupportScreen() {
       value: 'support@dawa.app',
       action: () => Linking.openURL('mailto:support@dawa.app'),
     },
-    {
-      icon: 'logo-whatsapp',
-      label: 'WhatsApp',
-      value: '+251 900 000 000',
-      action: () => Linking.openURL('https://wa.me/251900000000'),
-    },
   ]
 
   const toggle = (key: string) => {

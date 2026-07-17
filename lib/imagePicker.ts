@@ -1,13 +1,12 @@
-import { Platform } from 'react-native'
-
-// On Android, RN's <Modal> keeps its native Dialog window alive for its
-// slide/fade-out animation after `visible` flips to false. Launching
-// expo-image-picker (which needs the host Activity's focus for its result
-// callback) while that window is still tearing down makes the picker
-// silently no-op or lose its result. Waiting a beat after closing the modal
-// avoids the race. iOS doesn't exhibit this, so it's a no-op there.
+// RN's <Modal> keeps its native window alive for its dismiss animation after
+// `visible` flips to false — on Android that's the Dialog window's
+// slide/fade-out, on iOS it's UIKit's own modal-dismiss transition
+// (~300-400ms). Launching expo-image-picker while that dismiss is still in
+// flight races the OS: Android silently drops/loses the picker's result,
+// and iOS's `presentViewController` call is silently no-op'd (only a native
+// console warning, never a JS error) because UIKit refuses to present while
+// another presentation transaction is in progress. Waiting a beat after
+// closing the modal avoids the race on both platforms.
 export async function waitForModalDismiss(): Promise<void> {
-  if (Platform.OS === 'android') {
-    await new Promise((resolve) => setTimeout(resolve, 400))
-  }
+  await new Promise((resolve) => setTimeout(resolve, 400))
 }

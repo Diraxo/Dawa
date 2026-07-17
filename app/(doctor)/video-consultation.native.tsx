@@ -23,6 +23,9 @@ import { Audio } from 'expo-av'
 // Hardcoded to avoid requiring the native module at load time (TurboModule Proxy crashes at startup)
 const ClientRoleBroadcaster = 1  // ClientRoleType.ClientRoleBroadcaster
 const VideoSourceCamera = 0       // VideoSourceType.VideoSourceCamera
+const OrientationModeAdaptive = 0        // OrientationMode.OrientationModeAdaptive
+const RenderModeFit = 2             // RenderModeType.RenderModeFit — show the full frame, never crop
+const DegradationMaintainBalanced = 2    // DegradationPreference.MaintainBalanced
 // Lazily require react-native-agora — wrapped in try/catch since the TurboModule
 // isn't available in Expo Go (matches the stream-chat-expo require below).
 let RtcSurfaceView: any = null
@@ -38,25 +41,35 @@ try {
 } catch {}
 
 import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
+import { submitConsultationCompletion } from '@/lib/consultationCompletion'
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
+import { DraggableSelfView } from '@/components/consultation/DraggableSelfView'
+import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import * as ImagePicker from 'expo-image-picker'
 import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
+import { getPersistedCameraOff, setPersistedCameraOff, clearPersistedCameraOff } from '@/lib/callCameraStorage'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
+import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 import { logger } from '@/lib/logger'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 
 const GRACE_PERIOD_MS = 90_000
 const CONNECTION_TIMEOUT_MS = 90_000
-const MUTE_DEBOUNCE_MS = 4_000
+// Agora volume is 0-255 — treat anything above this as "currently speaking"
+// for the speaking-indicator pulse.
+const SPEAKING_VOLUME_THRESHOLD = 20
 
 type CallStatus = 'connecting' | 'waiting' | 'connected' | 'reconnecting' | 'error'
 
@@ -70,7 +83,7 @@ export default function DoctorVideoConsultationScreen() {
   const router = useRouter()
   const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
-  const { setActive, updateElapsed, setConnectionStatus } = useActiveConsultationStore()
+  const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
 
   ScreenCapture.usePreventScreenCapture()
 
@@ -78,7 +91,17 @@ export default function DoctorVideoConsultationScreen() {
   const [camOff, setCamOff] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(true)
   const [showEndSheet, setShowEndSheet] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  // Driven by Agora's audio volume indication — who's currently talking, for
+  // the speaking-indicator pulse (self view when it's the doctor, the
+  // patient's avatar/video area when it's the patient).
+  const [localSpeaking, setLocalSpeaking] = useState(false)
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false)
   const [remoteUid, setRemoteUid] = useState<number | null>(null)
+  // Patient turned their camera off — show the avatar placeholder instead of
+  // a frozen last frame; RtcSurfaceView keeps rendering the last-received
+  // frame otherwise since Agora stops sending new ones, not the view itself.
+  const [remoteCamOff, setRemoteCamOff] = useState(false)
   const [isReconnecting, setIsReconnecting] = useState(false)
   const [localError, setLocalError] = useState(false)
   const [agoraToken, setAgoraToken] = useState<string | null>(null)
@@ -113,12 +136,28 @@ export default function DoctorVideoConsultationScreen() {
     })
   }
 
+  // Keeps the always-current camera intent so it can be re-applied the
+  // instant a new engine joins, mirroring mutedRef below.
+  const camOffRef = useRef(camOff)
+  useEffect(() => { camOffRef.current = camOff }, [camOff])
+  const toggleCamera = () => {
+    setCamOff(c => {
+      const next = !c
+      setPersistedCameraOff(consultationId, next)
+      return next
+    })
+  }
+
   // Load any previously-chosen mute state for this consultation before the
   // first join, so a refresh/app-restart mid-call resumes muted. The join
   // effect below waits on `muteLoaded` so the very first joinChannel already
   // publishes with the correct mute state.
   const [muteLoaded, setMuteLoaded] = useState(false)
-  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null && muteLoaded
+  // Same for camera-off — without this, "camera off" reset itself to "on"
+  // every time the screen remounted (rejoin, app kill/relaunch resume, web
+  // refresh) since camOff was a bare useState(false) with no persistence.
+  const [camStateLoaded, setCamStateLoaded] = useState(false)
+  const agoraReady = !!(process.env.EXPO_PUBLIC_AGORA_APP_ID) && !!channelName && agoraToken !== null && muteLoaded && camStateLoaded
   useEffect(() => {
     if (!consultationId) { setMuteLoaded(true); return }
     let cancelled = false
@@ -126,6 +165,16 @@ export default function DoctorVideoConsultationScreen() {
       if (cancelled) return
       if (persisted) { mutedRef.current = true; setMuted(true) }
       setMuteLoaded(true)
+    })
+    return () => { cancelled = true }
+  }, [consultationId])
+  useEffect(() => {
+    if (!consultationId) { setCamStateLoaded(true); return }
+    let cancelled = false
+    getPersistedCameraOff(consultationId).then(persisted => {
+      if (cancelled) return
+      if (persisted) { camOffRef.current = true; setCamOff(true) }
+      setCamStateLoaded(true)
     })
     return () => { cancelled = true }
   }, [consultationId])
@@ -163,16 +212,36 @@ export default function DoctorVideoConsultationScreen() {
   // Single source of truth for call phase/timer — derived from the DB row via
   // Realtime, never from local Agora events. See hooks/useConsultationState.
   const state = useConsultationState({ consultationId: channelName, role: 'doctor', localAgoraReconnecting: isReconnecting })
+
+  const setActiveConsultationId = useActiveConsultationScreenStore((s) => s.setActiveConsultationId)
+  // Tracked so usePushNotifications.ts's foreground handler can suppress a
+  // consultation push (e.g. "Patient Joined") that arrives after this call
+  // is already open.
+  useEffect(() => {
+    if (!channelName) return
+    setActiveConsultationId(channelName)
+    return () => setActiveConsultationId(null)
+  }, [channelName, setActiveConsultationId])
+
   const phaseRef = useRef(state.phase)
   useEffect(() => { phaseRef.current = state.phase }, [state.phase])
   const seconds = state.elapsedSeconds ?? 0
   const startedAtIso = state.startedAtIso
+  // Distinguishes "patient tapped Leave Call" (still in_progress, patient may
+  // rejoin) from a genuine network drop — both surface as callStatus
+  // 'reconnecting' below, but should read very differently to the doctor.
+  const patientHasLeft = state.patientHasLeft
+  // `remoteUid` gates 'connected' too, not just phase — the DB-driven phase
+  // only proves each side's OWN join succeeded (markSelfConnected), not that
+  // this client has actually observed the patient's peer. Without this, the
+  // timer/LIVE badge could run while the video area is still showing the
+  // "Connecting…" placeholder — a running timer over a black screen.
   const callStatus: CallStatus = localError
     ? 'error'
     : state.phase === 'reconnecting'
     ? 'reconnecting'
     : state.phase === 'on_call'
-    ? 'connected'
+    ? (remoteUid !== null ? 'connected' : 'connecting')
     : state.phase === 'waiting_for_patient'
     ? 'waiting'
     : 'connecting'
@@ -181,39 +250,51 @@ export default function DoctorVideoConsultationScreen() {
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const gracePeriodRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const gracePeriodCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const userOfflineDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const endedHandledRef = useRef(false)
   const chatOpenRef = useRef(false)
 
   // Sends a heartbeat UPDATE to consultations.last_heartbeat_at every 30s
   // while connected, so the server-side stale-consultation cleanup can tell
   // a crashed mobile call apart from a genuinely long-running one.
-  useHeartbeat(consultationId, callStatus === 'connected')
+  // Also active during 'reconnecting' — the server-side stale-session cron
+  // (mark_stale_active_consultations, migration 023) kills any in_progress
+  // call whose heartbeat has gone quiet for 10 minutes. Pausing the
+  // heartbeat the instant the patient drops (their onUserOffline flips this
+  // client into 'reconnecting') means any patient network blip, backgrounded
+  // app, or dead phone lasting past 10 minutes gets the whole consultation
+  // silently ended_abnormally out from under the doctor, even though the
+  // doctor never gave up. Matches the web doctor pages' equivalent fix.
+  useHeartbeat(consultationId, callStatus === 'connected' || callStatus === 'reconnecting')
 
-  // Once the DB-derived phase reaches 'ended' — patient declined/missed the
-  // call, or it completed/ended abnormally on some other device/session —
-  // release Agora resources and navigate away exactly once.
-  useEffect(() => {
-    if (state.phase !== 'ended' || endedHandledRef.current) return
-    endedHandledRef.current = true
-    try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.leaveChannel() } catch {}
-    releaseAgoraEngine()
-    setActive(null)
-    if (state.rawStatus === 'call_declined') {
-      Alert.alert('Call Declined', 'The patient has declined the call.', [
-        { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
-      ])
-    } else if (state.rawStatus === 'missed') {
-      Alert.alert('Missed Call', 'The patient did not answer the call.', [
-        { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
-      ])
-    } else {
-      Alert.alert('Call Ended', 'The consultation has ended.', [
-        { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
-      ])
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.phase])
+  // Single source of truth for the "call ended" reaction — release Agora
+  // resources exactly once, then navigate away. Doctor gets no completion
+  // modal (a deliberate, preserved asymmetry vs. the patient side); the
+  // rawStatus-branched Alert.alert copy stays screen-specific since it's UI
+  // text, not detection/teardown logic.
+  const completion = useConsultationCompletion({
+    phase: state.phase,
+    rawStatus: state.rawStatus,
+    role: 'doctor',
+    kind: 'video',
+    consultationId,
+    onTeardown: () => {
+      try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.leaveChannel() } catch {}
+      releaseAgoraEngine()
+      setActive(null)
+      if (state.rawStatus === 'call_declined') {
+        Alert.alert('Call Declined', 'The patient has declined the call.', [
+          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+        ])
+      } else if (state.rawStatus === 'missed') {
+        Alert.alert('Missed Call', 'The patient did not answer the call.', [
+          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+        ])
+      } else {
+        Alert.alert('Call Ended', 'The consultation has ended.', [
+          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+        ])
+      }
+    },
+  })
 
   // ── Store sync ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -232,8 +313,19 @@ export default function DoctorVideoConsultationScreen() {
 
   useEffect(() => { updateElapsed(seconds) }, [seconds])
 
+  // Keeps the Resume banner / Android notification's name+photo current —
+  // the initial setActive() above only runs once at mount (before the async
+  // live-profile fetch resolves), so without this a mid-call rename/photo
+  // change (or simply a slow first fetch) stays wrong for the rest of the call.
+  useEffect(() => { updateIdentity(displayName, patientPhotoUrl) }, [displayName, patientPhotoUrl])
+
+  // Anchors the Android ongoing-call notification's chronometer to the real
+  // DB started_at instead of a snapshot of elapsedSeconds taken before it
+  // was known — see hooks/useOngoingConsultationNotification.ts.
+  useEffect(() => { updateCallStartedAt(state.callStartedAtMs ?? null) }, [state.callStartedAtMs])
+
   useEffect(() => {
-    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : 'active')
+    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : callStatus === 'connected' ? 'active' : 'connecting')
   }, [callStatus])
 
   // ── Background/foreground: notification + camera lifecycle ───────────────
@@ -253,8 +345,8 @@ export default function DoctorVideoConsultationScreen() {
             const localPhotoUri = await localizeNotificationPhoto(patientPhotoUrl)
             Notifications.scheduleNotificationAsync({
               content: {
-                title: `Call with ${displayName}`,
-                body: `Tap to return to your video call with ${displayName}`,
+                title: `Video Consultation with ${displayName}`,
+                body: `Tap to return to your video consultation with ${displayName}`,
                 sound: 'default',
                 data: {
                   screen: 'consultation',
@@ -323,30 +415,24 @@ export default function DoctorVideoConsultationScreen() {
         })
       }, 1000)
 
-      gracePeriodRef.current = setTimeout(async () => {
+      gracePeriodRef.current = setTimeout(() => {
         if (!mounted) return
-        clearGracePeriod()
-        logger.warn('[Video][Doctor] Grace period expired — marking ended_abnormally')
-        try {
-          await supabase
-            .from('consultations')
-            .update({ status: 'ended_abnormally' })
-            .eq('id', channelName)
-            .eq('status', 'in_progress')
-        } catch {}
-        if (mounted) {
-          setActive(null)
-          router.replace('/(doctor)/(tabs)/consultations')
-        }
+        // Network issues must never end the consultation — only an explicit
+        // End Consultation / Decline / Cancel action may. Keep reconnecting
+        // indefinitely; the doctor can still explicitly end the call.
+        logger.warn('[Video][Doctor] Grace period elapsed — still reconnecting, not ending call')
+        startGracePeriod()
       }, GRACE_PERIOD_MS)
     }
 
     const handler = {
       onJoinChannelSuccess: (connection: any) => {
         logger.log(`[Video][Doctor][${Date.now()}] onJoinChannelSuccess channel:${connection?.channelId} uid:${connection?.localUid}`)
-        // Re-apply the user's chosen mute state to the (possibly brand-new,
-        // post-retry) engine — a fresh join always defaults to unmuted.
+        // Re-apply the user's chosen mute/camera state to the (possibly
+        // brand-new, post-retry) engine — a fresh join always defaults to
+        // unmuted/camera-on.
         try { engine?.muteLocalAudioStream(mutedRef.current) } catch {}
+        try { engine?.muteLocalVideoStream(camOffRef.current) } catch {}
         // Our own join+publish succeeded (joinChannel publishes mic+camera
         // directly for RTC engine calls) — report only our own milestone. The
         // DB trigger flips status/started_at once the patient's own write
@@ -361,37 +447,63 @@ export default function DoctorVideoConsultationScreen() {
         remoteUidRef.current = uid
         setRemoteUid(uid)
         setIsReconnecting(false)
+        // A prior local Agora error (onError/CONNECTION_STATE_FAILED) must
+        // not permanently latch the UI into 'error' once the peer is
+        // actually back — doctor phone/patient phone already clear this on
+        // reconnect; video never did, leaving a frozen "Connection Lost"
+        // banner even after a real recovery.
+        setLocalError(false)
         setRemoteMuted(false)
+        setRemoteCamOff(false)
         clearGracePeriod()
-        if (userOfflineDebounceRef.current) { clearTimeout(userOfflineDebounceRef.current); userOfflineDebounceRef.current = null }
         if (connectionTimeoutRef.current) { clearTimeout(connectionTimeoutRef.current); connectionTimeoutRef.current = null }
       },
       onUserOffline: (_conn: any, uid: number, reason: number) => {
         logger.log(`[Video][Doctor][${Date.now()}] onUserOffline uid:${uid} reason:${reason}`)
         if (!mounted || uid !== remoteUidRef.current) return
-        // Debounce: 4s window so a mute event can cancel the offline transition
-        if (userOfflineDebounceRef.current) clearTimeout(userOfflineDebounceRef.current)
-        userOfflineDebounceRef.current = setTimeout(() => {
-          userOfflineDebounceRef.current = null
-          if (!mounted) return
-          remoteUidRef.current = null
-          setRemoteUid(null)
-          setIsReconnecting(true)
-          startGracePeriod()
-        }, MUTE_DEBOUNCE_MS)
+        // Immediate — no debounce. The avatar placeholder is always a safe
+        // fallback (it's what a mute/camera-off already shows), so there is
+        // no flicker risk in swapping to it right away; a quick reconnect
+        // just swaps back to live video the instant onUserJoined fires.
+        remoteUidRef.current = null
+        setRemoteUid(null)
+        setIsReconnecting(true)
+        startGracePeriod()
+      },
+      // Mirrors onRemoteAudioStateChanged — reason 5/6 = REMOTE_MUTED/REMOTE_UNMUTED.
+      // Without this, toggling the patient's camera off left RtcSurfaceView
+      // rendering its last-received frame forever (Agora just stops sending
+      // new ones; the view itself doesn't know to fall back to a placeholder).
+      onRemoteVideoStateChanged: (_conn: any, uid: number, _state: number, reason: number) => {
+        if (!mounted) return
+        if (reason === 5) setRemoteCamOff(true)
+        else if (reason === 6) setRemoteCamOff(false)
       },
       onRemoteAudioStateChanged: (_conn: any, uid: number, _state: number, reason: number) => {
         if (!mounted) return
-        // reason 5 = REMOTE_MUTED — cancel any pending offline debounce so mute isn't misread as disconnect
         if (reason === 5) {
           setRemoteMuted(true)
-          if (userOfflineDebounceRef.current) { clearTimeout(userOfflineDebounceRef.current); userOfflineDebounceRef.current = null }
         } else if (reason === 6) {
           setRemoteMuted(false)
         }
       },
       onNetworkQuality: (_uid: any, txQuality: number) => {
         if (mounted) setNetworkQuality(txQuality as any)
+      },
+      // uid 0 = local speaker in this callback specifically (per Agora's own
+      // AudioVolumeInfo docs); any other uid is the patient's peer. Drives
+      // the speaking-indicator pulse on the self view / patient avatar.
+      onAudioVolumeIndication: (_conn: any, speakers: any[], _speakerNumber: number, _totalVolume: number) => {
+        if (!mounted || !speakers) return
+        let local = false
+        let remote = false
+        for (const s of speakers) {
+          const speaking = (s?.volume ?? 0) > SPEAKING_VOLUME_THRESHOLD
+          if (s?.uid === 0) local = local || speaking
+          else remote = remote || speaking
+        }
+        setLocalSpeaking(local)
+        setRemoteSpeaking(remote)
       },
       onConnectionStateChanged: (_conn: any, state: number, reason: number) => {
         logger.log(`[Video][Doctor][${Date.now()}] connectionStateChanged state:${state} reason:${reason}`)
@@ -432,6 +544,31 @@ export default function DoctorVideoConsultationScreen() {
         if (!mounted) return
         if (status !== 'granted') { setLocalError(true); return }
 
+        // Camera permission is never implicitly requested by the Agora SDK —
+        // without this, native camera capture silently fails (audio-only)
+        // with no prompt and no error. Reuses expo-image-picker (already a
+        // dependency) rather than adding a new native module.
+        let cameraGranted = false
+        try {
+          const existing = await ImagePicker.getCameraPermissionsAsync()
+          cameraGranted = existing.status === 'granted'
+          if (!cameraGranted && existing.canAskAgain) {
+            const requested = await ImagePicker.requestCameraPermissionsAsync()
+            cameraGranted = requested.status === 'granted'
+          }
+        } catch (permErr) {
+          logger.error('[Video][Doctor] Camera permission check failed:', permErr)
+        }
+        if (!mounted) return
+        if (!cameraGranted) {
+          Alert.alert(
+            'Camera Required',
+            'Camera access is required for video calls. You can continue with audio only, or enable camera access in Settings and rejoin.'
+          )
+          camOffRef.current = true
+          setCamOff(true)
+        }
+
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: true,
           playsInSilentModeIOS: true,
@@ -441,20 +578,46 @@ export default function DoctorVideoConsultationScreen() {
         if (!mounted) return
 
         engine!.enableAudio()
+        // Speaking-indicator pulse — 300ms updates, smoothed over 3 samples,
+        // with local voice-activity detection enabled.
+        try { engine!.enableAudioVolumeIndication(300, 3, true) } catch {}
+        // Agora's own RtcSurfaceView docs (see AgoraRtcRenderView.d.ts) state
+        // that, before joining a channel, startPreview() must be called
+        // BEFORE enableVideo() for the local preview canvas to bind frames —
+        // the reverse order leaves the local RtcSurfaceView (uid 0) canvas
+        // unbound. Publishing doesn't depend on this ordering (which is why
+        // the remote side always received the camera feed fine), only the
+        // local render pipeline does. Only touch the camera hardware if
+        // permission was actually granted.
+        if (cameraGranted) engine!.startPreview()
         engine!.enableVideo()
+        // 960x540 @ 24fps, adaptive orientation, balanced degradation — HD
+        // baseline that the SDK adapts down under poor network conditions
+        // rather than defaulting to a fixed low-quality profile.
+        // MaintainBalanced (not the deprecated MaintainQuality) requires
+        // orientationMode: OrientationModeAdaptive to take effect.
+        try {
+          engine!.setVideoEncoderConfiguration({
+            dimensions: { width: 960, height: 540 },
+            frameRate: 24,
+            bitrate: 0, // STANDARD_BITRATE — SDK auto-picks/adapts based on network
+            orientationMode: OrientationModeAdaptive,
+            degradationPreference: DegradationMaintainBalanced,
+          })
+        } catch {}
         // AudioProfileDefault (0) + AudioScenarioMeeting (8) — tuned for a
         // 1:1 voice-centric consultation (vs. the SDK's generic default).
         try { engine!.setAudioProfile(0, 8) } catch {}
         engine!.muteLocalAudioStream(mutedRef.current)
+        try { engine!.muteLocalVideoStream(camOffRef.current) } catch {}
         engine!.setEnableSpeakerphone(true)
-        engine!.startPreview()
         if (proxyFallbackRef.current) engine!.setCloudProxy(3)
 
-        logger.log(`[Video][Doctor][${Date.now()}] joinChannel → channel:${channelName} uid:${localUid} tokenLen:${agoraToken?.length ?? 0} proxy:${proxyFallbackRef.current}`)
+        logger.log(`[Video][Doctor][${Date.now()}] joinChannel → channel:${channelName} uid:${localUid} tokenLen:${agoraToken?.length ?? 0} proxy:${proxyFallbackRef.current} cameraGranted:${cameraGranted}`)
         const code = engine!.joinChannel(agoraToken ?? '', channelName, localUid, {
           clientRoleType: ClientRoleBroadcaster,
           publishMicrophoneTrack: true,
-          publishCameraTrack: true,
+          publishCameraTrack: cameraGranted,
           autoSubscribeAudio: true,
           autoSubscribeVideo: true,
         })
@@ -487,7 +650,6 @@ export default function DoctorVideoConsultationScreen() {
     return () => {
       mounted = false
       if (connectionTimeoutRef.current) { clearTimeout(connectionTimeoutRef.current); connectionTimeoutRef.current = null }
-      if (userOfflineDebounceRef.current) { clearTimeout(userOfflineDebounceRef.current); userOfflineDebounceRef.current = null }
       clearGracePeriod()
       engine?.unregisterEventHandler(handler)
       engine?.stopPreview()
@@ -574,48 +736,34 @@ export default function DoctorVideoConsultationScreen() {
     setChatOpen(false)
   }
 
-  const formatTime = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-
   const handleEndSubmit = async (data: any) => {
+    if (submitting) return
+    setSubmitting(true)
     try {
       const token = await getToken()
       if (token && consultationId) {
         const client = getAuthClient(token)
-        const { error: summaryError } = await client.from('consultation_summaries').upsert({
-          consultation_id: consultationId,
-          chief_complaint: data.chiefComplaint,
-          diagnosis: data.diagnosis,
-          prescription: data.prescriptions?.length > 0 ? JSON.stringify(data.prescriptions) : null,
-          followup_recommendation: data.followUp || null,
-          referral_needed: data.referralNeeded,
-          referral_specialty: data.referralNeeded && data.referralSpecialty?.trim() ? data.referralSpecialty.trim() : null,
-        }, { onConflict: 'consultation_id' })
-        if (summaryError) {
-          logger.error('[Video][Doctor] save summary failed:', summaryError)
+        const result = await submitConsultationCompletion({
+          client, consultationId, data, durationMinutes: Math.ceil(seconds / 60),
+        })
+        if (!result.ok) {
+          logger.error('[Video][Doctor] completion failed at stage:', result.failedAt)
+          setSubmitting(false)
           Alert.alert('Error', 'Could not save the consultation summary. Please try again.')
           return
         }
-        const { error: statusError } = await client
-          .from('consultations')
-          .update({ status: 'completed', ended_at: new Date().toISOString(), duration_minutes: Math.ceil(seconds / 60) })
-          .eq('id', consultationId)
-        if (statusError) {
-          logger.error('[Video][Doctor] mark completed failed:', statusError)
-          Alert.alert('Error', 'Could not save the consultation summary. Please try again.')
-          return
-        }
-        // Stream channel locking is now handled server-side by a DB trigger
-        // (on_consultation_change → freeze-consultation-channel Edge Function)
-        // the instant status flips to 'completed' above — no client call needed.
       }
     } catch (err) {
       logger.error('[Video][Doctor] save summary failed:', err)
+      setSubmitting(false)
       Alert.alert('Error', 'Could not save the consultation summary. Please try again.')
       return
     }
+    setSubmitting(false)
+    completion.markHandled()
     try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
     clearPersistedMute(consultationId)
+    clearPersistedCameraOff(consultationId)
     setShowEndSheet(false)
     setActive(null)
     router.replace('/(doctor)/(tabs)/consultations' as any)
@@ -623,7 +771,20 @@ export default function DoctorVideoConsultationScreen() {
 
   const handleEnd = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
-    const isCallActive = callStatus === 'connected' || callStatus === 'reconnecting'
+    // Gate on the DB-derived phase, not `callStatus` — callStatus also folds
+    // in this client's own local Agora error/connection-quality state
+    // (`localError`, `remoteUid`), which must never determine whether the
+    // doctor can complete a consultation that the server already recorded as
+    // started. Once the DB says the call reached in_progress, End
+    // Consultation (and the summary form) must always be reachable,
+    // regardless of the patient's presence or a local network hiccup.
+    // 'waiting_for_patient' is also treated as active: it only occurs once
+    // the doctor has actually joined the channel (doctor_connected_at is
+    // set) and is purely waiting on a patient who is offline or stuck
+    // connecting — that is a real consultation attempt, not an unplaced
+    // outgoing call, so the doctor must be able to end it with a summary
+    // rather than being routed into the "Cancel Call" abandon flow.
+    const isCallActive = state.phase === 'on_call' || state.phase === 'reconnecting' || state.phase === 'waiting_for_patient'
     if (!isCallActive) {
       // In 'waiting' (ringing) or 'connecting' — cancel the outgoing call
       Alert.alert('Cancel Call', 'Cancel this outgoing call?', [
@@ -652,21 +813,23 @@ export default function DoctorVideoConsultationScreen() {
           consultationId={consultationId ?? ''}
           patientName={displayName}
           onSubmit={handleEndSubmit}
-          onClose={() => setShowEndSheet(false)}
+          onClose={() => !submitting && setShowEndSheet(false)}
         />
       )}
 
       {/* Patient video (full screen) */}
       <View style={styles.mainVideo}>
-        {agoraReady && remoteUid && RtcSurfaceView ? (
-          <RtcSurfaceView canvas={{ uid: remoteUid }} style={styles.fullFill} />
+        {agoraReady && remoteUid && !remoteCamOff && !isReconnecting && RtcSurfaceView ? (
+          <RtcSurfaceView canvas={{ uid: remoteUid, renderMode: RenderModeFit }} style={styles.fullFill} />
         ) : (
           <View style={styles.patientVideoPlaceholder}>
-            {patientPhotoUrl ? (
-              <Image source={{ uri: patientPhotoUrl }} style={styles.patientVideoPlaceholderImage} />
-            ) : (
-              <Ionicons name="person" size={80} color="rgba(255,255,255,0.15)" />
-            )}
+            <SpeakingPulse active={remoteSpeaking && callStatus === 'connected'} borderRadius={64}>
+              {patientPhotoUrl ? (
+                <Image source={{ uri: patientPhotoUrl }} style={styles.patientVideoPlaceholderImage} />
+              ) : (
+                <Ionicons name="person" size={80} color="rgba(255,255,255,0.15)" />
+              )}
+            </SpeakingPulse>
             <Text style={styles.patientVideoName}>{displayName}</Text>
             {tokenFetchFailed ? (
               <Pressable
@@ -675,9 +838,9 @@ export default function DoctorVideoConsultationScreen() {
               >
                 <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#FCA5A5' }}>Connection failed — tap to retry</Text>
               </Pressable>
-            ) : (
+            ) : callStatus === 'connected' && remoteCamOff ? null : (
               <Text style={styles.patientVideoSub}>
-                {callStatus === 'reconnecting' ? 'Patient reconnecting…' :
+                {callStatus === 'reconnecting' ? (patientHasLeft ? 'Patient has left the consultation' : 'Patient reconnecting…') :
                  callStatus === 'waiting' ? 'Waiting for patient…' : 'Connecting…'}
               </Text>
             )}
@@ -686,10 +849,22 @@ export default function DoctorVideoConsultationScreen() {
 
         {/* Timer + network quality overlay */}
         <View style={styles.timerOverlay}>
-          <View style={[styles.timerBadge, callStatus === 'reconnecting' && styles.timerBadgeWarning]}>
-            <View style={[styles.liveDot, callStatus === 'reconnecting' && styles.liveDotWarning]} />
+          <View style={[
+            styles.timerBadge,
+            callStatus !== 'connected' && (patientHasLeft ? styles.timerBadgeInfo : styles.timerBadgeWarning),
+          ]}>
+            <View style={[
+              styles.liveDot,
+              callStatus !== 'connected' && (patientHasLeft ? styles.liveDotInfo : styles.liveDotWarning),
+            ]} />
             <Text style={styles.timerText}>
-              {callStatus === 'connected' ? formatTime(seconds) : callStatus === 'reconnecting' ? 'Reconnecting…' : '--:--'}
+              {callStatus === 'connected'
+                ? formatCallDuration(seconds)
+                : callStatus === 'reconnecting'
+                ? (patientHasLeft ? 'Patient has left the consultation' : 'Reconnecting…')
+                : callStatus === 'connecting'
+                ? 'Connecting…'
+                : '--:--'}
             </Text>
           </View>
           {netLabel && callStatus === 'connected' && (
@@ -699,11 +874,19 @@ export default function DoctorVideoConsultationScreen() {
           )}
         </View>
 
-        {/* Reconnect overlay */}
+        {/* Reconnect overlay — distinguishes a genuine network drop from the
+            patient having tapped Leave Call (calm/informational, not a warning
+            or error, since the consultation is still active). */}
         {callStatus === 'reconnecting' && (
-          <View style={styles.reconnectOverlay}>
-            <ActivityIndicator size="small" color="#FBBF24" style={{ marginRight: 8 }} />
-            <Text style={styles.reconnectText}>Reconnecting…</Text>
+          <View style={[styles.reconnectOverlay, patientHasLeft && styles.reconnectOverlayInfo]}>
+            {patientHasLeft ? (
+              <Ionicons name="information-circle-outline" size={16} color={colors.information} style={{ marginRight: 8 }} />
+            ) : (
+              <ActivityIndicator size="small" color="#FBBF24" style={{ marginRight: 8 }} />
+            )}
+            <Text style={[styles.reconnectText, patientHasLeft && styles.reconnectTextInfo]}>
+              {patientHasLeft ? 'Patient has left the consultation' : 'Reconnecting…'}
+            </Text>
           </View>
         )}
 
@@ -715,17 +898,19 @@ export default function DoctorVideoConsultationScreen() {
           </View>
         )}
 
-        {/* Doctor self-view (top-right) */}
-        <View style={styles.selfView}>
-          {agoraReady && !camOff && RtcSurfaceView ? (
-            <RtcSurfaceView canvas={{ uid: 0, sourceType: VideoSourceCamera }} style={styles.selfViewFill} />
-          ) : (
-            <View style={styles.selfViewOff}>
-              <Ionicons name={camOff ? 'videocam-off' : 'person'} size={22} color="rgba(255,255,255,0.5)" />
-            </View>
-          )}
-          <Text style={styles.selfLabel}>You</Text>
-        </View>
+        {/* Doctor self-view — draggable, WhatsApp-style floating PiP, starts top-right */}
+        <DraggableSelfView
+          top={70}
+          isOff={!(agoraReady && !camOff && RtcSurfaceView)}
+          isSpeaking={localSpeaking}
+        >
+          {RtcSurfaceView ? (
+            <RtcSurfaceView
+              canvas={{ uid: 0, sourceType: VideoSourceCamera, renderMode: RenderModeFit }}
+              style={styles.fullFill}
+            />
+          ) : null}
+        </DraggableSelfView>
       </View>
 
       {/* Controls */}
@@ -762,7 +947,7 @@ export default function DoctorVideoConsultationScreen() {
             label={camOff ? 'Cam On' : 'Video'}
             active={camOff}
             disabled={isConnecting}
-            onPress={() => setCamOff(c => !c)}
+            onPress={toggleCamera}
           />
 
           <View>
@@ -836,13 +1021,14 @@ function DrCtrlBtn({ icon, label, active = false, disabled = false, onPress }: {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {})
         onPress()
       }}
+      accessibilityLabel={label}
+      hitSlop={8}
     >
       <Ionicons
         name={icon as any}
         size={20}
         color={disabled ? 'rgba(0,0,0,0.2)' : active ? colors.mistWhite : colors.inkBlack}
       />
-      <Text style={[styles.controlLabel, active && styles.controlLabelActive, disabled && styles.controlLabelDisabled]}>{label}</Text>
     </Pressable>
   )
 }
@@ -860,8 +1046,10 @@ const styles = StyleSheet.create({
   timerOverlay: { position: 'absolute', top: 16, left: 0, right: 0, alignItems: 'center', gap: 6 },
   timerBadge: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7 },
   timerBadgeWarning: { backgroundColor: 'rgba(251,191,36,0.2)' },
+  timerBadgeInfo: { backgroundColor: 'rgba(2,136,209,0.2)' },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.error },
   liveDotWarning: { backgroundColor: '#FBBF24' },
+  liveDotInfo: { backgroundColor: colors.information },
   timerText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.mistWhite },
   netQualityChip: { backgroundColor: 'rgba(34,197,94,0.2)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 3, borderWidth: 1, borderColor: 'rgba(34,197,94,0.4)' },
   netQualityChipPoor: { backgroundColor: 'rgba(239,68,68,0.2)', borderColor: 'rgba(239,68,68,0.4)' },
@@ -875,24 +1063,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
   },
   reconnectText: { fontFamily: fonts.medium, fontSize: 13, color: '#FDE68A' },
+  reconnectOverlayInfo: { backgroundColor: 'rgba(2,136,209,0.15)', borderColor: 'rgba(2,136,209,0.4)' },
+  reconnectTextInfo: { color: '#7DD3FC' },
 
   remoteMutedBadge: { position: 'absolute', top: 80, left: 0, right: 0, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 4 },
   remoteMutedText: { fontFamily: fonts.medium, fontSize: 12, color: '#FDE68A' },
 
-  selfView: { position: 'absolute', top: 70, right: 16, alignItems: 'center', gap: 4 },
-  selfViewFill: { width: 90, height: 120, borderRadius: 14, overflow: 'hidden', borderWidth: 2, borderColor: 'rgba(255,255,255,0.2)' },
-  selfViewOff: { width: 90, height: 120, borderRadius: 14, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'rgba(255,255,255,0.1)' },
-  selfLabel: { fontFamily: fonts.regular, fontSize: 11, color: 'rgba(255,255,255,0.6)' },
 
   // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
   controls: { paddingHorizontal: 12, paddingBottom: 12, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
   controlsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  ctrlBtn: { alignItems: 'center', gap: 5, width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.15)', justifyContent: 'center' },
+  ctrlBtn: { alignItems: 'center', justifyContent: 'center', width: 54, height: 54, borderRadius: 27, backgroundColor: 'rgba(255,255,255,0.15)' },
   ctrlBtnActive: { backgroundColor: colors.careBlue },
   ctrlBtnDisabled: { backgroundColor: 'rgba(255,255,255,0.05)' },
-  controlLabel: { fontFamily: fonts.medium, fontSize: 10, color: 'rgba(255,255,255,0.7)' },
-  controlLabelActive: { color: colors.mistWhite },
-  controlLabelDisabled: { color: 'rgba(255,255,255,0.25)' },
   endBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center', shadowColor: colors.error, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 12, elevation: 6, transform: [{ rotate: '135deg' }] },
   unreadBadge: {
     position: 'absolute', top: -4, right: -4,

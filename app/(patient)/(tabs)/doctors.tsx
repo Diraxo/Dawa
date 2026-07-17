@@ -18,12 +18,14 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { useTranslation } from 'react-i18next'
 
 function mapDoctor(d: any): Doctor {
   return {
     id: d.id,
-    name: d.users?.full_name ?? 'Dr. Unknown',
+    user_id: d.user_id,
+    name: formatDoctorName(d.users?.full_name, 'Dr. Unknown'),
     subtitle: d.hospital_name ?? undefined,
     specialty: d.specialty ?? 'General',
     rating_average: Number(d.rating_average) ?? 0,
@@ -57,15 +59,21 @@ export default function DoctorsScreen() {
   // wins) before it reaches state.
   const realtimeKnownRef = useRef<Map<string, Partial<Pick<Doctor,
     'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
-    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count'
+    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count' |
+    'name' | 'profile_photo_url'
   >>>>(new Map())
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+  // Mirrors `allDoctors` so the users-table realtime handler (below) can
+  // resolve user_id -> doctor.id without depending on stale closure state.
+  const allDoctorsRef = useRef<Doctor[]>([])
 
   const mergeKnownRealtime = (docs: Doctor[]): Doctor[] =>
     docs.map(d => {
       const known = realtimeKnownRef.current.get(d.id)
       return known ? { ...d, ...known } : d
     })
+
+  useEffect(() => { allDoctorsRef.current = allDoctors }, [allDoctors])
 
   // Single merge point used by both the realtime handler and every fetch
   // result so a doctor's fields are only ever patched, never blindly replaced.
@@ -74,6 +82,15 @@ export default function DoctorsScreen() {
     doctorId: string,
     patch: Partial<Doctor>
   ): Doctor[] => list.map(d => (d.id === doctorId ? { ...d, ...patch } : d))
+
+  // Same idea as applyDoctorUpdate, but full_name/profile_photo_url live on
+  // `users`, not `doctor_profiles` — that row's realtime payload carries
+  // users.id, so matching has to go through user_id instead of doctor.id.
+  const applyDoctorUpdateByUserId = (
+    list: Doctor[],
+    userId: string,
+    patch: Partial<Doctor>
+  ): Doctor[] => list.map(d => (d.user_id === userId ? { ...d, ...patch } : d))
 
   useEffect(() => {
     let mounted = true
@@ -101,6 +118,14 @@ export default function DoctorsScreen() {
       if (!mounted) return
 
       // Realtime: doctor online/offline/availability status → instantly re-sort list
+      // A stale channel with this same topic can still be registered on the
+      // client (removeChannel's teardown is async and may not have run yet
+      // from a prior mount) — supabase.channel() would then return that
+      // already-subscribed instance instead of a fresh one, and .on() below
+      // would throw "cannot add postgres_changes callbacks after
+      // subscribe()". Clear any leftover first to close that race.
+      const stale = supabase.getChannels().find((c) => c.topic === `realtime:${CHANNEL_NAME}`)
+      if (stale) supabase.removeChannel(stale)
       const channel = supabase
         .channel(CHANNEL_NAME)
         .on(
@@ -125,6 +150,21 @@ export default function DoctorsScreen() {
             }
             realtimeKnownRef.current.set(updated.id, patch)
             setAllDoctors(prev => applyDoctorUpdate(prev, updated.id, patch))
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'users' },
+          (payload) => {
+            const updated = payload.new as any
+            const doc = allDoctorsRef.current.find(d => d.user_id === updated.id)
+            if (!doc) return
+            const patch = {
+              name: formatDoctorName(updated.full_name, 'Dr. Unknown'),
+              profile_photo_url: (updated.profile_photo_url ?? null) as string | null,
+            }
+            realtimeKnownRef.current.set(doc.id, { ...realtimeKnownRef.current.get(doc.id), ...patch })
+            setAllDoctors(prev => applyDoctorUpdateByUserId(prev, updated.id, patch))
           }
         )
         .subscribe((status) => {

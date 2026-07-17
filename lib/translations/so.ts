@@ -197,6 +197,7 @@ const so: TranslationKeys = {
   emailAddress: 'Ciwaanka Emailka',
   contactInformation: 'Xogta Xiriirka',
   selectGender: 'Jinsiga Dooro',
+  selectCountry: 'Dalka Dooro',
   address: 'Cinwaanka',
   country: 'Dalka',
   saveChanges: 'Isbeddelada Kaydi',
@@ -211,6 +212,8 @@ const so: TranslationKeys = {
   cameraPermissionMsg: 'Helitaanka kamaradda ayaa loo baahan yahay sawir profiil ah.',
   galleryPermissionMsg: 'Helitaanka maktabadda sawirka ayaa loo baahan yahay sawir dorasho.',
   profileSaved: 'La Keydsaday',
+  change: 'Bedel',
+  emailUpdatedMsg: 'Emailkaaga waa la cusbooneysiiyay.',
   profileSavedMsg: 'Profiilkaaga waa la cusboonaysiiyey.',
   profileSaveError: 'Khalad',
   profileSaveErrorMsg: 'Lama kaydsan karin profiilka. Fadlan isku day mar kale.',
@@ -344,8 +347,6 @@ const so: TranslationKeys = {
   noRecordsYet: 'Wali diiwaanno ma jiraan',
   noRecordsDesc: 'Soo koobidda la-talintaada iyo qarbiyada waxay halkan ka muuqdaan ka dib la-talintaadii koowaad.',
   uploadNewDocument: 'Dukumentiga Cusub Soo Geli',
-  comingSoon: 'Dhawaan',
-  featureComingSoonMsg: 'Soo gelida dukumentiga waxay la heli doontaa cusbooneysiinta mustaqbalka.',
   close: 'Xir',
 
   searchCountry: 'Wadanka raadi...',
@@ -380,7 +381,9 @@ const so: TranslationKeys = {
   weeklyAvailability: 'Diyaarnaanta Toddobaadlaha',
   availableHoursNote: 'Diyaar Isn-Khamiis, 9 AM – 5 PM',
   patientReviews: 'Faallooyin Bukaanka',
-  noReviewsYet: 'Weli faalloyin ma jirto',
+  noReviewsYet: 'Weli faallo ma jirto. Noqo bukaanka ugu horreeya ee faallada dhakhtarkan.',
+  showMoreReviews: 'Wax Dheeraad ah Muuji',
+  verifiedConsultation: 'La Xaqiijiyay Latalin',
   bookConsultation: 'La-tashi Buuxi',
 
   chatConsultation: 'La-tashi Sheeko',
@@ -414,7 +417,7 @@ const so: TranslationKeys = {
   downloadAsPDF: 'U Soo Dejiso PDF',
   rateYourDoctor: 'Dhakhtarkaaga Qiimee',
   howWasExperience: 'Sida khibradda ula ahayd',
-  leaveComment: 'Faallo ka tag (ikhtiyaari)...',
+  leaveComment: 'Faallo ka tag...',
   submitAndDone: 'Gudbi & Dhamee',
   submitting: 'Waa la gudbinayaa...',
   thankYou: 'Mahadsanid!',
@@ -513,7 +516,6 @@ const so: TranslationKeys = {
   notifyMeMsg: 'Adiga ayaa ugu horreeya in laguu ogeysiyo marka lacag bixintu bilowdo!',
 
   // Chat consultation screen
-  upcomingAppointment: 'Ballantan Soo Socota',
   consultationHasntStarted: 'Tashanaha Weli Bilaaban Maysid',
   appointmentBeginsIn: 'Ballantu waxay bilaabantaa gudaha',
   chatUnlockNote: 'Sheekadu waxay xidnaataa ilaa dhakhtarku uu ka bilaabo xaaladda.',
@@ -551,7 +553,6 @@ const so: TranslationKeys = {
   // Doctor chat screen
   connectingToConsultation: 'Xiriirka tashanaha...',
   activeSession: 'Xaaladda firfircoon',
-  done: 'Dhameystay',
   consultationEndedChatReadOnly: 'Tashanaha waxa dhammaatay · Sheekada waa akhrin kaliya',
   chatRequiresDevelopmentBuild: 'Sheekadu waxay u baahan tahay dhismaha horumarinta.',
   waitingForChannelConnection: 'Sugaya xiriirka kanaalka...',

@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons'
+import Constants from 'expo-constants'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -10,20 +11,13 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 
-const APP_VERSION = '1.0.0'
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0'
 
 const CORE_VALUES = [
   { icon: 'shield-checkmark', color: colors.tealGreen, title: 'Trust & Safety', desc: 'Every doctor is verified by our admin team before joining the platform.' },
   { icon: 'globe', color: colors.interactiveBlue, title: 'Accessibility', desc: 'Bringing quality healthcare to underserved communities across Africa and beyond.' },
   { icon: 'lock-closed', color: colors.careBlue, title: 'Privacy First', desc: 'Your health data belongs to you. We enforce strict encryption and access controls.' },
   { icon: 'flash', color: '#F59E0B', title: 'Speed & Reliability', desc: 'Instant consultations — no waiting rooms, no commute.' },
-]
-
-const STATS = [
-  { value: '500+', label: 'Verified Doctors' },
-  { value: '10K+', label: 'Patients Served' },
-  { value: '4.9★', label: 'App Rating' },
-  { value: '3', label: 'Consultation Types' },
 ]
 
 export default function DoctorAboutDawaScreen() {
@@ -56,15 +50,6 @@ export default function DoctorAboutDawaScreen() {
           <Text style={[styles.cardBody, { marginTop: 10 }]}>
             Through real-time chat, audio calls, and video consultations, we connect patients with verified healthcare professionals across Ethiopia, Rwanda, Somalia, and beyond.
           </Text>
-        </View>
-
-        <View style={styles.statsRow}>
-          {STATS.map((stat) => (
-            <View key={stat.label} style={styles.statCard}>
-              <Text style={styles.statValue}>{stat.value}</Text>
-              <Text style={styles.statLabel}>{stat.label}</Text>
-            </View>
-          ))}
         </View>
 
         <Text style={styles.sectionLabel}>Core Values</Text>

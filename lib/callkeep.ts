@@ -13,6 +13,7 @@
 //   • Manage audio session lifecycle (iOS CallKit requirement)
 
 import { Platform } from 'react-native'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { logger } from './logger'
 
 // Lazy-load so Expo Go / web don't crash (no native module registered there)
@@ -23,6 +24,46 @@ try {
   }
 } catch (e) {
   logger.warn('[CallKeep] react-native-callkeep not available — development build required')
+}
+
+// ── Cold-start payload persistence ──────────────────────────────────────────
+// When the app is fully killed, the Android incoming-call UI is raised from
+// index.js's headless FCM handler — a JS context that dies the moment the
+// task returns. If the doctor/patient taps Accept, the OS relaunches the app
+// into a BRAND NEW JS context: this module reloads from scratch, so the
+// in-memory `pendingCalls` map (populated only by displayIncomingCall() in
+// the context that showed the call) is empty and the 'answerCall' listener
+// below has nothing to hand to answerHandler. Persisting the payload to
+// AsyncStorage (survives across JS context restarts, unlike module state)
+// closes that gap — see the fallback read in the 'answerCall' listener.
+const PENDING_CALL_TTL_MS = 2 * 60 * 1000
+const pendingCallKey = (uuid: string) => `@callkeep_pending_${uuid}`
+
+async function persistPendingCall(payload: IncomingCallPayload) {
+  try {
+    await AsyncStorage.setItem(
+      pendingCallKey(payload.uuid),
+      JSON.stringify({ payload, savedAt: Date.now() }),
+    )
+  } catch {
+    // best effort — in-memory pendingCalls still covers the warm-JS case
+  }
+}
+
+async function loadPersistedCall(uuid: string): Promise<IncomingCallPayload | undefined> {
+  try {
+    const raw = await AsyncStorage.getItem(pendingCallKey(uuid))
+    if (!raw) return undefined
+    const { payload, savedAt } = JSON.parse(raw)
+    if (Date.now() - savedAt > PENDING_CALL_TTL_MS) return undefined
+    return payload as IncomingCallPayload
+  } catch {
+    return undefined
+  }
+}
+
+function clearPersistedCall(uuid: string) {
+  AsyncStorage.removeItem(pendingCallKey(uuid)).catch(() => {})
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -39,10 +80,21 @@ export interface IncomingCallPayload {
   doctorClerkId:    string
   agoraChannel:     string
   patientClerkId?:  string
+  /** Patient's own identity — only populated when direction === 'doctor'. */
+  patientId?:       string
+  patientName?:     string
+  patientPhotoUrl?: string
+  /**
+   * Who is ringing whom. Default ('patient', when omitted) is the existing
+   * flow: doctor accepted → patient's device rings, doctor is the caller.
+   * 'doctor' is a patient's new on-demand request ringing the doctor's
+   * device — the *patient* is the caller shown on the OS call UI.
+   */
+  direction?: 'patient' | 'doctor'
 }
 
 type AnswerHandler = (payload: IncomingCallPayload) => void
-type EndHandler    = (uuid: string) => void
+type EndHandler    = (uuid: string, payload?: IncomingCallPayload) => void
 
 // ── Module-level state ────────────────────────────────────────────────────────
 
@@ -62,6 +114,9 @@ function notAvailable() {
 }
 
 function makeCallerHandle(payload: IncomingCallPayload): string {
+  if (payload.direction === 'doctor') {
+    return payload.patientName || 'Patient'
+  }
   return payload.doctorSpecialty
     ? `${payload.doctorName} · ${payload.doctorSpecialty}`
     : payload.doctorName
@@ -132,12 +187,28 @@ export const callkeep = {
       // mark the consultation 'missed' right after the patient answered.
       activeCallUuids.delete(callUUID)
       pendingCalls.delete(callUUID)
+      if (payload) clearPersistedCall(callUUID)
 
       // Dismiss the native call UI immediately
       try { RNCallKeep.endCall(callUUID) } catch {}
 
       if (payload && answerHandler) {
         answerHandler(payload)
+        return
+      }
+
+      // Cold start: this JS context never saw displayIncomingCall() run (the
+      // call was raised by index.js's headless handler in a prior, now-dead
+      // context) — fall back to the AsyncStorage copy. Read it BEFORE
+      // clearing it (loadPersistedCall races clearPersistedCall on the same
+      // key otherwise). See the comment above PENDING_CALL_TTL_MS for why
+      // this is necessary.
+      if (answerHandler) {
+        loadPersistedCall(callUUID).then((persisted) => {
+          clearPersistedCall(callUUID)
+          if (persisted) answerHandler?.(persisted)
+          else logger.warn('[CallKeep] answerCall with no known payload (cold start, TTL expired?) uuid:', callUUID)
+        })
       }
     })
 
@@ -147,13 +218,33 @@ export const callkeep = {
     RNCallKeep.addEventListener('endCall', ({ callUUID }: { callUUID: string }) => {
       logger.log('[CallKeep] endCall uuid:', callUUID)
 
-      const wasActive = activeCallUuids.has(callUUID)
+      const payload    = pendingCalls.get(callUUID)
+      const wasActive  = activeCallUuids.has(callUUID)
       activeCallUuids.delete(callUUID)
       pendingCalls.delete(callUUID)
 
-      if (wasActive && endHandler) {
-        endHandler(callUUID)
+      if (!wasActive || !endHandler) {
+        clearPersistedCall(callUUID)
+        return
       }
+
+      if (payload) {
+        clearPersistedCall(callUUID)
+        endHandler(callUUID, payload)
+        return
+      }
+
+      // Cold start: same gap as 'answerCall' above — this JS context never
+      // ran displayIncomingCall() for this uuid, so `payload` (and its
+      // `direction`) isn't in memory. Without it, onEnd's caller can't tell
+      // a doctor declining a still-pending request apart from a patient
+      // declining an already-accepted call, and those two must be handled
+      // differently (see the onEnd handler in app/_layout.tsx). Read the
+      // persisted copy BEFORE clearing it.
+      loadPersistedCall(callUUID).then((persisted) => {
+        clearPersistedCall(callUUID)
+        endHandler?.(callUUID, persisted)
+      })
     })
 
     // ── didActivateAudioSession (iOS) ─────────────────────────────────────────
@@ -212,6 +303,7 @@ export const callkeep = {
     lastDisplayedAt.set(uuid, now)
     pendingCalls.set(uuid, payload)
     activeCallUuids.add(uuid)
+    persistPendingCall(payload)
 
     const callerHandle = makeCallerHandle(payload)
     const hasVideo     = payload.consultationType === 'video'
@@ -237,7 +329,7 @@ export const callkeep = {
           if (activeCallUuids.has(uuid)) {
             logger.log('[CallKeep] Ring timeout — ending call uuid:', uuid)
             callkeep.endIncomingCall(uuid)
-            if (endHandler) endHandler(uuid)
+            if (endHandler) endHandler(uuid, payload)
           }
         }, 60_000)
       }
@@ -260,6 +352,7 @@ export const callkeep = {
     // let that stale-read activeCallUuids and misfire endHandler.
     activeCallUuids.delete(uuid)
     pendingCalls.delete(uuid)
+    clearPersistedCall(uuid)
     try {
       RNCallKeep.endCall(uuid)
     } catch (e) {
@@ -297,6 +390,7 @@ export const callkeep = {
     // loop back into the JS 'endCall' event synchronously.
     activeCallUuids.delete(uuid)
     pendingCalls.delete(uuid)
+    clearPersistedCall(uuid)
     try {
       if (Platform.OS === 'ios') {
         RNCallKeep.reportEndCallWithUUID(uuid, CXCallEndedReason[reason] ?? 2)

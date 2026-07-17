@@ -72,6 +72,16 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
   const days = getNextDays(14, availability ?? undefined)
   const selectedDayValue = days[selectedDay]?.value
 
+  // Forces a re-render every 30s so isSlotPast() (a pure function keyed off
+  // Date.now() at call time) re-evaluates without the patient touching
+  // anything — mirrors the identical fix in BookingModal.
+  const [, setNowTick] = useState(0)
+  useEffect(() => {
+    if (!visible) return
+    const id = setInterval(() => setNowTick(t => t + 1), 30_000)
+    return () => clearInterval(id)
+  }, [visible])
+
   useEffect(() => {
     if (visible) {
       setSelectedDay(0)
@@ -111,24 +121,43 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
     let cancelled = false
     const dayStart = new Date(`${selectedDayValue}T00:00:00`)
     const dayEnd = new Date(`${selectedDayValue}T23:59:59.999`)
-    supabase
-      .from('slot_locks')
-      .select('slot_start')
-      .eq('doctor_id', appointment.doctorId)
-      .gte('slot_start', dayStart.toISOString())
-      .lte('slot_start', dayEnd.toISOString())
-      .gt('expires_at', new Date().toISOString())
-      .then(({ data, error }) => {
-        if (cancelled) return
-        if (error || !data) { setBookedTimes(new Set()); return }
-        setBookedTimes(new Set(
-          data.map((row: any) => {
-            const d = new Date(row.slot_start)
-            return formatTimeMins(d.getHours() * 60 + d.getMinutes())
-          })
-        ))
-      })
-    return () => { cancelled = true }
+
+    const fetchBookedTimes = () => {
+      supabase
+        .from('slot_locks')
+        .select('slot_start')
+        .eq('doctor_id', appointment.doctorId)
+        .gte('slot_start', dayStart.toISOString())
+        .lte('slot_start', dayEnd.toISOString())
+        .gt('expires_at', new Date().toISOString())
+        .then(({ data, error }) => {
+          if (cancelled) return
+          if (error || !data) { setBookedTimes(new Set()); return }
+          setBookedTimes(new Set(
+            data.map((row: any) => {
+              const d = new Date(row.slot_start)
+              return formatTimeMins(d.getHours() * 60 + d.getMinutes())
+            })
+          ))
+        })
+    }
+
+    fetchBookedTimes()
+
+    // Another patient booking/cancelling the same day while this sheet is
+    // open must flip that slot's availability live — mirrors BookingModal's
+    // identical subscription (this modal previously fetched once and never
+    // updated until re-opened).
+    const channel = supabase
+      .channel(`reschedule-slot-locks-${appointment.doctorId}-${selectedDayValue}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${appointment.doctorId}` },
+        () => fetchBookedTimes()
+      )
+      .subscribe()
+
+    return () => { cancelled = true; supabase.removeChannel(channel) }
   }, [visible, appointment?.doctorId, selectedDayValue])
 
   const slots = availability ? getAvailableSlots(availability, selectedDayValue ?? '') : []

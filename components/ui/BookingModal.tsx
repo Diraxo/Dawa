@@ -47,6 +47,13 @@ type Props = {
   visible: boolean
   doctor: Doctor | null
   onClose: () => void
+  // Lets a caller land the sheet straight on the date/time picker (step 2)
+  // with the same consultation type as before — used when a patient reopens
+  // scheduling for a doctor whose previous consultation was cancelled/
+  // declined, so they see available dates/times immediately instead of
+  // re-picking a consultation type first.
+  initialStep?: 1 | 2 | 3
+  initialConsultType?: ConsultationType
 }
 
 const CONSULT_TYPES: { id: ConsultationType; label: string; icon: string; color: string }[] = [
@@ -54,6 +61,29 @@ const CONSULT_TYPES: { id: ConsultationType; label: string; icon: string; color:
   { id: 'phone', label: 'Phone Call', icon: 'call', color: colors.careBlue },
   { id: 'video', label: 'Video Call', icon: 'videocam', color: '#7C3AED' },
 ]
+
+// Thrown for book_appointment_slot() rejections (slot taken, doctor busy,
+// outside hours, etc.) so the catch handler in initiateChapaPayment can tell
+// these apart from actual payment/network failures — no charge was ever
+// attempted for these, so they must never show a "Payment Failed" title.
+class BookingConflictError extends Error {
+  code: string
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
+const BOOKING_CONFLICT_TITLES: Record<string, string> = {
+  SLOT_TAKEN:          'Time No Longer Available',
+  DOCTOR_BUSY:         'Doctor Busy',
+  ON_DEMAND_DISABLED:  'On-Demand Unavailable',
+  PATIENT_BUSY:        'Active Consultation In Progress',
+  SCHEDULED_DISABLED:  'Scheduling Unavailable',
+  DAY_OFF:             'Doctor Unavailable',
+  DATE_BLOCKED:        'Doctor Unavailable',
+  OUTSIDE_HOURS:       'Outside Working Hours',
+}
 
 // Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
 // supabase-js calls without an abortSignal) — without this, a stalled request
@@ -69,7 +99,7 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): P
   })
 }
 
-export function BookingModal({ visible, doctor, onClose }: Props) {
+export function BookingModal({ visible, doctor, onClose, initialStep, initialConsultType }: Props) {
   const insets = useSafeAreaInsets()
   const router = useRouter()
   const { getToken } = useAuth()
@@ -86,6 +116,16 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const [creditLoading, setCreditLoading] = useState(false)
   const [doctorBusy, setDoctorBusy] = useState(false)
   const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
+  // Forces a re-render every 30s so isSlotPast() (a pure function keyed off
+  // Date.now() at call time) re-evaluates without the patient having to
+  // touch anything — otherwise a slot that just became past stayed shown as
+  // selectable until some unrelated state change happened to re-render.
+  const [, setNowTick] = useState(0)
+  useEffect(() => {
+    if (!visible) return
+    const id = setInterval(() => setNowTick(t => t + 1), 30_000)
+    return () => clearInterval(id)
+  }, [visible])
   const days = getNextDays(14, doctor?.availability ?? undefined)
   const selectedDayValue = days[selectedDay]?.value
 
@@ -118,6 +158,11 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   // Re-runs whenever the doctor, sheet visibility, timing mode, or selected
   // day changes. slot_locks (not consultations, which RLS restricts to a
   // patient's own rows) is the readable-by-any-patient source of truth here.
+  // Exposed via ref (not just the effect below) so a SLOT_TAKEN rejection
+  // from book_appointment_slot() can force an immediate re-check instead of
+  // waiting on the slot_locks realtime subscription to notice the conflict.
+  const fetchBookedTimesRef = useRef<() => void>(() => {})
+
   useEffect(() => {
     if (!visible || !doctor || timing !== 'schedule' || !selectedDayValue) {
       setBookedTimes(new Set())
@@ -150,13 +195,14 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
         })
     }
 
+    fetchBookedTimesRef.current = fetchBookedTimes
     fetchBookedTimes()
 
     // Another patient booking/cancelling the same day while this sheet is
     // already open must flip that slot's availability live — without this,
     // only re-opening the sheet (or changing day and back) picked it up.
     const channel = supabase
-      .channel(`booking-slot-locks-${doctor.id}-${selectedDayValue}`)
+      .channel(`booking-slot-locks-${doctor.id}-${selectedDayValue}-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctor.id}` },
@@ -169,8 +215,8 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
 
   useEffect(() => {
     if (visible) {
-      setStep(1)
-      setConsultType('chat')
+      setStep(initialStep ?? 1)
+      setConsultType(initialConsultType ?? 'chat')
       setTiming(canStartNow ? 'now' : 'schedule')
       setSelectedDay(0)
       setSelectedTime('')
@@ -300,6 +346,9 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
   const initiateChapaPayment = async () => {
     setPaying(true)
     let consultationId: string | null = null
+    // Hoisted above the try block so the PATIENT_BUSY recovery path in catch
+    // (below) can use it without re-fetching — see that block for why.
+    let patientUserId: string | null = null
     const chargeAmount = creditCoversAll ? 0 : additionalRequired
 
     // Set up Linking listener BEFORE opening the browser so we catch the
@@ -348,6 +397,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       )
 
       if (userErr || !userData) throw new Error('Could not find your user profile.')
+      patientUserId = userData.id
 
       // Final busy re-check right before payment — the periodic poll above
       // could be stale by up to 10s, and the patient must never be charged
@@ -358,7 +408,7 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
         setDoctorBusy(true)
         Alert.alert(
           'Doctor Busy',
-          'Doctor is currently in another consultation.',
+          'The doctor is currently busy with another patient. Please choose another available time or try again later.',
           [
             { text: 'Choose Another Doctor', style: 'cancel', onPress: () => onClose() },
             { text: 'Schedule for Later', onPress: () => { setTiming('schedule'); setStep(2) } },
@@ -392,30 +442,30 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       if (consultErr || !newConsultationId) {
         const msg = consultErr?.message ?? ''
         if (msg.includes('SLOT_TAKEN')) {
-          throw new Error('This time slot was just booked by someone else. Please pick another time.')
+          throw new BookingConflictError('SLOT_TAKEN', 'This time slot was just booked by someone else. Please pick another time.')
         }
         if (msg.includes('ON_DEMAND_DISABLED')) {
-          throw new Error('This doctor is not accepting on-demand consultations right now.')
+          throw new BookingConflictError('ON_DEMAND_DISABLED', 'This doctor is not accepting on-demand consultations right now.')
         }
         if (msg.includes('DOCTOR_BUSY')) {
-          throw new Error('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+          throw new BookingConflictError('DOCTOR_BUSY', 'The doctor is currently busy with another patient. Please choose another available time or try again later.')
         }
         if (msg.includes('PATIENT_BUSY')) {
-          throw new Error('You already have an active consultation. Please finish it before starting a new one.')
+          throw new BookingConflictError('PATIENT_BUSY', 'You already have an active consultation. Please finish it before starting a new one.')
         }
         if (msg.includes('SCHEDULED_DISABLED')) {
-          throw new Error('This doctor is not accepting scheduled appointments right now.')
+          throw new BookingConflictError('SCHEDULED_DISABLED', 'This doctor is not accepting scheduled appointments right now.')
         }
         if (msg.includes('DAY_OFF')) {
-          throw new Error('This doctor is not available on the selected day.')
+          throw new BookingConflictError('DAY_OFF', 'This doctor is not available on the selected day.')
         }
         if (msg.includes('DATE_BLOCKED')) {
-          throw new Error('This doctor is unavailable on the selected date.')
+          throw new BookingConflictError('DATE_BLOCKED', 'This doctor is unavailable on the selected date.')
         }
         if (msg.includes('OUTSIDE_HOURS')) {
-          throw new Error('This time is outside the doctor\'s working hours. Please pick another time.')
+          throw new BookingConflictError('OUTSIDE_HOURS', 'This time is outside the doctor\'s working hours. Please pick another time.')
         }
-        throw new Error('Failed to create booking. Please try again.')
+        throw new BookingConflictError('BOOKING_FAILED', 'We couldn\'t complete this booking. Please try again.')
       }
       consultationId = newConsultationId as string
 
@@ -449,6 +499,55 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
       if (activeCredit) {
         await applyFullCredit(consultationId, activeCredit.creditConsultationId)
           .catch(() => { /* partial credit already stored even if marking fails */ })
+      }
+
+      // ── DEV-ONLY: simulate payment instead of opening Chapa ─────────────────
+      // Patient Mobile App only. __DEV__ is compiled to false in release
+      // builds (React Native strips it), so this can never run in a shipped
+      // app even if the env var were somehow left on. Never touches the
+      // Chapa integration, webhook, or edge functions — it only marks this
+      // row 'paid' exactly like chapa-webhook does after verifying a real
+      // payment, then hands off to the unmodified payment-return.tsx, which
+      // performs the identical status flip, notification trigger, and
+      // waiting-room routing as a real payment.
+      if (__DEV__ && process.env.EXPO_PUBLIC_DEV_PAYMENT_BYPASS === 'true') {
+        const bypassAmount = chargeAmount > 0 ? chargeAmount : price
+        const proceed = await new Promise<boolean>(resolve => {
+          Alert.alert(
+            'Development Payment',
+            `This is a simulated payment used for development.\n\nAmount: ETB ${bypassAmount}\n\nContinue?`,
+            [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Continue', onPress: () => resolve(true) },
+            ],
+          )
+        })
+
+        if (!proceed) {
+          await client
+            .from('consultations')
+            .update({ status: 'cancelled' })
+            .eq('id', consultationId)
+            .eq('status', 'pending_payment')
+          return
+        }
+
+        console.log('DEV PAYMENT BYPASS ENABLED', { consultationId, amount: bypassAmount })
+
+        // chapa_tx_ref is deliberately left null — setting it would arm the
+        // refund trigger (migration 008_chapa_refund.sql), which calls the
+        // real Chapa refund API if this consultation is later cancelled or
+        // declined. No real money was collected here, so no refund must ever
+        // be attempted, and no Chapa endpoint must ever be contacted.
+        await client
+          .from('consultations')
+          .update({ payment_status: 'paid' })
+          .eq('id', consultationId)
+          .eq('status', 'pending_payment')
+          .neq('payment_status', 'paid')
+
+        navigateToReturn('success', consultationId, scheduledAt)
+        return
       }
 
       // Chapa requires an https:// return_url and strips all custom query params it
@@ -569,6 +668,72 @@ export function BookingModal({ visible, doctor, onClose }: Props) {
             .then(() => {})
         }
       }
+
+      // A BookingConflictError means book_appointment_slot() rejected the
+      // request BEFORE any charge was ever attempted — showing "Payment
+      // Failed" here would wrongly imply money was charged and declined.
+      // Title it as an availability/scheduling problem instead, and force
+      // an immediate re-fetch of booked slots so the conflicting time flips
+      // to "Booked" right away rather than waiting on the realtime
+      // subscription to catch up.
+      if (err instanceof BookingConflictError) {
+        if (err.code === 'DOCTOR_BUSY') setDoctorBusy(true)
+        fetchBookedTimesRef.current()
+
+        // PATIENT_BUSY also fires for a consultation that's already fully
+        // paid but stuck at 'pending_payment' — book_appointment_slot()
+        // treats that status as "busy" too (it can't tell "abandoned" from
+        // "still resolving"), which previously blocked the patient from ever
+        // retrying, even though nothing failed and no new charge is needed.
+        // This happens when payment succeeded but the client never learned
+        // it (killed app, dropped network) before both the passive poll and
+        // the active-verify call in payment-return.tsx got a chance to flip
+        // the row forward. Route back into the existing paid consultation
+        // instead of dead-ending on a blocking alert.
+        if (err.code === 'PATIENT_BUSY' && patientUserId) {
+          try {
+            const token = await getToken().catch(() => null)
+            if (token) {
+              const { data: stuck } = await getAuthClient(token)
+                .from('consultations')
+                .select('id, type, scheduled_at, doctor_id, doctor_profiles!doctor_id(users!inner(full_name))')
+                .eq('patient_id', patientUserId)
+                .eq('status', 'pending_payment')
+                .eq('payment_status', 'paid')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+
+              if (stuck) {
+                onClose()
+                router.push({
+                  pathname: '/(patient)/payment-return',
+                  params: {
+                    consultationId:   (stuck as any).id,
+                    doctorId:         (stuck as any).doctor_id ?? doctor.id,
+                    doctorName:       (stuck as any).doctor_profiles?.users?.full_name ?? doctor.name,
+                    consultationType: (stuck as any).type ?? consultType,
+                    chapaStatus:      'success',
+                    timing,
+                    scheduledAt: (stuck as any).scheduled_at ?? '',
+                  },
+                })
+                return
+              }
+            }
+          } catch {
+            // fall through to the generic alert below
+          }
+        }
+
+        Alert.alert(
+          BOOKING_CONFLICT_TITLES[err.code] ?? 'Booking Unavailable',
+          err.message,
+          [{ text: 'OK' }],
+        )
+        return
+      }
+
       Alert.alert(
         'Payment Failed',
         err?.message ?? 'Something went wrong. Please try again.',

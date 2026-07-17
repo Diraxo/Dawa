@@ -2,65 +2,43 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth } from '@clerk/clerk-expo'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import * as Notifications from 'expo-notifications'
 import { useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { formatFriendlyDateTime } from '@/lib/dateFormat'
+import { formatDoctorName } from '@/lib/nameFormat'
 
 type PageState = 'verifying' | 'confirmed' | 'failed' | 'processing'
 
-// Mirrors the date/time formatting used on the appointments tab
-// (dateLbl/timeLbl in app/(patient)/(tabs)/appointments.tsx) so the
-// "scheduled for" copy here reads the same way as the rest of the app.
-function formatScheduledAt(iso: string): string {
-  const d = new Date(iso)
-  const dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-  const timeStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-  return `${dateStr} at ${timeStr}`
-}
-
-async function scheduleReminders(
-  consultationId: string,
-  scheduledAt: string,
-  doctorName: string,
-  consultationType: string,
-) {
+// Chapa's payment_status='paid' flip is normally written by chapa-webhook,
+// which Chapa calls asynchronously, server-to-server, sometime after this
+// screen opens — this app has no control over when (or whether) that
+// delivery happens. Previously this screen only ever passively polled our
+// own DB for that flip; if Chapa's callback was delayed past 60s, dropped,
+// or never configured to reach this environment at all, the row stayed at
+// pending_payment forever — no waiting room, no doctor notification (both
+// depend on this same flip), and every retry then hit book_appointment_
+// slot()'s PATIENT_BUSY guard since the abandoned row still counts as
+// "busy". chapa-webhook's GET path (used for Chapa's own browser redirect)
+// runs the identical verify-with-Chapa + idempotent DB-write logic as its
+// POST path — safe to call directly from the client as an active nudge
+// instead of only ever waiting on Chapa's own delivery.
+async function triggerActiveVerification(txRef: string) {
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? ''
+  const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+  if (!supabaseUrl || !txRef) return
   try {
-    const { status } = await Notifications.getPermissionsAsync()
-    if (status !== 'granted') return
-    const apptTime = new Date(scheduledAt)
-    const fiveMin = new Date(apptTime.getTime() - 5 * 60 * 1000)
-    const now = new Date()
-    const channelId = Platform.OS === 'android' ? 'appointments' : undefined
-    if (fiveMin > now) {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Appointment Reminder',
-          body: `Your ${consultationType} consultation with ${doctorName} starts in 5 minutes`,
-          data: { consultationId },
-          ...(channelId ? { channelId } : {}),
-        },
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fiveMin },
-      })
-    }
-    if (apptTime > now) {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: "It's Time for Your Consultation",
-          body: `Your ${consultationType} consultation with ${doctorName} is starting now. Tap to join.`,
-          data: { consultationId },
-          ...(channelId ? { channelId } : {}),
-        },
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: apptTime },
-      })
-    }
+    await fetch(`${supabaseUrl}/functions/v1/chapa-webhook?tx_ref=${encodeURIComponent(txRef)}`, {
+      method: 'GET',
+      headers: anonKey ? { apikey: anonKey } : undefined,
+    })
   } catch {
-    // notifications are best-effort
+    // best-effort — the passive poll below still covers Chapa's own callback
   }
 }
 
@@ -102,6 +80,16 @@ export default function PaymentReturnScreen() {
     scheduledAt: string
   } | null>(null)
   const cancelledRef = useRef(false)
+  const navigatedRef = useRef(false)
+  const [processingInfo, setProcessingInfo] = useState<{
+    consultationId: string
+    txRef: string | null
+    doctorId: string
+    doctorName: string
+    consultationType: string
+    timing: string
+  } | null>(null)
+  const [recheckInFlight, setRecheckInFlight] = useState(false)
 
   useEffect(() => {
     cancelledRef.current = false
@@ -127,7 +115,7 @@ export default function PaymentReturnScreen() {
           const { data } = await getAuthClient(token)
             .from('consultations')
             .select(`
-              id, type, scheduled_at, doctor_id,
+              id, type, scheduled_at, doctor_id, is_on_demand,
               doctor_profiles!doctor_id(users!inner(full_name))
             `)
             .eq('chapa_tx_ref', txRef)
@@ -142,10 +130,14 @@ export default function PaymentReturnScreen() {
           consultationType = (data as any).type ?? 'chat'
           scheduledAt      = (data as any).scheduled_at ?? ''
 
-          // Determine timing: more than 1 h in the future → scheduled
-          if (scheduledAt) {
-            const scheduledTime = new Date(scheduledAt)
-            timing = scheduledTime > new Date(Date.now() + 60 * 60 * 1000) ? 'schedule' : 'now'
+          // is_on_demand is set once, authoritatively, by book_appointment_slot()
+          // at booking time. A prior `scheduled_at > now + 1h` heuristic
+          // misclassified any scheduled slot booked less than an hour ahead
+          // (common with 20-minute slots) as on-demand, flipping status to
+          // 'waiting_for_doctor' below and stranding the patient in the
+          // on-demand waiting room.
+          if ((data as any).is_on_demand != null) {
+            timing = (data as any).is_on_demand ? 'now' : 'schedule'
           }
         } catch {
           if (!cancelledRef.current) setState('failed')
@@ -169,7 +161,31 @@ export default function PaymentReturnScreen() {
         return
       }
 
-      // Poll DB until webhook marks payment as paid (up to 60 s)
+      // Look up our own tx_ref for this consultation (may already be known
+      // from the cold-launch txRef param, but the normal in-app path never
+      // receives one) so we can actively nudge chapa-webhook below instead
+      // of only ever waiting on Chapa's own async callback.
+      let ownTxRef = txRef ?? null
+      if (!ownTxRef) {
+        try {
+          const { data: txRow } = await supabase
+            .from('consultations')
+            .select('chapa_tx_ref')
+            .eq('id', consultationId)
+            .maybeSingle()
+          ownTxRef = txRow?.chapa_tx_ref ?? null
+        } catch {}
+      }
+
+      // Fire immediately, in parallel with the passive poll below — this
+      // alone resolves the payment within a couple of seconds in the common
+      // case where Chapa's async webhook is merely delayed or never
+      // configured to reach this environment, closing the exact gap that
+      // otherwise left the doctor un-notified and the waiting room never
+      // appearing.
+      if (ownTxRef) triggerActiveVerification(ownTxRef)
+
+      // Poll DB until payment is marked paid (up to 60 s passive)
       const MAX_ATTEMPTS = 30
       let attempts = 0
       let paid = false
@@ -194,9 +210,36 @@ export default function PaymentReturnScreen() {
 
       if (cancelledRef.current) return
 
+      if (!paid && initialChapaStatus === 'success' && ownTxRef) {
+        // Passive poll exhausted but Chapa's own redirect said success —
+        // actively re-verify (idempotent, safe to call repeatedly) and give
+        // it one more short window rather than immediately dead-ending on
+        // the static "processing" screen.
+        await triggerActiveVerification(ownTxRef)
+        let retryAttempts = 0
+        while (retryAttempts < 15) {
+          if (cancelledRef.current) return
+          const { data } = await supabase
+            .from('consultations')
+            .select('payment_status')
+            .eq('id', consultationId)
+            .single()
+          if (data?.payment_status === 'paid') { paid = true; break }
+          retryAttempts++
+          await new Promise<void>(resolve => setTimeout(resolve, 2000))
+        }
+      }
+
+      if (cancelledRef.current) return
+
       if (!paid) {
         if (initialChapaStatus === 'success') {
-          // Chapa said success but webhook is delayed — leave open, show processing
+          // Chapa said success but both the passive poll and the active
+          // re-verify above came back empty — genuinely unresolved (Chapa
+          // API itself unreachable, or the transaction really isn't settled
+          // yet). Leave the row open rather than cancelling a possibly-paid
+          // booking; the "processing" screen's retry action can nudge again.
+          setProcessingInfo({ consultationId, txRef: ownTxRef, doctorId, doctorName, consultationType, timing })
           setState('processing')
         } else {
           await cancelConsultationById(consultationId)
@@ -213,6 +256,18 @@ export default function PaymentReturnScreen() {
       // waiting_started_at must be stamped here too, same as the credit path
       // in apply-credit/index.ts — it's the sort key doctor clients queue on
       // and what the patient waiting room displays as "waiting since".
+      //
+      // Guarded to only flip a row still at 'pending_payment': this poll loop
+      // can take up to a minute, and the chapa-webhook function runs the same
+      // flip (guarded the same way) the moment it verifies payment — usually
+      // seconds before this client-side poll even notices payment_status is
+      // 'paid'. If the doctor accepts in that window, this write would
+      // otherwise land after them and silently overwrite 'accepted'/
+      // 'in_progress' back to 'waiting_for_doctor' — resurrecting the
+      // doctor's incoming-request modal for a call they already answered and
+      // yanking the patient back into a waiting room for a consultation
+      // that's actually already live.
+      let liveStatus: string | null = null
       try {
         const token = await getToken()
         if (token && consultationId) {
@@ -223,8 +278,15 @@ export default function PaymentReturnScreen() {
               ...(timing === 'now' ? { waiting_started_at: new Date().toISOString() } : {}),
             })
             .eq('id', consultationId)
+            .eq('status', 'pending_payment')
             .eq('payment_status', 'paid')
         }
+        const { data: statusRow } = await supabase
+          .from('consultations')
+          .select('status')
+          .eq('id', consultationId)
+          .single()
+        liveStatus = statusRow?.status ?? null
       } catch {
         // best-effort; the waiting room can still function
       }
@@ -248,24 +310,81 @@ export default function PaymentReturnScreen() {
       setState('confirmed')
 
       if (timing === 'now') {
-        await new Promise<void>(resolve => setTimeout(resolve, 2500))
-        if (cancelledRef.current) return
-        router.replace({
-          pathname: '/(patient)/waiting-room',
-          params: {
-            consultationId,
-            doctorId,
-            doctorName,
-            consultationType,
-          },
-        })
+        // Routes off whatever status is passed in — never off state captured
+        // earlier — so a decision made after a delay (realtime event, the
+        // fallback timer below) always reflects what's actually in the DB
+        // right now, not what it was when this screen started waiting.
+        const navigateForStatus = (status: string | null) => {
+          if (navigatedRef.current || cancelledRef.current) return
+          if (status === 'accepted' || status === 'in_progress' || status === 'active') {
+            navigatedRef.current = true
+            const route =
+              consultationType === 'phone' ? '/(patient)/phone-consultation' :
+              consultationType === 'video' ? '/(patient)/video-consultation' :
+              '/(patient)/chat-consultation'
+            router.replace({
+              pathname: route as any,
+              params: { channelId: consultationId, consultationId, doctorId, doctorName, doctorPhotoUrl: '' },
+            })
+          } else if (status === 'completed') {
+            navigatedRef.current = true
+            router.replace({
+              pathname: '/(patient)/consultation-summary' as any,
+              params: { consultationId, doctorId, doctorName, consultationType },
+            })
+          } else if (status && status !== 'pending_payment') {
+            // waiting_for_doctor, declined, cancelled, missed, call_declined,
+            // ended_abnormally — the waiting room already owns the correct
+            // UI (including the credit screen) for every one of these, so
+            // route there rather than duplicating that logic here.
+            navigatedRef.current = true
+            router.replace({
+              pathname: '/(patient)/waiting-room',
+              params: { consultationId, doctorId, doctorName, consultationType },
+            })
+          }
+        }
+
+        // The doctor may accept (or decline) while this screen is showing
+        // "Payment Successful" — subscribe so that transition is caught the
+        // instant it happens instead of only being noticed by the
+        // fixed-delay fallback below, which would otherwise still be able to
+        // send the patient into the waiting room for a call already answered.
+        const channel = supabase
+          .channel(`payment-return-${consultationId}-${Date.now()}`)
+          .on(
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },
+            (payload) => navigateForStatus((payload.new as any)?.status ?? null),
+          )
+          .subscribe()
+
+        // Navigate immediately if the doctor already acted before we even
+        // finished payment verification.
+        navigateForStatus(liveStatus)
+
+        if (!navigatedRef.current) {
+          await new Promise<void>(resolve => setTimeout(resolve, 2500))
+          if (!cancelledRef.current && !navigatedRef.current) {
+            // Re-fetch rather than reusing `liveStatus` — it was captured
+            // before this wait, and the doctor may have accepted since.
+            const { data: freshRow } = await supabase
+              .from('consultations')
+              .select('status')
+              .eq('id', consultationId)
+              .single()
+            navigateForStatus(freshRow?.status ?? 'waiting_for_doctor')
+          }
+        }
+
+        supabase.removeChannel(channel)
       } else {
         // Scheduled bookings stay on the confirmation screen — the patient
         // taps "Continue" (handleContinueToAppointments) to go to their
-        // upcoming appointment instead of being auto-redirected.
-        if (scheduledAt) {
-          await scheduleReminders(consultationId, scheduledAt, doctorName, consultationType)
-        }
+        // upcoming appointment instead of being auto-redirected. Reminders
+        // for this booking (5-minute and start-time) are sent server-side by
+        // the appointment-notification cron — no client-local scheduling
+        // needed here, which previously duplicated those same pushes.
       }
     }
 
@@ -273,6 +392,67 @@ export default function PaymentReturnScreen() {
 
     return () => { cancelledRef.current = true }
   }, [paramConsultationId, txRef])
+
+  async function handleManualRecheck() {
+    if (!processingInfo || recheckInFlight) return
+    setRecheckInFlight(true)
+    try {
+      if (processingInfo.txRef) await triggerActiveVerification(processingInfo.txRef)
+
+      let paid = false
+      for (let i = 0; i < 5 && !paid; i++) {
+        const { data } = await supabase
+          .from('consultations')
+          .select('payment_status')
+          .eq('id', processingInfo.consultationId)
+          .single()
+        if (data?.payment_status === 'paid') { paid = true; break }
+        await new Promise<void>(resolve => setTimeout(resolve, 2000))
+      }
+
+      if (!paid) {
+        Alert.alert('Still Processing', 'Your payment has not been confirmed yet. Please try again in a moment.')
+        return
+      }
+
+      const { data: statusRow } = await supabase
+        .from('consultations')
+        .select('status')
+        .eq('id', processingInfo.consultationId)
+        .single()
+      const liveStatus = statusRow?.status
+
+      if (processingInfo.timing === 'now') {
+        const route =
+          processingInfo.consultationType === 'phone' ? '/(patient)/phone-consultation' :
+          processingInfo.consultationType === 'video' ? '/(patient)/video-consultation' :
+          '/(patient)/chat-consultation'
+        if (liveStatus === 'accepted' || liveStatus === 'in_progress' || liveStatus === 'active') {
+          router.replace({
+            pathname: route as any,
+            params: {
+              channelId: processingInfo.consultationId, consultationId: processingInfo.consultationId,
+              doctorId: processingInfo.doctorId, doctorName: processingInfo.doctorName, doctorPhotoUrl: '',
+            },
+          })
+        } else {
+          router.replace({
+            pathname: '/(patient)/waiting-room',
+            params: {
+              consultationId: processingInfo.consultationId,
+              doctorId: processingInfo.doctorId,
+              doctorName: processingInfo.doctorName,
+              consultationType: processingInfo.consultationType,
+            },
+          })
+        }
+      } else {
+        router.replace('/(patient)/(tabs)/appointments')
+      }
+    } finally {
+      setRecheckInFlight(false)
+    }
+  }
 
   async function cancelConsultationById(id: string) {
     try {
@@ -343,7 +523,7 @@ export default function PaymentReturnScreen() {
     // upcoming appointment rather than being auto-redirected.
     if (confirmedDetails?.timing === 'schedule') {
       const formattedWhen = confirmedDetails.scheduledAt
-        ? formatScheduledAt(confirmedDetails.scheduledAt)
+        ? formatFriendlyDateTime(confirmedDetails.scheduledAt)
         : null
       return (
         <SafeAreaView style={styles.safe}>
@@ -360,7 +540,7 @@ export default function PaymentReturnScreen() {
             <View style={styles.detailsCard}>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Doctor</Text>
-                <Text style={styles.detailValue}>{confirmedDetails?.doctorName ?? 'Doctor'}</Text>
+                <Text style={styles.detailValue}>{formatDoctorName(confirmedDetails?.doctorName)}</Text>
               </View>
               <View style={styles.detailDivider} />
               <View style={styles.detailRow}>
@@ -403,7 +583,7 @@ export default function PaymentReturnScreen() {
           <View style={styles.detailsCard}>
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>Doctor</Text>
-              <Text style={styles.detailValue}>{confirmedDetails?.doctorName ?? 'Doctor'}</Text>
+              <Text style={styles.detailValue}>{formatDoctorName(confirmedDetails?.doctorName)}</Text>
             </View>
             <View style={styles.detailDivider} />
             <View style={styles.detailRow}>
@@ -443,6 +623,15 @@ export default function PaymentReturnScreen() {
             Your payment was received but is still being confirmed.
             Check your appointments in a few minutes — your booking will appear once confirmed.
           </Text>
+          <Pressable
+            onPress={handleManualRecheck}
+            disabled={recheckInFlight}
+            style={[styles.continueButton, recheckInFlight && { opacity: 0.6 }]}
+          >
+            {recheckInFlight
+              ? <ActivityIndicator color={colors.mistWhite} />
+              : <Text style={styles.continueButtonText}>Check Now</Text>}
+          </Pressable>
         </View>
       </SafeAreaView>
     )

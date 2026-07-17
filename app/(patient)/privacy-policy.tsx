@@ -10,7 +10,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 
-const LAST_UPDATED = 'June 21, 2026'
+const LAST_UPDATED = 'July 17, 2026'
 
 interface PolicySection {
   title: string
@@ -25,7 +25,8 @@ const SECTIONS: PolicySection[] = [
 • Account Information: Your name, email address, phone number, and profile photo.
 • Health Information: Medical history, consultation notes, diagnoses, and uploaded health documents — provided voluntarily by you or your consulting doctor.
 • Device Information: Device identifiers, operating system version, and push notification tokens for app functionality.
-• Usage Data: Screens visited, features used, and session duration to improve the app experience.
+
+Dawa does not use third-party analytics or crash-reporting SDKs, so we do not track which screens you visit, which features you use, or how long you use the app.
 
 We do not collect payment card information directly. Payment processing is handled by certified third-party processors (when enabled).`,
   },

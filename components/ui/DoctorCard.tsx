@@ -9,6 +9,7 @@ import { shadow } from '@/lib/shadow'
 
 export type Doctor = {
   id: string
+  user_id?: string
   name: string
   subtitle?: string
   specialty: string
@@ -108,7 +109,7 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
         )}
         {doctor.is_online && <View style={G.onlineDot} />}
       </View>
-      <Text style={G.name} numberOfLines={2}>{doctor.name}</Text>
+      <Text style={G.name} numberOfLines={1}>{doctor.name}</Text>
       {doctor.subtitle ? (
         <Text style={G.subtitle} numberOfLines={1}>{doctor.subtitle}</Text>
       ) : null}
@@ -182,7 +183,11 @@ const L = StyleSheet.create({
 const G = StyleSheet.create({
   card: {
     backgroundColor: colors.mistWhite,
-    borderRadius: 16, padding: 14, width: 172, marginRight: 14,
+    // Widened from 172 — at that width a doctor's full name (e.g. "Dr.
+    // Alexander Abrahamson") routinely wrapped to a second line even at
+    // numberOfLines={1}'s minimum readable size. 208 comfortably fits a
+    // typical two-part name at this font size without shrinking it.
+    borderRadius: 16, padding: 14, width: 208, marginRight: 14,
     ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },

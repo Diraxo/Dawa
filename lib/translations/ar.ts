@@ -183,6 +183,7 @@ const ar: TranslationKeys = {
   emailAddress: 'عنوان البريد الإلكتروني',
   contactInformation: 'معلومات التواصل',
   selectGender: 'اختر الجنس',
+  selectCountry: 'اختر الدولة',
   address: 'العنوان',
   country: 'الدولة',
   saveChanges: 'حفظ التغييرات',
@@ -197,6 +198,8 @@ const ar: TranslationKeys = {
   cameraPermissionMsg: 'يلزم الوصول إلى الكاميرا لالتقاط صورة الملف الشخصي.',
   galleryPermissionMsg: 'يلزم الوصول إلى مكتبة الصور لاختيار صورة.',
   profileSaved: 'تم الحفظ',
+  change: 'تغيير',
+  emailUpdatedMsg: 'تم تحديث بريدك الإلكتروني.',
   profileSavedMsg: 'تم تحديث ملفك الشخصي.',
   profileSaveError: 'خطأ',
   profileSaveErrorMsg: 'فشل حفظ الملف الشخصي. يرجى المحاولة مرة أخرى.',
@@ -330,8 +333,6 @@ const ar: TranslationKeys = {
   noRecordsYet: 'لا توجد سجلات بعد',
   noRecordsDesc: 'ستظهر ملخصات استشاراتك والوصفات الطبية هنا بعد استشارتك الأولى.',
   uploadNewDocument: 'رفع مستند جديد',
-  comingSoon: 'قريباً',
-  featureComingSoonMsg: 'سيتوفر رفع المستندات في تحديث مستقبلي.',
   close: 'إغلاق',
 
   searchCountry: 'ابحث عن الدولة...',
@@ -366,7 +367,9 @@ const ar: TranslationKeys = {
   weeklyAvailability: 'التوفر الأسبوعي',
   availableHoursNote: 'متاح الاثنين–الجمعة، 9 ص – 5 م',
   patientReviews: 'تقييمات المرضى',
-  noReviewsYet: 'لا توجد تقييمات بعد',
+  noReviewsYet: 'لا توجد تقييمات بعد. كن أول مريض يقيم هذا الطبيب.',
+  showMoreReviews: 'عرض المزيد',
+  verifiedConsultation: 'استشارة موثقة',
   bookConsultation: 'احجز استشارة',
 
   chatConsultation: 'استشارة دردشة',
@@ -400,7 +403,7 @@ const ar: TranslationKeys = {
   downloadAsPDF: 'تنزيل كـ PDF',
   rateYourDoctor: 'قيّم طبيبك',
   howWasExperience: 'كيف كانت تجربتك مع',
-  leaveComment: 'اترك تعليقاً (اختياري)...',
+  leaveComment: 'اترك تعليقاً...',
   submitAndDone: 'إرسال وانتهاء',
   submitting: 'جارٍ الإرسال...',
   thankYou: 'شكراً لك!',
@@ -499,7 +502,6 @@ const ar: TranslationKeys = {
   notifyMeMsg: 'ستكون أول من يعرف عند إطلاق المدفوعات!',
 
   // Chat consultation screen
-  upcomingAppointment: 'موعد قادم',
   consultationHasntStarted: 'الاستشارة لم تبدأ بعد',
   appointmentBeginsIn: 'يبدأ موعدك في',
   chatUnlockNote: 'سيُفتح الدردشة فقط بمجرد بدء الطبيب للجلسة.',
@@ -537,7 +539,6 @@ const ar: TranslationKeys = {
   // Doctor chat screen
   connectingToConsultation: 'جارٍ الاتصال بالاستشارة...',
   activeSession: 'جلسة نشطة',
-  done: 'تم',
   consultationEndedChatReadOnly: 'انتهت الاستشارة · الدردشة للقراءة فقط',
   chatRequiresDevelopmentBuild: 'تتطلب الدردشة إصدار تطوير.',
   waitingForChannelConnection: 'في انتظار اتصال القناة...',

@@ -72,6 +72,21 @@ export async function pushOwnPhotoToStream(photoUrl: string | null): Promise<voi
   }
 }
 
+// Same rationale as pushOwnPhotoToStream, for `name` — Stream also only
+// learns a user's `name` at `connectUser()` time. Without this, renaming
+// your profile mid-session leaves Stream's own user object (and anything
+// that reads it: the other party's message-push copy, Stream's default
+// channel-member display) showing the old name until a full reconnect.
+// Best-effort: must never block a profile save.
+export async function pushOwnNameToStream(name: string): Promise<void> {
+  if (!streamClient.userID || !name) return
+  try {
+    await streamClient.partialUpdateUser({ id: streamClient.userID, set: { name } })
+  } catch {
+    // Non-fatal — the next full reconnect will pick up the fresh DB value anyway.
+  }
+}
+
 // Extracts image attachment URLs from a batch of Stream messages, deduped.
 export function getMessageImageUrls(messages: { attachments?: any[] }[]): string[] {
   const urls = new Set<string>()

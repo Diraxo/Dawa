@@ -21,7 +21,7 @@ import {
   Image,
 } from 'react-native'
 import * as Notifications from 'expo-notifications'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 import type { Channel } from 'stream-chat'
 
@@ -57,6 +57,7 @@ function UploadBridge({ uploadRef }: { uploadRef: React.MutableRefObject<((f: an
 }
 
 import { EndConsultationSheet, type ConsultationSummaryData } from '@/components/doctor/EndConsultationSheet'
+import { submitConsultationCompletion } from '@/lib/consultationCompletion'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { waitForModalDismiss } from '@/lib/imagePicker'
@@ -64,12 +65,17 @@ import { shadow } from '@/lib/shadow'
 import { streamClient, preloadImages, getMessageImageUrls } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
+import { isPdfAttachment } from '@/lib/pdfAttachment'
+import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
 import { logger } from '@/lib/logger'
 import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { useActiveChatStore } from '@/store/activeChatStore'
+import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -79,6 +85,18 @@ interface PatientProfile {
   gender: string | null
   country: string | null
   profile_photo_url: string | null
+  age: number | null
+}
+
+function calculateAge(dateOfBirth: string | null | undefined): number | null {
+  if (!dateOfBirth) return null
+  const birth = new Date(dateOfBirth)
+  if (Number.isNaN(birth.getTime())) return null
+  const now = new Date()
+  let age = now.getFullYear() - birth.getFullYear()
+  const monthDiff = now.getMonth() - birth.getMonth()
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birth.getDate())) age--
+  return age
 }
 
 // ─── Empty State ──────────────────────────────────────────────────────────────
@@ -110,6 +128,7 @@ export default function DoctorChatConsultationScreen() {
   const router = useRouter()
   const { t } = useTranslation()
   const { getToken, userId } = useAuth()
+  const insets = useSafeAreaInsets()
   const isStreamConnected = useAuthStore((s) => s.isStreamConnected)
   const [showEndSheet, setShowEndSheet] = useState(false)
   // `consultationStatus` is only a fast-path hint passed from the messages list
@@ -121,15 +140,24 @@ export default function DoctorChatConsultationScreen() {
   const [submitting, setSubmitting] = useState(false)
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null)
   const [channelLoading, setChannelLoading] = useState(false)
+  const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [peerTyping, setPeerTyping] = useState(false)
   const [peerOnline, setPeerOnline] = useState<boolean | null>(null)
   const [peerReadAt, setPeerReadAt] = useState<string | null>(null)
   const [patientInitialPhotoUrl, setPatientInitialPhotoUrl] = useState<string | null>(null)
+  const [patientInitialName, setPatientInitialName] = useState<string | null>(null)
+  // The Supabase `users.id` (UUID) for the patient — resolved from the
+  // consultation row, not trusted from the `patientId` route param, since
+  // most entry points (Messages tab, Consultations tab, push-notification
+  // deep link) never pass it, and even when they do it can be a Clerk ID
+  // rather than the UUID useUserProfileRealtime's realtime filter requires.
+  const [patientRowId, setPatientRowId] = useState<string | null>(null)
+  const patientClerkIdRef = useRef<string | null>(null)
   // Patient identity kept live via Realtime — a rename/photo change mid-chat
   // reflects here immediately instead of staying stuck on the fetched value.
   const { name: livePatientName, photoUrl: patientPhotoUrl } = useUserProfileRealtime(
-    patientId ?? null,
-    patientName ?? null,
+    patientRowId,
+    patientInitialName ?? patientName ?? null,
     patientInitialPhotoUrl
   )
 
@@ -172,7 +200,7 @@ export default function DoctorChatConsultationScreen() {
         const localPhotoUri = await localizeNotificationPhoto(patientPhotoUrl)
         Notifications.scheduleNotificationAsync({
           content: {
-            title: `Call with ${displayName}`,
+            title: `Chat with ${displayName}`,
             body: `Tap to return to your chat with ${displayName}`,
             sound: 'default',
             data: {
@@ -202,6 +230,17 @@ export default function DoctorChatConsultationScreen() {
     return () => setActiveChannelId(null)
   }, [effectiveChannelId, setActiveChannelId])
 
+  const setActiveConsultationId = useActiveConsultationScreenStore((s) => s.setActiveConsultationId)
+  // Tracked so usePushNotifications.ts's foreground handler can suppress a
+  // consultation push (e.g. "Tap to join") that arrives after this exact
+  // chat is already open — same purpose as activeChannelId above, scoped to
+  // consultation-status pushes instead of Stream messages.
+  useEffect(() => {
+    if (!effectiveChannelId) return
+    setActiveConsultationId(effectiveChannelId)
+    return () => setActiveConsultationId(null)
+  }, [effectiveChannelId, setActiveConsultationId])
+
   // Mark consultation in_progress when doctor enters the chat room
   useEffect(() => {
     if (!consultationId) return
@@ -216,42 +255,25 @@ export default function DoctorChatConsultationScreen() {
     })
   }, [consultationId])
 
-  // Verify the consultation is still active — the `consultationStatus` route
-  // param above is only a fast-path hint (may be stale or absent, e.g. via a
-  // deep link), so fetch the authoritative status here and subscribe to
-  // changes so `ended` flips to true live if it's completed elsewhere.
-  useEffect(() => {
-    if (!consultationId) return
-    let mounted = true
-
-    const applyStatus = (status: string | undefined) => {
-      if (!mounted || !status) return
-      if (['completed', 'declined', 'cancelled'].includes(status)) {
-        setEnded(true)
-      }
-    }
-
-    supabase
-      .from('consultations')
-      .select('status')
-      .eq('id', consultationId)
-      .single()
-      .then(({ data }) => applyStatus((data as any)?.status))
-
-    const sub = supabase
-      .channel(`doctor-chat-end-${consultationId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },
-        (payload) => applyStatus((payload.new as { status: string }).status)
-      )
-      .subscribe()
-
-    return () => {
-      mounted = false
-      supabase.removeChannel(sub)
-    }
-  }, [consultationId])
+  // Single source of truth for reaching a terminal status — detection lives
+  // in useConsultationState (mount fetch + realtime + poll), and
+  // useConsultationCompletion owns the one-shot reaction. Doctor gets no
+  // modal here (that's a deliberate, preserved asymmetry vs. the patient
+  // side); `ended` still drives this screen's own read-only banner exactly
+  // as before.
+  const completionStatus = useConsultationState({
+    consultationId: effectiveChannelId,
+    role: 'doctor',
+    localAgoraReconnecting: false,
+  })
+  const completion = useConsultationCompletion({
+    phase: completionStatus.phase,
+    rawStatus: completionStatus.rawStatus,
+    role: 'doctor',
+    kind: 'chat',
+    consultationId: effectiveChannelId,
+    onTeardown: () => setEnded(true),
+  })
 
   // Watch the Stream channel so messages load
   useEffect(() => {
@@ -271,11 +293,11 @@ export default function DoctorChatConsultationScreen() {
         // relying solely on membership set up elsewhere at accept-time.
         const { data } = await supabase
           .from('consultations')
-          .select('patient:users!patient_id(clerk_id, profile_photo_url)')
+          .select('patient:users!patient_id(clerk_id)')
           .eq('id', effectiveChannelId)
           .single()
         const patientClerkId = (data as any)?.patient?.clerk_id as string | undefined
-        setPatientInitialPhotoUrl((data as any)?.patient?.profile_photo_url ?? null)
+        patientClerkIdRef.current = patientClerkId ?? null
         const members = userId && patientClerkId ? [userId, patientClerkId] : undefined
         const ch = streamClient.channel('messaging', effectiveChannelId, members ? { members } : undefined)
         currentChannel = ch
@@ -359,32 +381,92 @@ export default function DoctorChatConsultationScreen() {
     }
   }, [activeChannel, userId])
 
-  // ── Presence + read receipts ──────────────────────────────────────────────
-  // Mirrors the website's ConsultationChatThread: presence dot in the header
-  // (was previously a static "Active Session" label with no live patient
-  // presence at all) and a "Seen" indicator once the patient has read past
-  // the doctor's last sent message.
+  // ── Read receipts ─────────────────────────────────────────────────────────
+  // Mirrors the website's ConsultationChatThread: a "Seen" indicator once the
+  // patient has read past the doctor's last sent message.
   useEffect(() => {
-    if (!activeChannel || !userId) { setPeerOnline(null); setPeerReadAt(null); return }
+    if (!activeChannel || !userId) { setPeerReadAt(null); return }
     const isPeer = (id?: string) => !!id && id !== userId
 
     const members = Object.values(activeChannel.state.members ?? {}) as any[]
     const peerMember = members.find((m) => isPeer(m.user?.id))
-    setPeerOnline(peerMember?.user?.online ?? null)
 
     const readState = (activeChannel.state as any).read as Record<string, { last_read?: Date }> | undefined
     const peerRead = peerMember?.user?.id ? readState?.[peerMember.user.id] : undefined
     setPeerReadAt(peerRead?.last_read ? new Date(peerRead.last_read).toISOString() : null)
 
-    const onPresence = (event: any) => { if (isPeer(event.user?.id)) setPeerOnline(!!event.user?.online) }
     const onRead = (event: any) => { if (isPeer(event.user?.id)) setPeerReadAt(event.created_at ?? new Date().toISOString()) }
-
-    const subs = [
-      activeChannel.on('user.presence.changed', onPresence),
-      activeChannel.on('message.read', onRead),
-    ]
-    return () => subs.forEach(s => s.unsubscribe())
+    const sub = activeChannel.on('message.read', onRead)
+    return () => sub.unsubscribe()
   }, [activeChannel, userId])
+
+  // ── Presence ──────────────────────────────────────────────────────────────
+  // `user.presence.changed` events carry no channel reference, so they are
+  // never routed through a Channel instance's own `.on()` — only the client
+  // itself receives them. Patient Mobile and the shared web chat component
+  // both already listen at the client level (streamClient.on(...)); doctor
+  // mobile was the one surface still listening on activeChannel.on(...),
+  // which meant the header froze on its initial member snapshot and never
+  // saw the patient's actual online/offline flips.
+  useEffect(() => {
+    if (!activeChannel || !userId) { setPeerOnline(null); return }
+    const isPeer = (id?: string) => !!id && id !== userId
+    const members = Object.values(activeChannel.state.members ?? {}) as any[]
+    const peerMember = members.find((m) => isPeer(m.user?.id))
+    setPeerOnline(peerMember?.user?.online ?? null)
+  }, [activeChannel, userId])
+
+  useEffect(() => {
+    const sub = streamClient.on('user.presence.changed', (event: any) => {
+      if (event.user?.id && event.user.id === patientClerkIdRef.current) {
+        setPeerOnline(!!event.user.online)
+      }
+    })
+    return () => sub.unsubscribe()
+  }, [])
+
+  // ── Patient profile (name, photo, gender, age, country) ───────────────────
+  // Fetched once, independent of the Stream channel connection, so the
+  // header/View-Profile modal show real patient data even if Stream is slow
+  // — and reused for both, so there is only ever one query for this data.
+  useEffect(() => {
+    if (!effectiveChannelId) return
+    let cancelled = false
+    setProfileLoading(true)
+    ;(async () => {
+      try {
+        const { data } = await supabase
+          .from('consultations')
+          .select('patient:users!patient_id(id, full_name, country, profile_photo_url, patient_profiles(gender, date_of_birth))')
+          .eq('id', effectiveChannelId)
+          .single()
+        if (cancelled) return
+        const patient = (data as any)?.patient
+        if (!patient) return
+        const patientDetail = Array.isArray(patient.patient_profiles)
+          ? patient.patient_profiles[0]
+          : patient.patient_profiles
+        setPatientRowId(patient.id ?? null)
+        setPatientInitialName(patient.full_name ?? null)
+        setPatientInitialPhotoUrl(patient.profile_photo_url ?? null)
+        setPatientProfile({
+          full_name: patient.full_name ?? patientName ?? 'Patient',
+          gender: patientDetail?.gender ?? null,
+          country: patient.country ?? null,
+          profile_photo_url: patient.profile_photo_url ?? null,
+          age: calculateAge(patientDetail?.date_of_birth),
+        })
+      } catch (err) {
+        logger.error('[DoctorChat] fetch patient profile failed:', err)
+      } finally {
+        if (!cancelled) setProfileLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  // patientName is only a route-param fallback used while this fetch is in
+  // flight — refetching if it changes identity would be wasted work.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveChannelId])
 
   const lastOwnMessage = [...((activeChannel?.state.messages as any[]) ?? [])]
     .reverse()
@@ -394,37 +476,9 @@ export default function DoctorChatConsultationScreen() {
     new Date(peerReadAt).getTime() >= new Date(lastOwnMessage.created_at).getTime()
   )
 
-  const handleAvatarPress = async () => {
-    if (!patientProfile && effectiveChannelId) {
-      setProfileLoading(true)
-      try {
-        // Join through the consultation row instead of querying `users` by
-        // `patientId` directly — most navigation entry points into this
-        // screen (Messages tab, Consultations tab, push-notification deep
-        // link) never actually pass patientId, and even when they do it can
-        // be a Clerk ID rather than the Supabase UUID `users.id` expects.
-        // Going through the consultation row needs only the id we already
-        // have, so it works from every entry point.
-        const { data } = await supabase
-          .from('consultations')
-          .select('patient:users!patient_id(full_name, gender, country, profile_photo_url)')
-          .eq('id', effectiveChannelId)
-          .single()
-        const patient = (data as any)?.patient
-        if (patient) {
-          setPatientProfile({
-            full_name: patient.full_name ?? displayName,
-            gender: patient.gender ?? null,
-            country: patient.country ?? null,
-            profile_photo_url: patient.profile_photo_url ?? null,
-          })
-        }
-      } catch (err) {
-        logger.error('[DoctorChat] fetch patient profile failed:', err)
-      } finally {
-        setProfileLoading(false)
-      }
-    }
+  const handleAvatarPress = () => {
+    // Patient profile is prefetched by the dedicated effect above — View
+    // Profile just opens the sheet with whatever has (or hasn't) loaded.
     setShowProfile(true)
     setShowMoreMenu(false)
   }
@@ -436,8 +490,8 @@ export default function DoctorChatConsultationScreen() {
     } else if (action === 'search') {
       setSearchActive(true)
     } else if (action === 'history') {
-      if (patientId) {
-        router.push({ pathname: '/(doctor)/patient-history' as any, params: { patientId, patientName: displayName } })
+      if (patientRowId) {
+        router.push({ pathname: '/(doctor)/patient-history' as any, params: { patientId: patientRowId, patientName: displayName } })
       } else if (effectiveChannelId) {
         // Same reachability gap as handleAvatarPress above — most entry
         // points into this screen never pass patientId (or pass a Clerk ID,
@@ -489,6 +543,21 @@ export default function DoctorChatConsultationScreen() {
       setReportReason('')
       setReportDetail('')
     }, 1800)
+  }
+
+  // Intercepts Stream Chat's message-press handling so PDF attachments open
+  // in the in-app viewer instead of the default Linking.openURL, which kicks
+  // the user out to Chrome. Every other press type (images, links, replies)
+  // falls through to Stream's own defaultHandler untouched.
+  const handleMessagePress = (payload: any) => {
+    if (payload?.emitter === 'fileAttachment') {
+      const attachment = payload.additionalInfo?.attachment
+      if (isPdfAttachment(attachment) && attachment?.asset_url) {
+        setPdfViewer({ url: attachment.asset_url, title: attachment.title || 'Document.pdf', size: attachment.file_size })
+        return
+      }
+    }
+    payload?.defaultHandler?.()
   }
 
   const pickPhoto = async () => {
@@ -546,39 +615,17 @@ export default function DoctorChatConsultationScreen() {
           .select('started_at')
           .eq('id', consultationId)
           .single()
-        const endedAt = new Date().toISOString()
         const durationMinutes = consult?.started_at
-          ? Math.max(1, Math.ceil((new Date(endedAt).getTime() - new Date(consult.started_at).getTime()) / 60000))
+          ? Math.max(1, Math.ceil((Date.now() - new Date(consult.started_at).getTime()) / 60000))
           : null
 
-        const { error: summaryError } = await client.from('consultation_summaries').upsert({
-          consultation_id: consultationId,
-          chief_complaint: data.chiefComplaint,
-          diagnosis: data.diagnosis,
-          prescription: data.prescriptions.length > 0 ? JSON.stringify(data.prescriptions) : null,
-          followup_recommendation: data.followUp || null,
-          referral_needed: data.referralNeeded,
-          referral_specialty: data.referralNeeded && data.referralSpecialty?.trim() ? data.referralSpecialty.trim() : null,
-        }, { onConflict: 'consultation_id' })
-        if (summaryError) {
-          logger.error('[DoctorChat] failed to save summary:', summaryError)
+        const result = await submitConsultationCompletion({ client, consultationId, data, durationMinutes })
+        if (!result.ok) {
+          logger.error('[DoctorChat] completion failed at stage:', result.failedAt)
           setSubmitting(false)
           Alert.alert(t('profileSaveError'), t('somethingWentWrong'))
           return
         }
-        const { error: statusError } = await client
-          .from('consultations')
-          .update({ status: 'completed', ended_at: endedAt, duration_minutes: durationMinutes })
-          .eq('id', consultationId)
-        if (statusError) {
-          logger.error('[DoctorChat] failed to mark consultation completed:', statusError)
-          setSubmitting(false)
-          Alert.alert(t('profileSaveError'), t('somethingWentWrong'))
-          return
-        }
-        // Stream channel locking is now handled server-side by a DB trigger
-        // (on_consultation_change → freeze-consultation-channel Edge Function)
-        // the instant status flips to 'completed' above — no client call needed.
       }
     } catch (err) {
       logger.error('[DoctorChat] failed to save summary:', err)
@@ -588,6 +635,7 @@ export default function DoctorChatConsultationScreen() {
     }
     setSubmitting(false)
     setShowEndSheet(false)
+    completion.markHandled()
     setEnded(true)
     Alert.alert(
       'Consultation Completed',
@@ -620,7 +668,7 @@ export default function DoctorChatConsultationScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       {/* ── Search Overlay Modal ── */}
       <Modal visible={searchActive} animationType="slide" onRequestClose={() => { setSearchActive(false); setSearchQuery('') }}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.mistWhite }}>
@@ -701,7 +749,7 @@ export default function DoctorChatConsultationScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
         <Pressable style={styles.reportOverlay} onPress={() => !reportSubmitted && setShowReportModal(false)}>
-          <Pressable style={styles.reportSheet} onPress={() => {}}>
+          <Pressable style={[styles.reportSheet, { paddingBottom: Math.max(40, insets.bottom + 16) }]} onPress={() => {}}>
             <View style={styles.modalHandle} />
             {reportSubmitted ? (
               <View style={styles.reportSuccessWrap}>
@@ -778,7 +826,7 @@ export default function DoctorChatConsultationScreen() {
       >
         <View style={styles.modalOverlay}>
           <Pressable style={styles.modalBackdrop} onPress={() => setShowProfile(false)} />
-          <View style={styles.profileSheet}>
+          <View style={[styles.profileSheet, { paddingBottom: Math.max(40, insets.bottom + 16) }]}>
             <View style={styles.modalHandle} />
             <View style={styles.profileHeader}>
               <Text style={styles.profileLabel}>Patient Profile</Text>
@@ -807,6 +855,12 @@ export default function DoctorChatConsultationScreen() {
                   <View style={styles.profileRow}>
                     <Ionicons name="person-outline" size={16} color={colors.tealGreen} />
                     <Text style={styles.profileRowText}>{patientProfile.gender}</Text>
+                  </View>
+                ) : null}
+                {patientProfile?.age != null ? (
+                  <View style={styles.profileRow}>
+                    <Ionicons name="calendar-outline" size={16} color={colors.tealGreen} />
+                    <Text style={styles.profileRowText}>{patientProfile.age} years old</Text>
                   </View>
                 ) : null}
                 {patientProfile?.country ? (
@@ -865,7 +919,7 @@ export default function DoctorChatConsultationScreen() {
       {/* ── Attachment Menu Modal ── */}
       <Modal visible={showAttachMenu} transparent animationType="slide" onRequestClose={() => setShowAttachMenu(false)}>
         <Pressable style={styles.attachMenuOverlay} onPress={() => setShowAttachMenu(false)}>
-          <Pressable style={styles.attachMenuSheet} onPress={() => {}}>
+          <Pressable style={[styles.attachMenuSheet, { paddingBottom: Math.max(36, insets.bottom + 16) }]} onPress={() => {}}>
             <View style={styles.modalHandle} />
             <Text style={styles.attachMenuTitle}>Add Attachment</Text>
             <Pressable style={styles.attachMenuItem} onPress={pickPhoto}>
@@ -984,6 +1038,7 @@ export default function DoctorChatConsultationScreen() {
                 handleAttachButtonPress={() => setShowAttachMenu(true)}
                 audioRecordingEnabled={false}
                 messageActions={(params: any) => restrictedMessageActions(params, () => setShowReportModal(true))}
+                onPressMessage={handleMessagePress}
               >
                 <UploadBridge uploadRef={uploadFileRef} />
                 <MessageList
@@ -1027,6 +1082,14 @@ export default function DoctorChatConsultationScreen() {
           </View>
         </KeyboardAvoidingView>
       )}
+
+      <PdfViewerModal
+        visible={!!pdfViewer}
+        url={pdfViewer?.url ?? null}
+        title={pdfViewer?.title}
+        fileSize={pdfViewer?.size}
+        onClose={() => setPdfViewer(null)}
+      />
     </SafeAreaView>
   )
 }

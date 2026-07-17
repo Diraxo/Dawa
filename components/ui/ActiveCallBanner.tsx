@@ -2,17 +2,14 @@ import { useAuth } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { useRouter, useSegments } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
-import { Animated, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Animated, Image, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
-
-function formatTime(s: number) {
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-}
+import { formatCallDuration } from '@/lib/callDuration'
 
 const CONSULTATION_SEGMENTS = [
   'phone-consultation',
@@ -38,14 +35,21 @@ export default function ActiveCallBanner() {
     CONSULTATION_SEGMENTS.some(c => seg.includes(c))
   )
 
-  // Sync display seconds when active consultation changes (e.g. on mount)
+  // Resync the local display counter from the store's elapsedSeconds — which
+  // is itself only ever written from real DB state (the call screen's own
+  // useConsultationState timer while mounted, or app/_layout.tsx's recovery
+  // effects computing from started_at) — every time it changes. This local
+  // counter only exists to tick smoothly between those authoritative writes;
+  // depending on elapsedSeconds (not just consultationId) means a resync on
+  // app foreground/background, not a value left stale from before the app
+  // was backgrounded or before the user briefly left the call screen.
   useEffect(() => {
     if (active) setDisplaySeconds(active.elapsedSeconds)
-  }, [active?.consultationId])
+  }, [active?.consultationId, active?.elapsedSeconds])
 
   // Keep counting while call is active (but not reconnecting — time is paused)
   useEffect(() => {
-    if (!active || !isSignedIn || isOnConsultation || active.status === 'reconnecting') return
+    if (!active || !isSignedIn || isOnConsultation || active.status !== 'active') return
     const t = setInterval(() => setDisplaySeconds(s => s + 1), 1000)
     return () => clearInterval(t)
   }, [active?.consultationId, active?.status, isOnConsultation, isSignedIn])
@@ -111,13 +115,16 @@ export default function ActiveCallBanner() {
         <View style={[styles.liveDot, active.status === 'reconnecting' && styles.liveDotWarning]} />
       </View>
 
-      {/* Type icon */}
-      <Ionicons
-        name={typeIcon as any}
-        size={15}
-        color={active.status === 'reconnecting' ? '#FDE68A' : colors.tealGreen}
-        style={{ marginRight: 8 }}
-      />
+      {/* Other person's photo — falls back to the type icon in a circle when
+          no photo is on file, never a blank/broken image or a "profile
+          unavailable" placeholder. */}
+      {active.otherPersonPhotoUrl ? (
+        <Image source={{ uri: active.otherPersonPhotoUrl }} style={styles.avatar} />
+      ) : (
+        <View style={styles.avatarFallback}>
+          <Ionicons name={typeIcon as any} size={13} color={colors.tealGreen} />
+        </View>
+      )}
 
       {/* Name + type */}
       <View style={styles.textBlock}>
@@ -125,14 +132,19 @@ export default function ActiveCallBanner() {
           {active.role === 'patient' ? formatDoctorName(active.otherPersonName) : active.otherPersonName}
         </Text>
         <Text style={[styles.sub, active.status === 'reconnecting' && styles.subWarning]}>
-          {active.status === 'reconnecting' ? 'Reconnecting…' : typeLabel}
+          {active.status === 'reconnecting' ? 'Reconnecting…' : active.status === 'connecting' ? 'Connecting…' : typeLabel}
         </Text>
       </View>
 
-      {/* Timer */}
-      <Text style={[styles.timer, active.status === 'reconnecting' && styles.timerWarning]}>
-        {formatTime(displaySeconds)}
-      </Text>
+      {/* Timer — only meaningful once both participants have actually
+          joined; while still connecting there is no elapsed call time to
+          show yet (status is set from the same DB-derived phase the call
+          screen itself uses, not local Agora state). */}
+      {active.status !== 'connecting' && (
+        <Text style={[styles.timer, active.status === 'reconnecting' && styles.timerWarning]}>
+          {formatCallDuration(displaySeconds)}
+        </Text>
+      )}
 
       {/* Tap to resume */}
       <View style={styles.resumeChip}>
@@ -187,6 +199,22 @@ const styles = StyleSheet.create({
   },
   liveDotWarning: {
     backgroundColor: '#FBBF24',
+  },
+  avatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginRight: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  avatarFallback: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginRight: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,191,165,0.12)',
   },
   textBlock: {
     flex: 1,

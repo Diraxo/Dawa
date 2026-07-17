@@ -20,7 +20,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
+import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
 
@@ -92,6 +92,9 @@ export default function DoctorProfileScreen() {
   const { photoUrl: profilePhotoUrl } = useOwnProfilePhoto()
   const [showLogoutAlert, setShowLogoutAlert] = useState(false)
   const [showComingSoonAlert, setShowComingSoonAlert] = useState(false)
+  const [showDeleteAlert, setShowDeleteAlert] = useState(false)
+  const [showDeleteConfirmAlert, setShowDeleteConfirmAlert] = useState(false)
+  const [showDeleteErrorAlert, setShowDeleteErrorAlert] = useState(false)
 
   useFocusEffect(
     useCallback(() => {
@@ -103,6 +106,12 @@ export default function DoctorProfileScreen() {
         const now = new Date()
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
+        // doctor_profiles SELECT RLS returns own row + every approved doctor's
+        // row (for patient browsing), so this must be filtered to the caller's
+        // own row or .single() throws once any other approved doctor exists.
+        const { data: me } = await client.from('users').select('id').eq('clerk_id', userId).single()
+        if (!me) return
+
         const [profileRes, totalRes, monthRes] = await Promise.all([
           client
             .from('doctor_profiles')
@@ -111,6 +120,7 @@ export default function DoctorProfileScreen() {
               license_number, years_experience, bio,
               chat_price, phone_price, video_price
             `)
+            .eq('user_id', (me as any).id)
             .single(),
           client.from('consultations').select('doctor_amount').eq('status', 'completed'),
           client.from('consultations').select('doctor_amount').eq('status', 'completed').gte('ended_at', monthStart.toISOString()),
@@ -141,6 +151,42 @@ export default function DoctorProfileScreen() {
   )
 
   const showComingSoon = () => setShowComingSoonAlert(true)
+
+  const handleDeleteAccount = () => setShowDeleteAlert(true)
+
+  const confirmDelete = () => {
+    setShowDeleteAlert(false)
+    setShowDeleteConfirmAlert(true)
+  }
+
+  const permanentlyDelete = async () => {
+    setShowDeleteConfirmAlert(false)
+    try {
+      // Best-effort document/photo cleanup — must never block account deletion.
+      const token = await getToken().catch(() => null)
+      if (token && user?.id) {
+        const client = getAuthClient(token)
+        const [{ data: docs }, { data: photos }] = await Promise.all([
+          client.storage.from('doctor-documents').list(user.id).catch(() => ({ data: null }) as never),
+          client.storage.from('profile-photos').list(user.id).catch(() => ({ data: null }) as never),
+        ])
+        if (docs?.length) {
+          await client.storage.from('doctor-documents').remove(docs.map((f) => `${user.id}/${f.name}`)).catch(() => {})
+        }
+        if (photos?.length) {
+          await client.storage.from('profile-photos').remove(photos.map((f) => `${user.id}/${f.name}`)).catch(() => {})
+        }
+      }
+      await supabase.from('users').delete().eq('clerk_id', user?.id)
+      await user?.delete()
+      await disconnectStream()
+      clearAuth()
+      await signOut()
+      router.replace('/(auth)/sign-in')
+    } catch {
+      setShowDeleteErrorAlert(true)
+    }
+  }
 
   const displayPhoto = profilePhotoUrl ?? user?.imageUrl ?? null
   const hasPricing = profile.chatPrice > 0 || profile.phonePrice > 0 || profile.videoPrice > 0
@@ -186,6 +232,38 @@ export default function DoctorProfileScreen() {
           { text: 'Got it', style: 'primary', onPress: () => setShowComingSoonAlert(false) },
         ]}
         onClose={() => setShowComingSoonAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteAlert}
+        variant="error"
+        title="Delete Account"
+        message="This will permanently delete your account, license/ID documents, consultation history, and earnings data. This cannot be undone."
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteAlert(false) },
+          { text: 'Delete', style: 'danger', onPress: confirmDelete },
+        ]}
+        onClose={() => setShowDeleteAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteConfirmAlert}
+        variant="error"
+        title="Final Confirmation"
+        message="All your documents, consultations, and account data will be permanently removed. Are you absolutely sure?"
+        buttons={[
+          { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteConfirmAlert(false) },
+          { text: 'Permanently Delete', style: 'danger', onPress: permanentlyDelete },
+        ]}
+        onClose={() => setShowDeleteConfirmAlert(false)}
+      />
+      <CareHubAlert
+        visible={showDeleteErrorAlert}
+        variant="error"
+        title="Unable to Delete"
+        message="We couldn't delete your account. Please contact support at support@dawa.app"
+        buttons={[
+          { text: 'OK', style: 'primary', onPress: () => setShowDeleteErrorAlert(false) },
+        ]}
+        onClose={() => setShowDeleteErrorAlert(false)}
       />
       <SafeAreaView style={styles.safe} edges={['top']}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
@@ -349,6 +427,8 @@ export default function DoctorProfileScreen() {
             <MenuRow icon="person-outline" label={t('editProfile')} subtitle="Name, bio, photo, hospital" onPress={() => router.push('/(doctor)/edit-profile' as never)} />
             <View style={styles.menuDivider} />
             <MenuRow icon="medical-outline" label={t('mySpecialties')} subtitle="Specialty, experience, license" onPress={() => router.push('/(doctor)/my-specialties' as never)} />
+            <View style={styles.menuDivider} />
+            <MenuRow icon="trash-outline" label="Delete Account" subtitle="Permanently remove your account and data" onPress={handleDeleteAccount} danger />
           </View>
 
           {/* ── Work Section ── */}

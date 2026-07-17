@@ -61,7 +61,7 @@ export default function SignInScreen() {
   const [globalError, setGlobalError] = useState('')
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
-  const [facebookLoading, setFacebookLoading] = useState(false)
+  const [appleLoading, setAppleLoading] = useState(false)
 
   const isFormReady = isValidEmail(email) && password.length > 0
 
@@ -144,13 +144,9 @@ export default function SignInScreen() {
       })
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive!({ session: result.createdSessionId })
-        const clerkId = result.createdUserId
-        if (clerkId) {
-          await checkRoleAndRedirect(clerkId)
-        }
-        // If clerkId is null, the useEffect handles redirect once isSignedIn/userId update
+        // The useEffect above handles redirect once isSignedIn/userId update from Clerk.
       } else {
-        setGlobalError('Sign-in could not be completed. Please try again or use Google/Facebook sign-in.')
+        setGlobalError('Sign-in could not be completed. Please try again or use Google sign-in.')
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
@@ -215,23 +211,23 @@ export default function SignInScreen() {
     }
   }, [googleLoading, startSSOFlow, signIn, router, userId, checkRoleAndRedirect])
 
-  // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
-  const handleFacebook = useCallback(async () => {
-    if (facebookLoading) return
-    setFacebookLoading(true)
+  // ── Apple SSO (Clerk) ─────────────────────────────────────────────────────
+  const handleApple = useCallback(async () => {
+    if (appleLoading) return
+    setAppleLoading(true)
     setGlobalError('')
     intendingSignInRef.current = true
     try {
       if (Platform.OS === 'web') {
         if (!signIn) return
         const redirectUrl = window.location.origin + '/oauth-native-callback'
-        await signIn.create({ strategy: 'oauth_facebook', redirectUrl })
+        await signIn.create({ strategy: 'oauth_apple', redirectUrl })
         const authUrl = signIn.firstFactorVerification.externalVerificationRedirectURL
         if (authUrl) { window.location.href = authUrl.toString(); return }
-        setGlobalError('Facebook sign-in failed. Please try again.')
+        setGlobalError('Apple sign-in failed. Please try again.')
       } else {
         const redirectUrl = Linking.createURL('/oauth-native-callback')
-        const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
+        const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_apple', redirectUrl })
         if (createdSessionId && ssoSetActive) {
           await ssoSetActive({ session: createdSessionId })
         } else {
@@ -239,22 +235,22 @@ export default function SignInScreen() {
         }
       }
     } catch (err: any) {
-      console.error('[Facebook SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
+      console.error('[Apple SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
         if (userId) checkRoleAndRedirect(userId)
         else setGlobalError('Session error. Please try again.')
       } else if (code !== 'oauth_access_denied') {
         intendingSignInRef.current = false
-        const msg = err?.errors?.[0]?.message ?? err?.message ?? 'Facebook sign-in failed. Please try again.'
+        const msg = err?.errors?.[0]?.message ?? err?.message ?? 'Apple sign-in failed. Please try again.'
         setGlobalError(msg)
       } else {
         intendingSignInRef.current = false
       }
     } finally {
-      setFacebookLoading(false)
+      setAppleLoading(false)
     }
-  }, [facebookLoading, signIn, startSSOFlow, router, userId, checkRoleAndRedirect])
+  }, [appleLoading, signIn, startSSOFlow, router, userId, checkRoleAndRedirect])
 
   return (
     <KeyboardAvoidingView
@@ -417,30 +413,32 @@ export default function SignInScreen() {
           <View style={styles.orLine} />
         </View>
 
+        {/* ── APPLE (iOS only, per App Store Guideline 4.8) ── */}
+        {Platform.OS === 'ios' && (
+          <Pressable
+            onPress={handleApple}
+            disabled={appleLoading}
+            style={[styles.socialBtn, styles.appleBtn, appleLoading && styles.dimmed]}
+          >
+            {appleLoading
+              ? <ActivityIndicator size="small" color="#FFFFFF" />
+              : <Ionicons name="logo-apple" size={20} color="#FFFFFF" />
+            }
+            <Text style={[styles.socialBtnText, styles.appleBtnText]}>Continue with Apple</Text>
+          </Pressable>
+        )}
+
         {/* ── GOOGLE ── */}
         <Pressable
           onPress={handleGoogle}
           disabled={googleLoading}
-          style={[styles.socialBtn, googleLoading && styles.dimmed]}
+          style={[styles.socialBtn, Platform.OS === 'ios' && styles.socialBtnMarginTop, googleLoading && styles.dimmed]}
         >
           {googleLoading
             ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/Google.svg')} style={styles.socialIcon} contentFit="contain" />
           }
           <Text style={styles.socialBtnText}>{t('continueWithGoogle')}</Text>
-        </Pressable>
-
-        {/* ── FACEBOOK ── */}
-        <Pressable
-          onPress={handleFacebook}
-          disabled={facebookLoading}
-          style={[styles.socialBtn, styles.socialBtnMarginTop, facebookLoading && styles.dimmed]}
-        >
-          {facebookLoading
-            ? <ActivityIndicator size="small" color={colors.inkBlack} />
-            : <Image source={require('@/assets/fb.svg.png')} style={styles.socialIcon} contentFit="contain" />
-          }
-          <Text style={styles.socialBtnText}>{t('continueWithFacebook')}</Text>
         </Pressable>
 
         {/* ── SIGN UP LINK ── */}
@@ -514,6 +512,8 @@ const styles = StyleSheet.create({
   socialBtnMarginTop: { marginTop: 12 },
   socialBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   socialIcon: { width: 24, height: 24 },
+  appleBtn: { backgroundColor: '#000000', borderColor: '#000000' },
+  appleBtnText: { color: '#FFFFFF' },
 
   signUpRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 28, paddingBottom: 8 },
   signUpText: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' },

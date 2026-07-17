@@ -1,6 +1,8 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import * as FileSystem from 'expo-file-system'
+// See app/(patient)/consultation-summary.tsx — this SDK moved
+// writeAsStringAsync/EncodingType/documentDirectory behind /legacy.
+import * as FileSystem from 'expo-file-system/legacy'
 import * as Sharing from 'expo-sharing'
 import { useRouter } from 'expo-router'
 import { useState } from 'react'
@@ -17,6 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
 
@@ -71,7 +74,7 @@ export default function DataExportScreen() {
           const sum = r.consultation_summaries?.[0]
           return [
             r.id, r.type, r.status,
-            r.doctor?.user?.full_name ?? '',
+            r.doctor?.user?.full_name ? formatDoctorName(r.doctor.user.full_name) : '',
             r.doctor?.specialty ?? '',
             r.created_at ? new Date(r.created_at).toLocaleDateString() : '',
             r.duration_minutes ?? '',

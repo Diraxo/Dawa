@@ -26,13 +26,15 @@ const LANGUAGES = [
   'Turkish', 'Hindi', 'Urdu',
 ]
 
+import { ChangeEmailModal } from '@/components/ui/ChangeEmailModal'
 import { colors } from '@/constants/colors'
+import { COUNTRIES, getFlag } from '@/constants/countries'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
-import { pushOwnPhotoToStream } from '@/lib/stream'
+import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
 function FormField({
@@ -42,30 +44,47 @@ function FormField({
   placeholder,
   multiline,
   keyboardType,
+  onPress,
+  suffix,
 }: {
   label: string
   value: string
-  onChangeText: (t: string) => void
+  onChangeText?: (t: string) => void
   placeholder?: string
   multiline?: boolean
   keyboardType?: React.ComponentProps<typeof TextInput>['keyboardType']
+  onPress?: () => void
+  suffix?: React.ReactNode
 }) {
-  return (
+  const content = (
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
-        style={[styles.input, multiline && styles.inputMultiline]}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor="#9CA3AF"
-        multiline={multiline}
-        numberOfLines={multiline ? 4 : 1}
-        keyboardType={keyboardType}
-        textAlignVertical={multiline ? 'top' : 'center'}
-      />
+      <View style={[styles.input, styles.inputRow, multiline && styles.inputMultiline]}>
+        <TextInput
+          style={[styles.inputText, { pointerEvents: onPress ? 'none' : 'auto' }]}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={placeholder}
+          placeholderTextColor="#9CA3AF"
+          editable={!onPress}
+          multiline={multiline}
+          numberOfLines={multiline ? 4 : 1}
+          keyboardType={keyboardType}
+          textAlignVertical={multiline ? 'top' : 'center'}
+        />
+        {suffix}
+      </View>
     </View>
   )
+
+  if (onPress) {
+    return (
+      <Pressable style={({ pressed }) => pressed && { opacity: 0.8 }} onPress={onPress}>
+        {content}
+      </Pressable>
+    )
+  }
+  return content
 }
 
 function PhotoPickerModal({
@@ -136,6 +155,8 @@ export default function EditDoctorProfileScreen() {
   const [firstName, setFirstName] = useState(user?.firstName ?? '')
   const [lastName, setLastName] = useState(user?.lastName ?? '')
   const [phone, setPhone] = useState('')
+  const [country, setCountry] = useState('')
+  const [showChangeEmail, setShowChangeEmail] = useState(false)
   const [bio, setBio] = useState('')
   const [hospitalName, setHospitalName] = useState('')
   const [languages, setLanguages] = useState<string[]>([])
@@ -144,29 +165,56 @@ export default function EditDoctorProfileScreen() {
   const [showPhotoPicker, setShowPhotoPicker] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  // Snapshots of last-saved values so handleSave can tell exactly which
+  // concern (name, photo, professional details) actually changed and only
+  // touch that concern — an edit to one field must never run, or surface
+  // errors for, an unrelated field.
+  const [initialFirstName, setInitialFirstName] = useState(user?.firstName ?? '')
+  const [initialLastName, setInitialLastName] = useState(user?.lastName ?? '')
+  const [initialPhone, setInitialPhone] = useState('')
+  const [initialCountry, setInitialCountry] = useState('')
+  const [initialBio, setInitialBio] = useState('')
+  const [initialHospitalName, setInitialHospitalName] = useState('')
+  const [initialLanguages, setInitialLanguages] = useState<string[]>([])
+  const [dbUserId, setDbUserId] = useState<string | null>(null)
+  const [headerHeight, setHeaderHeight] = useState(60)
+
   useEffect(() => {
     if (!user?.id) return
     supabase
       .from('users')
-      .select('phone')
+      .select('id, phone, country')
       .eq('clerk_id', user.id)
       .single()
-      .then(({ data }) => {
-        if (data) setPhone(data.phone ?? '')
-      })
+      .then(({ data: userRow }) => {
+        if (!userRow) return
+        setDbUserId((userRow as any).id ?? null)
+        setPhone((userRow as any).phone ?? '')
+        setInitialPhone((userRow as any).phone ?? '')
+        setCountry((userRow as any).country ?? '')
+        setInitialCountry((userRow as any).country ?? '')
 
-    getToken().then(async (token) => {
-      if (!token) return
-      const { data } = await getAuthClient(token)
-        .from('doctor_profiles')
-        .select('bio, hospital_name, languages')
-        .single()
-      if (data) {
-        setBio((data as any).bio ?? '')
-        setHospitalName((data as any).hospital_name ?? '')
-        setLanguages((data as any).languages ?? [])
-      }
-    })
+        getToken().then(async (token) => {
+          if (!token) return
+          // doctor_profiles SELECT RLS returns own row + every approved
+          // doctor's row (for patient browsing), so this must be filtered
+          // to the caller's own row or .single() throws once any other
+          // approved doctor exists — silently leaving these fields blank.
+          const { data } = await getAuthClient(token)
+            .from('doctor_profiles')
+            .select('bio, hospital_name, languages')
+            .eq('user_id', (userRow as any).id)
+            .single()
+          if (data) {
+            setBio((data as any).bio ?? '')
+            setHospitalName((data as any).hospital_name ?? '')
+            setLanguages((data as any).languages ?? [])
+            setInitialBio((data as any).bio ?? '')
+            setInitialHospitalName((data as any).hospital_name ?? '')
+            setInitialLanguages((data as any).languages ?? [])
+          }
+        })
+      })
   }, [user?.id])
 
   const handlePickPhoto = async () => {
@@ -188,17 +236,49 @@ export default function EditDoctorProfileScreen() {
 
   const handleSave = async () => {
     if (!user?.id) return
+
+    const nameChanged = firstName !== initialFirstName || lastName !== initialLastName
+    const phoneChanged = phone !== initialPhone
+    const countryChanged = country !== initialCountry
+    const photoChanged = !!localImageUri
+    const professionalChanged =
+      bio !== initialBio ||
+      hospitalName !== initialHospitalName ||
+      languages.join(',') !== initialLanguages.join(',')
+
+    if (!nameChanged && !phoneChanged && !countryChanged && !photoChanged && !professionalChanged) {
+      router.back()
+      return
+    }
+
     setSaving(true)
     try {
-      await user.update({ firstName, lastName })
+      // Each concern is committed to its own system independently. If a later
+      // concern fails, earlier ones that already succeeded must stay
+      // committed (both remotely and in local `initial*` state) instead of
+      // being silently retried or reported as if nothing saved — otherwise a
+      // partial failure looks like data "reverting" on next load.
+      if (nameChanged) {
+        try {
+          await user.update({ firstName, lastName })
+          setInitialFirstName(firstName)
+          setInitialLastName(lastName)
+        } catch (e) {
+          console.error('Failed to update name (Clerk):', e)
+          throw new Error('Could not update your name. Please try again.')
+        }
+      }
 
       const token = await getToken()
       if (!token) throw new Error('No token')
       const client = getAuthClient(token)
 
+      // Photo upload only ever runs if the doctor actually picked a new
+      // photo this session — a name/phone/bio-only save must never touch
+      // storage or be able to surface a photo error.
       let profilePhotoUrl: string | null = null
       let photoUploadFailed = false
-      if (localImageUri) {
+      if (photoChanged) {
         try {
           // Remove any previously uploaded file(s) for this doctor first —
           // different flows (registration vs. this screen) have historically
@@ -207,7 +287,7 @@ export default function EditDoctorProfileScreen() {
           if (existing && existing.length > 0) {
             await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
           }
-          const response = await fetch(localImageUri)
+          const response = await fetch(localImageUri!)
           const arrayBuffer = await response.arrayBuffer()
           const avatarPath = `${user.id}/avatar.jpg`
           const { error: uploadError } = await client.storage
@@ -216,43 +296,69 @@ export default function EditDoctorProfileScreen() {
           if (uploadError) throw uploadError
           const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(avatarPath)
           profilePhotoUrl = `${urlData.publicUrl}?v=${Date.now()}`
-        } catch {
+        } catch (e) {
+          console.error('Failed to upload profile photo:', e)
           photoUploadFailed = true
         }
       }
 
-      const { error: userError } = await client.from('users').upsert(
-        {
-          clerk_id: user.id,
-          full_name: `${firstName} ${lastName}`.trim(),
-          phone,
-          ...(profilePhotoUrl ? { profile_photo_url: profilePhotoUrl } : {}),
-        },
-        { onConflict: 'clerk_id' }
-      )
-      if (userError) throw userError
-
-      const { data: updatedRows, error: profileError } = await client
-        .from('doctor_profiles')
-        .update({ bio, hospital_name: hospitalName, languages })
-        .select('id')
-      if (profileError) throw profileError
-      if (!updatedRows || updatedRows.length === 0) {
-        throw new Error('No doctor profile row matched — nothing was saved.')
+      if (phoneChanged || countryChanged || profilePhotoUrl || nameChanged) {
+        const { error: userError } = await client
+          .from('users')
+          .update({
+            full_name: `${firstName} ${lastName}`.trim(),
+            phone,
+            country,
+            ...(profilePhotoUrl ? { profile_photo_url: profilePhotoUrl } : {}),
+          })
+          .eq('clerk_id', user.id)
+        if (userError) {
+          console.error('Failed to update users row (phone/country/photo):', userError)
+          throw new Error(
+            phoneChanged
+              ? 'Could not update your phone number. Please try again.'
+              : 'Could not save your changes. Please try again.'
+          )
+        }
+        setInitialPhone(phone)
+        setInitialCountry(country)
       }
 
-      if (localImageUri) setLocalImageUri(null)
+      // Professional-details update only runs when those fields actually
+      // changed, so a name-only save can't fail on an unrelated RLS/row-match
+      // issue in doctor_profiles.
+      if (professionalChanged) {
+        const { data: updatedRows, error: profileError } = await client
+          .from('doctor_profiles')
+          .update({ bio, hospital_name: hospitalName, languages })
+          .eq('user_id', dbUserId)
+          .select('id')
+        if (profileError) {
+          console.error('Failed to update doctor_profiles (bio/hospital/languages):', profileError)
+          throw new Error('Could not save your professional details. Please try again.')
+        }
+        if (!updatedRows || updatedRows.length === 0) {
+          console.error('doctor_profiles update matched 0 rows for user_id:', dbUserId)
+          throw new Error('Could not save your professional details. Please try again.')
+        }
+        setInitialBio(bio)
+        setInitialHospitalName(hospitalName)
+        setInitialLanguages(languages)
+      }
+
+      if (photoChanged) setLocalImageUri(null)
       refreshPhoto()
       if (profilePhotoUrl) pushOwnPhotoToStream(profilePhotoUrl)
+      if (nameChanged) pushOwnNameToStream(`${firstName} ${lastName}`.trim())
 
-      if (photoUploadFailed) {
+      if (photoChanged && photoUploadFailed) {
         Alert.alert('Saved with a Problem', 'Your profile was updated, but the photo failed to upload. Please try again.')
       } else {
         Alert.alert('Saved', 'Your profile has been updated.')
       }
       router.back()
-    } catch {
-      Alert.alert('Error', 'Failed to save. Please try again.')
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to save. Please try again.')
     } finally {
       setSaving(false)
     }
@@ -295,7 +401,7 @@ export default function EditDoctorProfileScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <View style={styles.header}>
+      <View style={styles.header} onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}>
         <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.6 }]} hitSlop={10}>
           <Ionicons name="chevron-back" size={26} color={colors.inkBlack} />
         </Pressable>
@@ -306,7 +412,7 @@ export default function EditDoctorProfileScreen() {
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 60 : 0}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}
       >
         <ScrollView
           style={styles.scroll}
@@ -339,6 +445,24 @@ export default function EditDoctorProfileScreen() {
             <FormField label="Last Name" value={lastName} onChangeText={setLastName} placeholder="Last name" />
             <View style={styles.fieldSpacing} />
             <FormField label="Phone Number" value={phone} onChangeText={setPhone} placeholder="+251 91 234 5678" keyboardType="phone-pad" />
+            <View style={styles.fieldSpacing} />
+            <FormField
+              label="Email Address"
+              value={user?.primaryEmailAddress?.emailAddress ?? ''}
+              onPress={() => setShowChangeEmail(true)}
+              suffix={<Text style={styles.changeLinkText}>Change</Text>}
+            />
+            <View style={styles.fieldSpacing} />
+            <View style={styles.fieldWrap}>
+              <Text style={styles.fieldLabel}>Country</Text>
+              <View style={[styles.input, styles.inputRow]}>
+                <Text style={styles.countryFlag}>
+                  {getFlag(COUNTRIES.find((c) => c.name === country)?.id ?? '')}
+                </Text>
+                <Text style={styles.inputText}>{country || '—'}</Text>
+                <Ionicons name="lock-closed" size={14} color="#9CA3AF" />
+              </View>
+            </View>
           </View>
 
           <Text style={styles.sectionLabel}>Professional Details</Text>
@@ -375,6 +499,16 @@ export default function EditDoctorProfileScreen() {
         onGallery={handlePickPhoto}
         onDelete={handleDeletePhoto}
         onClose={() => setShowPhotoPicker(false)}
+      />
+
+      <ChangeEmailModal
+        visible={showChangeEmail}
+        onClose={() => setShowChangeEmail(false)}
+        onSuccess={() => {
+          setShowChangeEmail(false)
+          user?.reload()
+          Alert.alert('Saved', 'Your email address has been updated.')
+        }}
       />
 
       {/* Language Picker Modal */}
@@ -426,14 +560,18 @@ const styles = StyleSheet.create({
   avatarInitial: { fontFamily: fonts.bold, fontSize: 34, color: colors.mistWhite },
   cameraBtn: { position: 'absolute', bottom: 2, right: 2, width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.mistWhite },
   changePhotoText: { fontFamily: fonts.medium, fontSize: 13, color: colors.tealGreen },
+  changeLinkText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.tealGreen },
 
   sectionLabel: { fontFamily: fonts.semiBold, fontSize: 13, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10, marginLeft: 4 },
   card: { backgroundColor: colors.mistWhite, borderRadius: 16, padding: 16, marginBottom: 20, ...shadow('#000', 0, 1, 6, 0.05, 2) },
   fieldWrap: { marginBottom: 0 },
   fieldSpacing: { height: 16 },
   fieldLabel: { fontFamily: fonts.semiBold, fontSize: 13, color: '#374151', marginBottom: 7 },
-  input: { backgroundColor: colors.cloudGrey, borderRadius: 12, borderWidth: 1, borderColor: colors.steelGrey, paddingHorizontal: 14, height: 50, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack },
-  inputMultiline: { height: 100, paddingTop: 12, paddingBottom: 12 },
+  input: { backgroundColor: colors.cloudGrey, borderRadius: 12, borderWidth: 1, borderColor: colors.steelGrey, paddingHorizontal: 14, height: 50 },
+  inputRow: { flexDirection: 'row', alignItems: 'center' },
+  inputText: { flex: 1, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack, padding: 0 },
+  inputMultiline: { height: 100, paddingTop: 12, paddingBottom: 12, alignItems: 'flex-start' },
+  countryFlag: { fontSize: 18, marginRight: 8 },
 
   saveWrap: { borderRadius: 16, overflow: 'hidden', marginTop: 4 },
   saveGrad: { height: 52, alignItems: 'center', justifyContent: 'center' },

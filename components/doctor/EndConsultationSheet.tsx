@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useState } from 'react'
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
@@ -41,6 +44,7 @@ interface Props {
 const BLANK_RX: Prescription = { medicine: '', dosage: '', duration: '', instructions: '' }
 
 export function EndConsultationSheet({ patientName, onSubmit, onClose }: Props) {
+  const insets = useSafeAreaInsets()
   const [chiefComplaint, setChiefComplaint] = useState('')
   const [diagnosis, setDiagnosis] = useState('')
   const [prescriptionEnabled, setPrescriptionEnabled] = useState(false)
@@ -73,9 +77,12 @@ export function EndConsultationSheet({ patientName, onSubmit, onClose }: Props) 
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
         <Pressable style={styles.backdrop} onPress={onClose} />
-        <View style={styles.sheet}>
+        <View style={[styles.sheet, { paddingBottom: Math.max(24, insets.bottom + 12) }]}>
           <View style={styles.handle} />
           <Text style={styles.title}>End Consultation</Text>
           <Text style={styles.subtitle}>Fill in consultation notes for {patientName}</Text>
@@ -212,7 +219,7 @@ export function EndConsultationSheet({ patientName, onSubmit, onClose }: Props) 
             disabled={!isValid}
           />
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   )
 }
@@ -228,7 +235,11 @@ const styles = StyleSheet.create({
   handle: { width: 40, height: 4, backgroundColor: colors.steelGrey, borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
   title: { fontFamily: fonts.bold, fontSize: 22, color: colors.inkBlack, marginBottom: 4 },
   subtitle: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 20 },
-  scrollArea: { maxHeight: 440 },
+  // flexShrink (not a fixed maxHeight) so the field list is what gives up
+  // room to the keyboard — the title, subtitle, and Submit button below it
+  // keep their natural size and stay on screen no matter how much space
+  // the keyboard takes.
+  scrollArea: { flexShrink: 1 },
   scrollContent: { paddingBottom: 8 },
   fieldLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 8, marginTop: 4 },
   input: {

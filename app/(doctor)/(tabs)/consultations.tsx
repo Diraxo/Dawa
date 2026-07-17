@@ -1,10 +1,11 @@
-import { useAuth } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useFocusEffect, useRouter } from 'expo-router'
-import { useCallback, useState } from 'react'
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert,
+  AppState,
   Image,
   Pressable,
   ScrollView,
@@ -19,7 +20,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -50,6 +51,44 @@ interface ConsultationItem {
   rawStatus: string
   createdAt: string
   doctorAmount: number
+  statusChangedAt: string
+  doctorViewedAt: string | null
+}
+
+// Unread = the doctor has never opened the tab this row currently lives in
+// since it last changed status. Source of truth: consultations.doctor_viewed_at
+// vs. consultations.status_changed_at (see migration 071) — no existing
+// column tracked doctor-seen state for consultations before this.
+const isUnread = (c: ConsultationItem) =>
+  !c.doctorViewedAt || new Date(c.doctorViewedAt) < new Date(c.statusChangedAt)
+
+const CONSULTATIONS_SELECT = `
+  id, type, status, created_at, started_at, scheduled_at, doctor_amount,
+  status_changed_at, doctor_viewed_at,
+  patient:users!consultations_patient_id_fkey(id, full_name, profile_photo_url)
+`
+
+function mapConsultationRow(r: any): ConsultationItem {
+  return {
+    id: r.id,
+    patientName: r.patient?.full_name ?? 'Patient',
+    patientId: r.patient?.id ?? '',
+    patientPhotoUrl: r.patient?.profile_photo_url ?? null,
+    type: (r.type ?? 'chat') as ConsultationType,
+    dateTimeLabel: formatDateTime(r.started_at ?? r.scheduled_at ?? r.created_at),
+    status: toStatusBucket(r.status),
+    rawStatus: r.status,
+    createdAt: r.created_at,
+    doctorAmount: Number(r.doctor_amount) || 0,
+    statusChangedAt: r.status_changed_at ?? r.created_at,
+    doctorViewedAt: r.doctor_viewed_at ?? null,
+  }
+}
+
+const VALID_TABS: TabKey[] = ['all', 'incoming', 'active', 'completed', 'cancelled']
+function resolveTab(raw: string | string[] | undefined): TabKey {
+  const key = Array.isArray(raw) ? raw[0] : raw
+  return (VALID_TABS as string[]).includes(key ?? '') ? (key as TabKey) : 'all'
 }
 
 function toStatusBucket(status: string): StatusBucket {
@@ -109,10 +148,17 @@ export default function ConsultationsScreen() {
   const { t } = useTranslation()
   const router = useRouter()
   const { getToken } = useAuth()
+  const { user } = useUser()
   const { doctorStatus } = useDoctorStore()
-  const [activeTab, setActiveTab] = useState<TabKey>('incoming')
+  const params = useLocalSearchParams<{ tab?: string }>()
+  const [activeTab, setActiveTab] = useState<TabKey>('all')
   const [consultations, setConsultations] = useState<ConsultationItem[]>([])
+  // Mirrors `consultations` so the users-table realtime handler (below) can
+  // check "is this changed patient one of mine?" without a stale closure.
+  const consultationsRef = useRef<ConsultationItem[]>([])
+  useEffect(() => { consultationsRef.current = consultations }, [consultations])
   const [search, setSearch] = useState('')
+  const [profileId, setProfileId] = useState<string | null>(null)
 
   const TABS: { key: TabKey; label: string }[] = [
     { key: 'all', label: 'All' },
@@ -122,44 +168,154 @@ export default function ConsultationsScreen() {
     { key: 'cancelled', label: 'Cancelled' },
   ]
 
+  const bucketMatches = (c: ConsultationItem, tab: TabKey) => tab === 'all' || c.status === tab
+
+  // Marks every currently-unread consultation visible in `tab` as viewed —
+  // clears that tab's badge immediately (locally, and in the DB so the
+  // website and any other device see the same read state without a refresh).
+  const markTabRead = useCallback((tab: TabKey, items: ConsultationItem[]) => {
+    const unreadIds = items.filter((c) => bucketMatches(c, tab) && isUnread(c)).map((c) => c.id)
+    if (unreadIds.length === 0) return
+    const now = new Date().toISOString()
+    setConsultations((prev) => prev.map((c) => (unreadIds.includes(c.id) ? { ...c, doctorViewedAt: now } : c)))
+    getToken().then((token) => {
+      if (!token) return
+      getAuthClient(token).from('consultations').update({ doctor_viewed_at: now }).in('id', unreadIds).then(() => {})
+    })
+  }, [getToken])
+
   // Tab screens stay mounted across tab switches, so a plain mount-only
   // fetch never sees a patient's photo edited while this tab was in the
-  // background — re-fetch on every return to this tab instead.
+  // background — re-fetch on every return to this tab instead. Also reset
+  // to the "All" tab on every visit (bottom nav, notification, deep link,
+  // cold launch) unless a tab was explicitly passed as a route param —
+  // otherwise this screen, which stays mounted between visits, kept
+  // whatever tab the doctor had last selected.
   useFocusEffect(
     useCallback(() => {
+      const targetTab: TabKey = resolveTab(params.tab)
+      setActiveTab(targetTab)
       getToken().then(token => {
         if (!token) return
         getAuthClient(token)
           .from('consultations')
-          .select(`
-            id, type, status, created_at, started_at, scheduled_at, doctor_amount,
-            patient:users!consultations_patient_id_fkey(id, full_name, profile_photo_url)
-          `)
+          .select(CONSULTATIONS_SELECT)
           .order('created_at', { ascending: false })
           .then(({ data }) => {
             if (!data) return
-            setConsultations(data.map((r: any) => ({
-              id: r.id,
-              patientName: r.patient?.full_name ?? 'Patient',
-              patientId: r.patient?.id ?? '',
-              patientPhotoUrl: r.patient?.profile_photo_url ?? null,
-              type: (r.type ?? 'chat') as ConsultationType,
-              dateTimeLabel: formatDateTime(r.started_at ?? r.scheduled_at ?? r.created_at),
-              status: toStatusBucket(r.status),
-              rawStatus: r.status,
-              createdAt: r.created_at,
-              doctorAmount: Number(r.doctor_amount) || 0,
-            })))
+            const items = data.map(mapConsultationRow)
+            setConsultations(items)
+            markTabRead(targetTab, items)
           })
       })
-    }, [getToken])
+    // getToken deliberately excluded: @react-navigation's useFocusEffect
+    // re-runs this callback immediately whenever ITS identity changes, not
+    // just on real focus/blur — Clerk's getToken is a new function reference
+    // on unrelated re-renders, which was silently re-firing setActiveTab(targetTab)
+    // (snapping back to All) every few seconds while the doctor sat on a
+    // manually-selected tab. getToken() always fetches a live token when
+    // called, so a "stale" closure over it is safe here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [params.tab])
   )
 
-  const bucketMatches = (c: ConsultationItem, tab: TabKey) => tab === 'all' || c.status === tab
+  // Resolve this doctor's profile id once, purely to scope the realtime
+  // subscription below (list fetches above are already scoped by RLS).
+  useEffect(() => {
+    if (!user?.id) return
+    ;(async () => {
+      const token = await getToken()
+      if (!token) return
+      const client = getAuthClient(token)
+      const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+      if (!me) return
+      const { data: profile } = await client
+        .from('doctor_profiles')
+        .select('id')
+        .eq('user_id', (me as any).id)
+        .maybeSingle()
+      if (profile) setProfileId(profile.id)
+    })()
+  }, [user?.id, getToken])
+
+  // Live-refresh whenever any of this doctor's consultations change (new
+  // incoming request, status change, etc.) so tab badges update instantly
+  // while the doctor is sitting on this screen — no refresh or reopen needed.
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-consultations-${profileId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
+        async () => {
+          const token = await getToken()
+          if (!token) return
+          const { data } = await getAuthClient(token)
+            .from('consultations')
+            .select(CONSULTATIONS_SELECT)
+            .order('created_at', { ascending: false })
+          if (data) setConsultations(data.map(mapConsultationRow))
+        }
+      )
+      .on(
+        // A patient editing their name/photo doesn't touch `consultations`
+        // at all, so the subscription above never fires for it — without
+        // this, a doctor sitting on this tab keeps seeing the patient's old
+        // identity until they navigate away and back.
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'users' },
+        async (payload) => {
+          const updated = payload.new as any
+          if (!consultationsRef.current.some((c) => c.patientId === updated.id)) return
+          const token = await getToken()
+          if (!token) return
+          const { data } = await getAuthClient(token)
+            .from('consultations')
+            .select(CONSULTATIONS_SELECT)
+            .order('created_at', { ascending: false })
+          if (data) setConsultations(data.map(mapConsultationRow))
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
+  // Realtime sockets get suspended while the OS backgrounds the app (locked
+  // screen, app-switch) — a new/updated consultation can fire its
+  // postgres_changes event while nobody's listening. useFocusEffect above
+  // only refetches on tab-navigation focus, not on returning to the
+  // foreground while already sitting on this tab, so without this a doctor
+  // who backgrounds the app mid-session would need to switch tabs away and
+  // back (or restart) to see a new request. Mirrors useDoctorOnlineToggle's
+  // resyncOnForeground.
+  useEffect(() => {
+    if (!profileId) return
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return
+      getToken().then(async (token) => {
+        if (!token) return
+        const { data } = await getAuthClient(token)
+          .from('consultations')
+          .select(CONSULTATIONS_SELECT)
+          .order('created_at', { ascending: false })
+        if (data) setConsultations(data.map(mapConsultationRow))
+      })
+    })
+    return () => sub.remove()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
   const searchMatches = (c: ConsultationItem) =>
     !search.trim() || c.patientName.toLowerCase().includes(search.trim().toLowerCase())
 
   const filtered = consultations.filter((c) => bucketMatches(c, activeTab) && searchMatches(c))
+
+  const handleTabPress = (tab: TabKey) => {
+    setActiveTab(tab)
+    markTabRead(tab, consultations)
+  }
 
   const handleOpenConsultation = (item: ConsultationItem) => {
     if (doctorStatus && doctorStatus !== 'approved' && item.status !== 'completed') {
@@ -222,10 +378,10 @@ export default function ConsultationsScreen() {
       {/* Tabs */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabsScroll} contentContainerStyle={styles.tabsRow}>
         {TABS.map((tab) => {
-          const count = consultations.filter((c) => bucketMatches(c, tab.key)).length
+          const count = consultations.filter((c) => bucketMatches(c, tab.key) && isUnread(c)).length
           const active = activeTab === tab.key
           return (
-            <Pressable key={tab.key} onPress={() => setActiveTab(tab.key)} style={styles.tabBtn}>
+            <Pressable key={tab.key} onPress={() => handleTabPress(tab.key)} style={styles.tabBtn}>
               {active && <LinearGradient colors={gradients.interactive} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.tabActiveGrad} />}
               <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{tab.label}</Text>
               {count > 0 && (
@@ -342,7 +498,12 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, fontFamily: fonts.regular, fontSize: 14, color: colors.inkBlack, padding: 0 },
 
-  tabsScroll: { backgroundColor: colors.mistWhite, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey },
+  // Explicit height (tabBtn height 38 + tabsRow paddingVertical 8+8) is required
+  // here — a horizontal ScrollView with no explicit height, sitting directly
+  // above a flex:1 sibling in a column, measures as unbounded on Android and
+  // stretches to fill the remaining space instead of hugging its content,
+  // which pushed the entire list down behind a large blank area.
+  tabsScroll: { height: 54, flexGrow: 0, flexShrink: 0, backgroundColor: colors.mistWhite, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey },
   tabsRow: { paddingHorizontal: 16, paddingVertical: 8, gap: 8, flexDirection: 'row' },
   tabBtn: { height: 38, borderRadius: 12, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6, backgroundColor: colors.cloudGrey, paddingHorizontal: 12 },
   tabActiveGrad: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, borderRadius: 12 },

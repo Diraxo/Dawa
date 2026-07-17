@@ -13,6 +13,7 @@
 // handle-consultation-notification edge function can target the correct device.
 
 import { Platform } from 'react-native'
+import * as Notifications from 'expo-notifications'
 import { supabase } from './supabase'
 import { callkeep, type IncomingCallPayload } from './callkeep'
 import { logger } from './logger'
@@ -117,7 +118,7 @@ async function _registerVoIPToken(
   RNVoipPush.addEventListener('notification', (notification: any) => {
     logger.log('[VoIP] Incoming VoIP push received')
     const data = notification?.getData?.() ?? notification ?? {}
-    if (currentOnIncoming) _handleIncomingCallData(data, currentOnIncoming)
+    if (currentOnIncoming) handleIncomingCallData(data, currentOnIncoming)
   })
 
   // ③ Trigger registration (fires 'register' event above with the current token)
@@ -170,9 +171,10 @@ async function _registerFCMToken(
   messaging.onMessage(async (remoteMessage: any) => {
     const callType = remoteMessage?.data?.callType
     if (callType === 'cancel_call') return _handleCallCancelData(remoteMessage.data)
+    if (callType === 'incoming_request') return _handleIncomingRequestData(remoteMessage.data)
     if (callType !== 'incoming_call') return
     logger.log('[FCM] Foreground incoming-call message')
-    if (currentOnIncoming) _handleIncomingCallData(remoteMessage.data, currentOnIncoming)
+    if (currentOnIncoming) handleIncomingCallData(remoteMessage.data, currentOnIncoming)
   })
 
   // ④ App-opened-from-background FCM data message
@@ -181,13 +183,13 @@ async function _registerFCMToken(
     if (callType === 'cancel_call') return _handleCallCancelData(remoteMessage.data)
     if (callType !== 'incoming_call') return
     logger.log('[FCM] Background→foreground incoming-call message')
-    if (currentOnIncoming) _handleIncomingCallData(remoteMessage.data, currentOnIncoming)
+    if (currentOnIncoming) handleIncomingCallData(remoteMessage.data, currentOnIncoming)
   })
 }
 
 // A ringing call was cancelled/missed server-side before being answered —
 // dismiss any OS call UI still showing for it (belt-and-suspenders on top of
-// the freshness check in _handleIncomingCallData; catches the case where no
+// the freshness check in handleIncomingCallData; catches the case where no
 // further incoming-call push arrives to trigger that check).
 function _handleCallCancelData(data: Record<string, string>) {
   const uuid = data.uuid || data.consultationId || ''
@@ -196,9 +198,44 @@ function _handleCallCancelData(data: Record<string, string>) {
   callkeep.reportCallEnded(uuid, 'answeredElsewhere')
 }
 
-// ── Shared incoming-call data handler ────────────────────────────────────────
+// A new/ready consultation request, delivered as a silent FCM data message
+// so index.js's background handler can raise Notifee's full-screen alert
+// even app-killed. While foregrounded, that headless handler never runs
+// (Firebase only invokes it for background/killed), and this data message
+// previously had no `else`/`default` branch here — it was dropped entirely,
+// so the doctor's fastest possible signal (server push, arriving well ahead
+// of Home's 10s poll / realtime reconnect) was silently discarded. Fires an
+// immediate local notification with sound as a heads-up; Home's own
+// checkForWaitingRequest() still independently detects the row and shows the
+// full-screen incoming-request UI + vibration ring — this only closes the
+// gap between "push arrives" and "app's own polling/realtime notices".
+function _handleIncomingRequestData(data: Record<string, string>) {
+  logger.log('[FCM] Foreground incoming-request message')
+  const patientName = data.patientName || 'A patient'
+  const typeTitle = data.consultationType === 'phone'
+    ? 'Voice Consultation' : data.consultationType === 'video' ? 'Video Consultation' : 'Chat'
+  Notifications.scheduleNotificationAsync({
+    content: {
+      title: `${typeTitle} with ${patientName}`,
+      body: `${patientName} has paid and is waiting for your response.`,
+      sound: 'default',
+      data: { screen: 'incoming_request', ...data },
+      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests' } : {}),
+    },
+    trigger: null,
+  }).catch(() => {})
+}
 
-function _handleIncomingCallData(
+// ── Shared incoming-call data handler ────────────────────────────────────────
+//
+// Exported so app/_layout.tsx's iOS cold-start/app-killed PushKit listener
+// (registered separately, before Clerk auth resolves and before this file's
+// own listener — see registerCallTokens — can be wired) can reuse the same
+// staleness guard instead of calling callkeep.displayIncomingCall() directly
+// with no freshness check, which previously let an already-answered/
+// cancelled/missed VoIP push raise a ghost CallKit screen on that path alone.
+
+export function handleIncomingCallData(
   data: Record<string, string>,
   onIncoming: (payload: IncomingCallPayload) => void,
 ) {
@@ -212,6 +249,13 @@ function _handleIncomingCallData(
   const consultationType = (data.consultationType === 'video' ? 'video' : 'phone') as 'phone' | 'video'
   const agoraChannel     = data.agoraChannel     || consultationId
   const patientClerkId   = data.patientClerkId   || undefined
+  // 'doctor' = a patient's on-demand request ringing the doctor's device
+  // (see supabase/functions/handle-consultation-notification's 'new_request'
+  // case); default/'patient' = the existing doctor-accepted → patient rings.
+  const direction         = data.direction === 'doctor' ? 'doctor' as const : 'patient' as const
+  const patientId         = data.patientId        || undefined
+  const patientName       = data.patientName      || undefined
+  const patientPhotoUrl   = data.patientPhotoUrl  || undefined
 
   if (!uuid || !consultationId) {
     logger.warn('[VoIPPush] Missing uuid or consultationId in call data')
@@ -229,6 +273,10 @@ function _handleIncomingCallData(
     consultationType,
     agoraChannel,
     patientClerkId,
+    direction,
+    patientId,
+    patientName,
+    patientPhotoUrl,
   }
 
   // Display the OS call UI first (synchronous requirement on iOS CallKit)
@@ -240,10 +288,12 @@ function _handleIncomingCallData(
   // Freshness check ("ghost call" guard): Android FCM data messages can be
   // redelivered by the OS up to their TTL, and any push transport can be
   // delayed. If this push arrives after the consultation already moved past
-  // 'accepted' (declined/cancelled/completed/answered on another device/etc),
-  // the OS call UI we just displayed above is stale — dismiss it immediately
-  // instead of leaving the patient looking at an incoming call that no
-  // longer exists.
+  // the state this ring represents, the OS call UI we just displayed above
+  // is stale — dismiss it immediately instead of leaving a phantom ringing
+  // call. Doctor-direction rings represent an unanswered request (still
+  // 'waiting_for_doctor'); patient-direction rings represent a doctor-
+  // accepted call (still 'accepted') — same guard, different expected status.
+  const freshStatus = direction === 'doctor' ? 'waiting_for_doctor' : 'accepted'
   ;(async () => {
     try {
       const { data: row } = await supabase
@@ -251,7 +301,7 @@ function _handleIncomingCallData(
         .select('status')
         .eq('id', consultationId)
         .maybeSingle()
-      if (row && row.status !== 'accepted') {
+      if (row && row.status !== freshStatus) {
         logger.log('[VoIPPush] Stale incoming-call push for', consultationId, '— status is', row.status, '— dismissing')
         callkeep.reportCallEnded(uuid, 'answeredElsewhere')
       }

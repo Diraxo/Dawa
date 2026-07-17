@@ -1,7 +1,9 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import * as DocumentPicker from 'expo-document-picker'
-import * as FileSystem from 'expo-file-system'
+// See app/(patient)/consultation-summary.tsx — this SDK moved
+// readAsStringAsync/EncodingType/documentDirectory/downloadAsync behind /legacy.
+import * as FileSystem from 'expo-file-system/legacy'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Sharing from 'expo-sharing'
 import { useRouter } from 'expo-router'
@@ -24,6 +26,7 @@ import { useTranslation } from 'react-i18next'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { validatePickedFile, safeFilename } from '@/lib/fileValidation'
@@ -111,7 +114,7 @@ export default function MedicalRecordsScreen() {
 
         const result: MedicalRecord[] = []
         for (const s of (summaries ?? []) as any[]) {
-          const doctorName = s.consultation?.doctor?.user?.full_name ?? 'Doctor'
+          const doctorName = formatDoctorName(s.consultation?.doctor?.user?.full_name, 'Doctor')
           const date = new Date(s.created_at).toLocaleDateString('en-US', {
             month: 'short', day: 'numeric', year: 'numeric',
           })

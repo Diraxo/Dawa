@@ -183,6 +183,7 @@ const am: TranslationKeys = {
   emailAddress: 'የኢሜይል አድራሻ',
   contactInformation: 'የመገናኛ መረጃ',
   selectGender: 'ፆታ ይምረጡ',
+  selectCountry: 'ሀገር ይምረጡ',
   address: 'አድራሻ',
   country: 'ሀገር',
   saveChanges: 'ለውጦቹን አስቀምጥ',
@@ -197,6 +198,8 @@ const am: TranslationKeys = {
   cameraPermissionMsg: 'የፕሮፋይል ፎቶ ለማንሳት የካሜራ መዳረሻ ያስፈልጋል።',
   galleryPermissionMsg: 'ፎቶ ለመምረጥ የፎቶ ቤተ-መጻሕፍት መዳረሻ ያስፈልጋል።',
   profileSaved: 'ተቀምጧል',
+  change: 'ቀይር',
+  emailUpdatedMsg: 'የኢሜይል አድራሻዎ ተዘምኗል።',
   profileSavedMsg: 'መገለጫዎ ተዘምኗል።',
   profileSaveError: 'ስህተት',
   profileSaveErrorMsg: 'መገለጫ ማስቀመጥ አልተሳካም። እባክዎ እንደገና ይሞክሩ።',
@@ -330,8 +333,6 @@ const am: TranslationKeys = {
   noRecordsYet: 'ገና መዝገቦች የሉም',
   noRecordsDesc: 'የምክክር ማጠቃለያዎችዎ እና ቅዳሴዎች ከመጀመሪያ ምክክርዎ በኋላ እዚህ ይታያሉ።',
   uploadNewDocument: 'አዲስ ሰነድ ስቀል',
-  comingSoon: 'በቅርቡ ይመጣል',
-  featureComingSoonMsg: 'ሰነዶችን መስቀል በወደፊት ዝማኔ ይገኛል።',
   close: 'ዝጋ',
 
   searchCountry: 'ሀገር ፈልጉ...',
@@ -366,7 +367,9 @@ const am: TranslationKeys = {
   weeklyAvailability: 'ሳምንታዊ ዝግጁነት',
   availableHoursNote: 'ሰኞ–አርብ፣ 9 ቀን – 5 ቀን ዝግጁ',
   patientReviews: 'የታካሚ ግምገማዎች',
-  noReviewsYet: 'እስካሁን ምንም ግምገማ የለም',
+  noReviewsYet: 'እስካሁን ምንም ግምገማ የለም። ይህን ዶክተር የሚገመግም የመጀመሪያው ታካሚ ይሁኑ።',
+  showMoreReviews: 'ተጨማሪ አሳይ',
+  verifiedConsultation: 'የተረጋገጠ ምክክር',
   bookConsultation: 'ምክክር ያቅዱ',
 
   chatConsultation: 'የቻት ምክክር',
@@ -400,7 +403,7 @@ const am: TranslationKeys = {
   downloadAsPDF: 'እንደ PDF አውርዱ',
   rateYourDoctor: 'ዶክተርዎን ይመዝኑ',
   howWasExperience: 'ከ',
-  leaveComment: 'አስተያየት ይስጡ (አማራጭ)...',
+  leaveComment: 'አስተያየት ይስጡ...',
   submitAndDone: 'አስገቡ & ጨርሱ',
   submitting: 'እያስገቡ...',
   thankYou: 'እናመሰግናለን!',
@@ -499,7 +502,6 @@ const am: TranslationKeys = {
   notifyMeMsg: 'ክፍያ ሲጀምር ለመጀመሪያ ጊዜ ትነገራለህ!',
 
   // Chat consultation screen
-  upcomingAppointment: 'መጪ ቀጠሮ',
   consultationHasntStarted: 'ምክሩ ገና አልጀመረም',
   appointmentBeginsIn: 'ቀጠሮዎ ይጀምራል',
   chatUnlockNote: 'ዶክተሩ ክፍለ-ጊዜውን ሲጀምሩ ብቻ ወሬ ይከፈታል።',
@@ -537,7 +539,6 @@ const am: TranslationKeys = {
   // Doctor chat screen
   connectingToConsultation: 'ወደ ምክሩ እየተገናኘ...',
   activeSession: 'ንቁ ክፍለ ጊዜ',
-  done: 'ተጠናቋል',
   consultationEndedChatReadOnly: 'ምክሩ ተጠናቋል · ወሬ ለማንበብ ብቻ ነው',
   chatRequiresDevelopmentBuild: 'ወሬ የልማት ግንባታ ያስፈልጋል።',
   waitingForChannelConnection: 'የቻናሉ ግንኙነት ይጠበቃል...',

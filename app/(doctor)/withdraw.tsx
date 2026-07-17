@@ -21,7 +21,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 
 interface WithdrawalRecord {
   id: string
@@ -32,17 +32,17 @@ interface WithdrawalRecord {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  pending:   colors.warning,
-  approved:  colors.tealGreen,
-  rejected:  colors.error,
-  processed: colors.careBlue,
+  pending:  colors.warning,
+  approved: colors.tealGreen,
+  rejected: colors.error,
+  paid:     colors.careBlue,
 }
 
 const STATUS_ICONS: Record<string, React.ComponentProps<typeof Ionicons>['name']> = {
-  pending:   'time-outline',
-  approved:  'checkmark-circle-outline',
-  rejected:  'close-circle-outline',
-  processed: 'wallet-outline',
+  pending:  'time-outline',
+  approved: 'checkmark-circle-outline',
+  rejected: 'close-circle-outline',
+  paid:     'wallet-outline',
 }
 
 export default function WithdrawScreen() {
@@ -55,6 +55,7 @@ export default function WithdrawScreen() {
   const [availableBalance, setAvailableBalance] = useState(0)
   const [history, setHistory] = useState<WithdrawalRecord[]>([])
   const [tab, setTab] = useState<'request' | 'history'>('request')
+  const [dbUserId, setDbUserId] = useState<string | null>(null)
 
   const [amount, setAmount] = useState('')
   const [bankName, setBankName] = useState('')
@@ -66,6 +67,22 @@ export default function WithdrawScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId])
 
+  // Live-sync admin approve/reject/paid actions on this doctor's withdrawals —
+  // without this, status only updated after leaving and re-entering this screen.
+  useEffect(() => {
+    if (!dbUserId) return
+    const channel = supabase
+      .channel(`doctor-withdrawals-${dbUserId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'withdrawals', filter: `doctor_id=eq.${dbUserId}` },
+        () => load()
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbUserId])
+
   async function load() {
     if (!userId) return
     try {
@@ -73,12 +90,14 @@ export default function WithdrawScreen() {
       if (!token) return
       const client = getAuthClient(token)
 
-      const [totalRes, withdrawnRes, historyRes] = await Promise.all([
+      const [userRes, totalRes, withdrawnRes, historyRes] = await Promise.all([
+        client.from('users').select('id').eq('clerk_id', userId).single(),
         client.from('consultations').select('doctor_amount').eq('status', 'completed'),
-        client.from('withdrawals').select('amount').in('status', ['pending', 'approved', 'processed']),
+        client.from('withdrawals').select('amount').in('status', ['pending', 'approved', 'paid']),
         client.from('withdrawals').select('id, amount, status, bank_details, requested_at').order('requested_at', { ascending: false }),
       ])
 
+      if (userRes.data?.id) setDbUserId(userRes.data.id)
       const totalEarned = (totalRes.data ?? []).reduce((s, r: any) => s + (Number(r.doctor_amount) || 0), 0)
       const totalWithdrawn = (withdrawnRes.data ?? []).reduce((s, r: any) => s + (Number(r.amount) || 0), 0)
       setAvailableBalance(Math.max(0, totalEarned - totalWithdrawn))

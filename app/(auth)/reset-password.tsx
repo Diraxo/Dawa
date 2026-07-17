@@ -1,7 +1,7 @@
 ﻿import { useAuth, useSignIn } from "@clerk/clerk-expo"
 import { Ionicons } from "@expo/vector-icons"
 import { LinearGradient } from "expo-linear-gradient"
-import { useRouter } from "expo-router"
+import { useLocalSearchParams, useRouter } from "expo-router"
 import { useRef, useState } from "react"
 import {
   ActivityIndicator,
@@ -24,6 +24,7 @@ import { getAuthClient, supabase } from "@/lib/supabase"
 
 export default function ResetPasswordScreen() {
   const router = useRouter()
+  const { email } = useLocalSearchParams<{ email: string }>()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
   const { getToken } = useAuth()
@@ -60,7 +61,7 @@ export default function ResetPasswordScreen() {
           const { data } = await client
             .from("users")
             .select("role")
-            .eq("clerk_id", result.createdUserId)
+            .eq("email", (email ?? "").trim().toLowerCase())
             .single()
           if (data?.role === "patient") targetRouteRef.current = "/(patient)/(tabs)/home"
           else if (data?.role === "doctor") targetRouteRef.current = "/(doctor)/(tabs)/home"

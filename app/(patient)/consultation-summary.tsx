@@ -1,15 +1,22 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Asset } from 'expo-asset'
-import * as FileSystem from 'expo-file-system'
+// This SDK version moved the classic readAsStringAsync/EncodingType API behind
+// a /legacy subpath — the bare 'expo-file-system' export is now the new
+// File/Directory class API only, which doesn't have these (see also
+// app/(doctor)/consultation-summary.tsx, PdfViewerModal.tsx).
+import * as FileSystem from 'expo-file-system/legacy'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Print from 'expo-print'
 import * as Sharing from 'expo-sharing'
 import { useLocalSearchParams, useRouter } from 'expo-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,10 +26,13 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { CareHubAlert } from '@/components/ui/CareHubAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { images } from '@/constants/images'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
@@ -56,9 +66,56 @@ export default function ConsultationSummaryScreen() {
 
   const [rating, setRating] = useState(0)
   const [comment, setComment] = useState('')
+  const [commentError, setCommentError] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [successVisible, setSuccessVisible] = useState(false)
   const [summary, setSummary] = useState<SummaryData | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
+  const scrollRef = useRef<ScrollView>(null)
+
+  // Doctor identity — always fetched fresh from the DB (never trusted off the
+  // route params, which can be stale, missing, or truncated depending on
+  // which screen navigated here) using the same doctor_profiles→users join
+  // and live-sync hook as doctor-profile.tsx / chat-consultation.tsx, so this
+  // screen always agrees with the doctor's current profile.
+  const [doctorUserId, setDoctorUserId] = useState<string | null>(null)
+  const [doctorInitialName, setDoctorInitialName] = useState<string | null>(null)
+  const [doctorInitialPhotoUrl, setDoctorInitialPhotoUrl] = useState<string | null>(null)
+  const [resolvedDoctorId, setResolvedDoctorId] = useState<string | null>(null)
+  const { name: liveDoctorName, photoUrl: liveDoctorPhotoUrl } = useUserProfileRealtime(
+    doctorUserId,
+    doctorInitialName ?? doctorName ?? null,
+    doctorInitialPhotoUrl
+  )
+  const rawDoctorName = liveDoctorName ?? doctorInitialName ?? doctorName ?? null
+  const displayDoctorName = rawDoctorName ? formatDoctorName(normalizeNameCase(rawDoctorName)) : t('doctorLabel')
+  const displayDoctorPhotoUrl = liveDoctorPhotoUrl ?? doctorInitialPhotoUrl ?? null
+  const finalDoctorId = doctorId || resolvedDoctorId || undefined
+
+  useEffect(() => {
+    if (!consultationId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || cancelled) return
+        const { data } = await getAuthClient(token)
+          .from('consultations')
+          .select('doctor_id, doctor_profiles!doctor_id(users!inner(id, full_name, profile_photo_url))')
+          .eq('id', consultationId)
+          .maybeSingle()
+        if (cancelled || !data) return
+        const doctorProfile = (data as any).doctor_profiles
+        setResolvedDoctorId((data as any).doctor_id ?? null)
+        setDoctorUserId(doctorProfile?.users?.id ?? null)
+        setDoctorInitialName(doctorProfile?.users?.full_name ?? null)
+        setDoctorInitialPhotoUrl(doctorProfile?.users?.profile_photo_url ?? null)
+      } catch {
+        // best-effort — falls back to the route param name if this fails
+      }
+    })()
+    return () => { cancelled = true }
+  }, [consultationId])
 
   // Existing rating for this consultation — if found, show a read-only
   // "already rated" summary with Edit Rating/Edit Review instead of the
@@ -185,6 +242,11 @@ export default function ConsultationSummaryScreen() {
       Alert.alert(t('rateYourExperience'), t('pleaseRateFirst'))
       return
     }
+    if (!comment.trim()) {
+      setCommentError(true)
+      return
+    }
+    setCommentError(false)
     if (submitting) return
     setSubmitting(true)
 
@@ -200,19 +262,19 @@ export default function ConsultationSummaryScreen() {
           .eq('clerk_id', user.id)
           .single()
 
-        if (userData?.id && doctorId) {
+        if (userData?.id && finalDoctorId) {
           if (existingReviewId) {
             await client.from('reviews').update({
               rating,
-              comment: comment.trim() || null,
+              comment: comment.trim(),
             }).eq('id', existingReviewId)
           } else {
             const { data: inserted } = await client.from('reviews').insert({
               consultation_id: consultationId,
               patient_id: userData.id,
-              doctor_id: doctorId,
+              doctor_id: finalDoctorId,
               rating,
-              comment: comment.trim() || null,
+              comment: comment.trim(),
             }).select('id').single()
             if (inserted?.id) setExistingReviewId(inserted.id)
           }
@@ -224,9 +286,7 @@ export default function ConsultationSummaryScreen() {
 
     setSubmitting(false)
     setEditingRating(false)
-    Alert.alert(t('thankYou'), t('ratingSubmitted'), [
-      { text: t('done'), onPress: () => router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } }) },
-    ])
+    setSuccessVisible(true)
   }
 
   const handleDownload = async () => {
@@ -286,7 +346,7 @@ export default function ConsultationSummaryScreen() {
   <p class="sub">This document is a confidential medical record generated by the Dawa Health Platform.</p>
 
   <div class="meta">
-    <div class="meta-item"><div class="meta-label">Doctor</div><div class="meta-value">${esc(doctorName ?? '—')}</div></div>
+    <div class="meta-item"><div class="meta-label">Doctor</div><div class="meta-value">${esc(displayDoctorName)}</div></div>
     <div class="meta-item"><div class="meta-label">Type</div><div class="meta-value">${esc(typeLabel)}</div></div>
     <div class="meta-item"><div class="meta-label">Date</div><div class="meta-value">${esc(dateStr)}</div></div>
   </div>
@@ -309,7 +369,7 @@ export default function ConsultationSummaryScreen() {
   </div>
   ${summary?.referral_needed ? `<div class="referral">📋 Doctor recommends a specialist referral${summary?.referral_specialty ? ` (${esc(summary.referral_specialty)})` : ''}.</div>` : ''}
 
-  <div class="footer">Powered by Dawa Health Platform · ${esc(dateStr)}</div>
+  <div class="footer">This summary was generated during a Dawa teleconsultation and is not a substitute for in-person emergency care. If you are experiencing a medical emergency, contact your local emergency services immediately.<br/>Powered by Dawa Health Platform · ${esc(dateStr)}</div>
 </body>
 </html>`
 
@@ -351,7 +411,8 @@ export default function ConsultationSummaryScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         {/* Success header */}
         <LinearGradient
           colors={['#F0FDFB', '#EFF6FF']}
@@ -363,7 +424,7 @@ export default function ConsultationSummaryScreen() {
           </View>
           <Text style={styles.heroTitle}>{t('consultationComplete')}</Text>
           <Text style={styles.heroSub}>
-            {t('sessionEndedWith')} {doctorName ?? t('doctorLabel')} {t('sessionEndedSuffix')}
+            {t('sessionEndedWith')} {displayDoctorName} {t('sessionEndedSuffix')}
           </Text>
         </LinearGradient>
 
@@ -371,7 +432,7 @@ export default function ConsultationSummaryScreen() {
         <View style={styles.detailCard}>
           <Row icon={typeIcon} label={typeLabel} value="" accent />
           <Divider />
-          <Row icon="person-outline" label={t('doctorLabel')} value={doctorName ?? '—'} />
+          <Row icon="person-outline" label={t('doctorLabel')} value={displayDoctorName} photoUrl={displayDoctorPhotoUrl} />
           <Row icon="calendar-outline" label={t('dateLabel')} value={dateStr} />
         </View>
 
@@ -481,7 +542,7 @@ export default function ConsultationSummaryScreen() {
             <>
               <Text style={styles.ratingTitle}>{t('rateYourDoctor')}</Text>
               <Text style={styles.ratingSub}>
-                {t('howWasExperience')} {doctorName ?? t('doctorLabel')}?
+                {t('howWasExperience')} {displayDoctorName}?
               </Text>
               <View style={styles.starsRow}>
                 {[1, 2, 3, 4, 5].map(star => (
@@ -495,14 +556,21 @@ export default function ConsultationSummaryScreen() {
                 ))}
               </View>
               <TextInput
-                style={styles.commentInput}
+                style={[styles.commentInput, commentError && styles.commentInputError]}
                 placeholder={t('leaveComment')}
                 placeholderTextColor="#9CA3AF"
                 value={comment}
-                onChangeText={setComment}
+                onChangeText={(v) => {
+                  setComment(v)
+                  if (commentError && v.trim()) setCommentError(false)
+                }}
+                onFocus={() => setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 150)}
                 multiline
                 maxLength={300}
               />
+              {commentError ? (
+                <Text style={styles.commentErrorText}>{t('commentRequiredError')}</Text>
+              ) : null}
             </>
           )}
         </View>
@@ -538,18 +606,44 @@ export default function ConsultationSummaryScreen() {
           </LinearGradient>
         </Pressable>
       </View>
+      </KeyboardAvoidingView>
+
+      <CareHubAlert
+        visible={successVisible}
+        variant="success"
+        title={t('ratingSuccessTitle')}
+        message={t('ratingSuccessMessage')}
+        buttons={[{
+          text: t('continueButton'),
+          onPress: () => {
+            setSuccessVisible(false)
+            router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } })
+          },
+        }]}
+        onClose={() => setSuccessVisible(false)}
+      />
     </SafeAreaView>
   )
 }
 
-function Row({ icon, label, value, accent }: {
-  icon: string; label: string; value: string; accent?: boolean
+function Row({ icon, label, value, accent, photoUrl }: {
+  icon: string; label: string; value: string; accent?: boolean; photoUrl?: string | null
 }) {
   return (
     <View style={rowStyles.row}>
-      <View style={[rowStyles.iconWrap, accent && rowStyles.iconWrapAccent]}>
-        <Ionicons name={icon as any} size={16} color={accent ? colors.tealGreen : '#6B7280'} />
-      </View>
+      {photoUrl !== undefined ? (
+        photoUrl ? (
+          <Image source={{ uri: photoUrl }} style={rowStyles.avatar} />
+        ) : (
+          <View style={rowStyles.iconWrap}>
+            <Ionicons name="person" size={16} color="#6B7280" />
+          </View>
+        )
+      ) : (
+        <View style={[rowStyles.iconWrap, accent && rowStyles.iconWrapAccent]}>
+          <Ionicons name={icon as any} size={16} color={accent ? colors.tealGreen : '#6B7280'} />
+        </View>
+      )}
       <Text style={rowStyles.label}>{label}</Text>
       {value ? <Text style={rowStyles.value}>{value}</Text> : null}
     </View>
@@ -573,6 +667,7 @@ const rowStyles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
   iconWrap: { width: 30, height: 30, borderRadius: 8, backgroundColor: colors.cloudGrey, alignItems: 'center', justifyContent: 'center' },
   iconWrapAccent: { backgroundColor: '#F0FDFB' },
+  avatar: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.cloudGrey },
   label: { flex: 1, fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack },
   value: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280', flexShrink: 1, textAlign: 'right', maxWidth: '50%' },
 })
@@ -630,6 +725,8 @@ const styles = StyleSheet.create({
     padding: 14, fontFamily: fonts.regular, fontSize: 14,
     color: colors.inkBlack, minHeight: 80, textAlignVertical: 'top',
   },
+  commentInputError: { borderColor: colors.error },
+  commentErrorText: { fontFamily: fonts.regular, fontSize: 12, color: colors.error, marginTop: 6 },
 
   editReviewRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
   editReviewBtn: {

@@ -7,6 +7,7 @@ import {
   Image,
   StyleSheet,
   Text,
+  Vibration,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -20,6 +21,7 @@ import { shadow } from '@/lib/shadow'
 import { createConsultationChannel } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
+import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
 import { logger } from '@/lib/logger'
 import { useTranslation } from 'react-i18next'
 
@@ -27,6 +29,15 @@ const DECLINE_REASONS = ['Currently busy', 'Wrong specialty', 'Technical issue',
 
 export default function IncomingRequestScreen() {
   const { t } = useTranslation()
+
+  // Home's checkForWaitingRequest() starts a repeating ring (Vibration.vibrate
+  // with repeat: true) right before navigating here — it auto-stops after
+  // 25s, but stop it the instant this screen mounts (the doctor has already
+  // seen the request) rather than leaving the phone buzzing through however
+  // long they take to actually tap Accept/Decline.
+  useEffect(() => {
+    Vibration.cancel()
+  }, [])
   const router = useRouter()
   const { getToken } = useAuth()
   const { user } = useUser()
@@ -86,9 +97,23 @@ export default function IncomingRequestScreen() {
   const [responded, setResponded] = useState(false)
   const navigatedRef = useRef(false)
 
+  // This full screen is the single source of truth for presenting an
+  // incoming request — mark it "shown" for as long as it's mounted so other
+  // surfaces (Home tab's own Realtime/poll detection) skip re-triggering a
+  // second dialog for the same consultation while this one is already up.
+  useEffect(() => {
+    if (!consultationId) return
+    useActiveIncomingRequestStore.getState().setShownRequestId(consultationId)
+    return () => {
+      if (useActiveIncomingRequestStore.getState().shownRequestId === consultationId) {
+        useActiveIncomingRequestStore.getState().setShownRequestId(null)
+      }
+    }
+  }, [consultationId])
+
   // ── Freshness check: this screen can be reached from a queued/duplicate
-  // push notification after the request was already handled elsewhere (the
-  // home-screen Accept modal, or another device/session). Verify the
+  // push notification after the request was already handled elsewhere
+  // (another device/session, or the patient cancelling first). Verify the
   // consultation is still actually waiting before showing Accept/Decline —
   // otherwise the doctor sees a stale dialog and a second Accept tap is a
   // no-op at best, a duplicate Stream-channel/DB-write race at worst.
@@ -126,16 +151,30 @@ export default function IncomingRequestScreen() {
   }, [consultationId])
 
   // ── Realtime: dismiss if patient cancels before doctor responds ──────────
+  // Deliberately keyed only on consultationId (not `responded`, which is
+  // always set together with navigatedRef.current — see accept/decline/
+  // freshness-check above) so the channel isn't torn down and recreated on
+  // every response. That churn matters because this screen can be frozen
+  // (native-stack keeps it mounted underneath chat/phone/video-consultation
+  // after Accept) and later reconnected without React re-running the
+  // cleanup first, which previously raced supabase-js's per-topic channel
+  // cache and threw "cannot add postgres_changes callbacks after
+  // subscribe()" on the stale, already-subscribed channel. Explicitly
+  // removing any same-topic leftover before creating a new one closes that
+  // race regardless of cause.
   useEffect(() => {
     if (!consultationId) return
+    const topic = `incoming-request-${consultationId}`
+    const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
+    if (stale) supabase.removeChannel(stale)
     const channel = supabase
-      .channel(`incoming-request-${consultationId}`)
+      .channel(topic)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },
         (payload) => {
           const status: string = (payload.new as any)?.status ?? ''
-          if (responded || navigatedRef.current) return
+          if (navigatedRef.current) return
           if (status === 'cancelled') {
             navigatedRef.current = true
             setResponded(true)
@@ -149,7 +188,7 @@ export default function IncomingRequestScreen() {
       )
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [consultationId, responded])
+  }, [consultationId])
 
   // Writes status:'accepted', retrying a couple of times on failure —
   // without this, a transient network blip or a rejected write (e.g. a
@@ -211,11 +250,15 @@ export default function IncomingRequestScreen() {
     )
   }
 
-  const declineWithReason = async (reason: string) => {
-    if (navigatedRef.current || !consultationId) return
-    navigatedRef.current = true
-    setResponded(true)
-    try {
+  // Writes status:'declined', retrying a couple of times on failure — mirrors
+  // writeAccepted below. Without this, a transient network blip or a
+  // rejected write silently leaves the row at 'waiting_for_doctor' forever
+  // while the doctor has already navigated away believing they declined.
+  // Treats "0 rows matched" as success if some other path (patient
+  // cancelled, another device already responded) already moved the row past
+  // 'waiting_for_doctor'.
+  const writeDeclined = async (id: string, reason: string): Promise<'ok' | 'failed'> => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       const token = await getToken()
       if (token) {
         const client = getAuthClient(token)
@@ -224,7 +267,7 @@ export default function IncomingRequestScreen() {
           .select('id')
           .eq('clerk_id', userId ?? user?.id ?? '')
           .maybeSingle()
-        await client
+        const { data, error } = await client
           .from('consultations')
           .update({
             status: 'declined',
@@ -232,14 +275,41 @@ export default function IncomingRequestScreen() {
             declined_by: me?.id ?? null,
             declined_at: new Date().toISOString(),
           })
-          .eq('id', consultationId)
+          .eq('id', id)
+          .eq('status', 'waiting_for_doctor')
+          .select('id')
+        if (!error && data && data.length > 0) return 'ok'
+        if (!error) {
+          const { data: row } = await client.from('consultations').select('status').eq('id', id).single()
+          if (row?.status !== 'waiting_for_doctor') return 'ok'
+        }
       }
-    } catch {
-      // best effort
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500))
     }
+    return 'failed'
+  }
+
+  const alertDeclineFailed = (id: string, reason: string, name: string) => {
+    Alert.alert(
+      'Connection Issue',
+      `We couldn't confirm declining the request from ${name}. Retry now?`,
+      [
+        { text: 'Retry', onPress: async () => { const result = await writeDeclined(id, reason); if (result !== 'ok') alertDeclineFailed(id, reason, name) } },
+        { text: 'Dismiss', style: 'cancel' },
+      ],
+    )
+  }
+
+  const declineWithReason = async (reason: string) => {
+    if (navigatedRef.current || !consultationId) return
+    navigatedRef.current = true
+    setResponded(true)
     router.canGoBack()
       ? router.back()
       : router.replace('/(doctor)/(tabs)/home' as never)
+
+    const result = await writeDeclined(consultationId, reason)
+    if (result !== 'ok') alertDeclineFailed(consultationId, reason, effectivePatientName)
   }
 
   const handleDecline = () => {
@@ -400,7 +470,7 @@ export default function IncomingRequestScreen() {
           <View style={styles.infoRow}>
             <Ionicons name="person-outline" size={15} color="rgba(255,255,255,0.5)" />
             <Text style={styles.infoLabel}>Patient</Text>
-            <Text style={styles.infoValue}>{patientName ?? 'Patient'}</Text>
+            <Text style={styles.infoValue}>{effectivePatientName}</Text>
           </View>
           <View style={styles.infoDivider} />
           <View style={styles.infoRow}>

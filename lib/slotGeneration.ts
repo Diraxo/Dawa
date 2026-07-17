@@ -42,14 +42,81 @@ export function localDateString(d: Date): string {
   return `${y}-${m}-${day}`
 }
 
-// A slot on today's date is past once its full duration (start -> start +
-// duration) has already elapsed — matches the "full slot must fit" rule
-// used everywhere else (getAvailableSlots, book_appointment_slot).
+const ETHIOPIA_TZ = 'Africa/Addis_Ababa'
+
+// Wall-clock date/time as observed in Africa/Addis_Ababa right now, derived
+// from the true instant (Date.now(), never wrong) via Intl rather than the
+// device's own getHours()/getDate() — those reflect whatever timezone the
+// device happens to be configured for, which may not be Ethiopia's even for
+// a patient physically in Ethiopia (misconfigured device, traveler, etc).
+// The spec requires Ethiopia local time as the single source of truth,
+// evaluated down to the second, independent of the device.
+function nowInEthiopia() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: ETHIOPIA_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date())
+  const get = (type: string) => Number(parts.find(p => p.type === type)?.value ?? '0')
+  // hour12: false yields "24" at Ethiopia-midnight in some ICU builds.
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') % 24, minute: get('minute'), second: get('second') }
+}
+
+function ethiopiaDateString(): string {
+  const { year, month, day } = nowInEthiopia()
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+// The UTC instant boundaries of "today" as observed in Africa/Addis_Ababa —
+// for filtering `scheduled_at`/`ended_at` timestamptz columns by calendar
+// day. Doctor screens previously computed "today" via `new Date();
+// today.setHours(0,0,0,0)`, i.e. the DEVICE's local midnight — consistent
+// with each other, but not with the Ethiopia wall-clock date this file's
+// booking/slot logic is anchored to everywhere else, so a doctor whose
+// device isn't set to Africa/Addis_Ababa could see a boundary that disagrees
+// with the actual Ethiopia booking day. Africa/Addis_Ababa is UTC+3 with no
+// DST, so Ethiopia midnight is always UTC 21:00 the previous day —
+// Date.UTC's hour argument normalizes -3 into that rollback automatically.
+export function ethiopiaTodayRange(): { startIso: string; endIso: string } {
+  const { year, month, day } = nowInEthiopia()
+  const start = new Date(Date.UTC(year, month - 1, day, -3, 0, 0))
+  const end = new Date(Date.UTC(year, month - 1, day + 1, -3, 0, 0))
+  return { startIso: start.toISOString(), endIso: end.toISOString() }
+}
+
+// Adds `days` to a YYYY-MM-DD calendar date via UTC arithmetic (never a
+// device-local Date), so day rollover can't be nudged by the device's own
+// timezone either.
+function addDaysToDateString(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d + days))
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
+}
+
+function formatWeekdayLabel(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  // Noon UTC keeps the calendar date stable regardless of device timezone
+  // when formatting for display below.
+  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
+  })
+}
+
+// A slot is past the instant its own start time is reached — not once its
+// full duration has elapsed. (It previously used `+ SLOT_DURATION_MINS`,
+// which kept a 14:20 slot showing as bookable until 14:40 — the exact stale
+// -slot bug reported: "current time 14:25, scheduler still showed 14:20.")
+// This matches the server-side guard in book_appointment_slot() /
+// reschedule_appointment_slot() (`slot_start < now() - 2min` grace), and is
+// evaluated against Ethiopia wall-clock time down to the second.
 export function isSlotPast(dayValue: string, slot: string): boolean {
-  const now = new Date()
-  if (dayValue !== localDateString(now)) return false
-  const nowMins = now.getHours() * 60 + now.getMinutes()
-  return parseTimeMins(slot) + SLOT_DURATION_MINS <= nowMins
+  const today = ethiopiaDateString()
+  if (dayValue < today) return true
+  if (dayValue > today) return false
+  const { hour, minute, second } = nowInEthiopia()
+  const nowSecs = hour * 3600 + minute * 60 + second
+  return parseTimeMins(slot) * 60 <= nowSecs
 }
 
 export function getAvailableSlots(availability: Availability | null | undefined, dayValue: string): string[] {
@@ -68,27 +135,27 @@ export function getAvailableSlots(availability: Availability | null | undefined,
 
 export function getNextDays(count: number, availability?: Availability | null) {
   const days = []
-  const now = new Date()
+  const today = ethiopiaDateString()
   for (let i = 0; i < count; i++) {
-    const d = new Date(now)
-    d.setDate(now.getDate() + i)
-    const value = localDateString(d)
+    const value = i === 0 ? today : addDaysToDateString(today, i)
     if (availability) {
       const slots = getAvailableSlots(availability, value)
       if (slots.length === 0) continue
     }
     days.push({
-      label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+      label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatWeekdayLabel(value),
       value,
     })
   }
   return days
 }
 
-// Must produce a UTC ISO string, not a bare local-looking timestamp — the
-// backend column is timestamptz, and a string with no offset gets interpreted
-// in the DB session's timezone (UTC), silently shifting the booking by the
-// device's UTC offset relative to what the patient picked and saw on screen.
+// Ethiopia is a fixed UTC+3 offset year-round (no DST) — construct the
+// instant directly in UTC rather than trusting `new Date("...T...")` to
+// interpret a bare local-looking timestamp, which silently shifts the
+// booking by the device's own UTC offset relative to Ethiopia's whenever the
+// device isn't itself set to Africa/Addis_Ababa (spec: Ethiopia local time
+// is the single source of truth, not the device's).
 export function parseScheduledAt(dayValue: string, timeSlot: string): string {
   const [timePart, meridiem] = timeSlot.split(' ')
   const [hourStr, minStr] = timePart.split(':')
@@ -96,5 +163,6 @@ export function parseScheduledAt(dayValue: string, timeSlot: string): string {
   const min = parseInt(minStr, 10)
   if (meridiem === 'PM' && hour !== 12) hour += 12
   if (meridiem === 'AM' && hour === 12) hour = 0
-  return new Date(`${dayValue}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`).toISOString()
+  const [y, m, d] = dayValue.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d, hour - 3, min, 0)).toISOString()
 }

@@ -66,7 +66,7 @@ export default function SignUpScreen() {
   const [globalError, setGlobalError] = useState('')
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
-  const [facebookLoading, setFacebookLoading] = useState(false)
+  const [appleLoading, setAppleLoading] = useState(false)
 
   const isFormReady = fullName.trim().length > 1 && isValidEmail(email) && password.length >= 8 && password === confirmPassword
 
@@ -210,15 +210,15 @@ export default function SignUpScreen() {
     }
   }, [googleLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
 
-  // ── Facebook SSO (Clerk) ──────────────────────────────────────────────────
-  const handleFacebook = useCallback(async () => {
-    if (facebookLoading) return
-    setFacebookLoading(true)
+  // ── Apple SSO (Clerk) ─────────────────────────────────────────────────────
+  const handleApple = useCallback(async () => {
+    if (appleLoading) return
+    setAppleLoading(true)
     setGlobalError('')
     ssoInProgressRef.current = true
     try {
       const redirectUrl = AuthSession.makeRedirectUri()
-      const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_facebook', redirectUrl })
+      const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_apple', redirectUrl })
       if (createdSessionId && setActive) {
         await setActive({ session: createdSessionId })
         // useEffect above will fire once isSignedIn/userId updates
@@ -230,12 +230,12 @@ export default function SignUpScreen() {
         if (userId) checkRoleAndRedirect(userId)
         else router.replace('/(auth)/role' as never)
       } else if (code !== 'oauth_access_denied') {
-        setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
+        setGlobalError(err?.errors?.[0]?.message ?? 'Apple sign-in failed. Please try again.')
       }
     } finally {
-      setFacebookLoading(false)
+      setAppleLoading(false)
     }
-  }, [facebookLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
+  }, [appleLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
 
   return (
     <KeyboardAvoidingView
@@ -430,6 +430,18 @@ export default function SignUpScreen() {
               }
             </LinearGradient>
           </Pressable>
+
+          <Text style={styles.legalText}>
+            By continuing, you agree to our{' '}
+            <Text style={styles.legalLink} onPress={() => router.push('/(public)/terms' as never)}>
+              Terms of Service
+            </Text>
+            {' '}and{' '}
+            <Text style={styles.legalLink} onPress={() => router.push('/(public)/privacy-policy' as never)}>
+              Privacy Policy
+            </Text>
+            .
+          </Text>
         </View>
 
         {/* ── OR DIVIDER ── */}
@@ -439,30 +451,32 @@ export default function SignUpScreen() {
           <View style={styles.orLine} />
         </View>
 
+        {/* ── APPLE (iOS only, per App Store Guideline 4.8) ── */}
+        {Platform.OS === 'ios' && (
+          <Pressable
+            onPress={handleApple}
+            disabled={appleLoading}
+            style={[styles.socialBtn, styles.appleBtn, appleLoading && styles.dimmed]}
+          >
+            {appleLoading
+              ? <ActivityIndicator size="small" color="#FFFFFF" />
+              : <Ionicons name="logo-apple" size={20} color="#FFFFFF" />
+            }
+            <Text style={[styles.socialBtnText, styles.appleBtnText]}>Continue with Apple</Text>
+          </Pressable>
+        )}
+
         {/* ── GOOGLE ── */}
         <Pressable
           onPress={handleGoogle}
           disabled={googleLoading}
-          style={[styles.socialBtn, googleLoading && styles.dimmed]}
+          style={[styles.socialBtn, Platform.OS === 'ios' && styles.socialBtnMarginTop, googleLoading && styles.dimmed]}
         >
           {googleLoading
             ? <ActivityIndicator size="small" color={colors.inkBlack} />
             : <Image source={require('@/assets/Google.svg')} style={styles.socialIcon} contentFit="contain" />
           }
           <Text style={styles.socialBtnText}>{t('continueWithGoogle')}</Text>
-        </Pressable>
-
-        {/* ── FACEBOOK ── */}
-        <Pressable
-          onPress={handleFacebook}
-          disabled={facebookLoading}
-          style={[styles.socialBtn, styles.socialBtnMarginTop, facebookLoading && styles.dimmed]}
-        >
-          {facebookLoading
-            ? <ActivityIndicator size="small" color={colors.inkBlack} />
-            : <Image source={require('@/assets/fb.svg.png')} style={styles.socialIcon} contentFit="contain" />
-          }
-          <Text style={styles.socialBtnText}>{t('continueWithFacebook')}</Text>
         </Pressable>
 
         {/* ── LOGIN LINK ── */}
@@ -522,6 +536,9 @@ const styles = StyleSheet.create({
   continueText: { fontFamily: fonts.bold, fontSize: 16, color: '#FFFFFF' },
   dimmed: { opacity: 0.5 },
 
+  legalText: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF', textAlign: 'center', marginTop: 14, lineHeight: 18 },
+  legalLink: { fontFamily: fonts.medium, color: colors.tealGreen },
+
   orRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 24, gap: 10 },
   orLine: { flex: 1, height: 1, backgroundColor: colors.steelGrey },
   orText: { fontFamily: fonts.medium, fontSize: 13, color: '#9CA3AF' },
@@ -533,6 +550,8 @@ const styles = StyleSheet.create({
   socialBtnMarginTop: { marginTop: 12 },
   socialBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   socialIcon: { width: 24, height: 24 },
+  appleBtn: { backgroundColor: '#000000', borderColor: '#000000' },
+  appleBtnText: { color: '#FFFFFF' },
 
   loginRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 28, paddingBottom: 8 },
   loginText: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' },

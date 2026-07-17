@@ -17,6 +17,8 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
@@ -75,6 +77,7 @@ export default function WaitingRoomScreen() {
   const navigated = useRef(false)
   const myUserIdRef = useRef<string | null>(null)
   const [doctorInfo, setDoctorInfo] = useState<DoctorInfo | null>(null)
+  const [doctorUserRowId, setDoctorUserRowId] = useState<string | null>(null)
   const [consultStatus, setConsultStatus] = useState<string>('waiting_for_doctor')
   const [creditState, setCreditState] = useState<CreditState | null>(null)
   const [cancelledState, setCancelledState] = useState<CreditState | null>(null)
@@ -122,7 +125,7 @@ export default function WaitingRoomScreen() {
     if (!consultationId) return
     supabase
       .from('consultations')
-      .select('doctor:doctor_profiles(specialty, years_experience, hospital_name, user:users(full_name, profile_photo_url))')
+      .select('doctor:doctor_profiles(specialty, years_experience, hospital_name, user:users(id, full_name, profile_photo_url))')
       .eq('id', consultationId)
       .single()
       .then(({ data }) => {
@@ -136,13 +139,48 @@ export default function WaitingRoomScreen() {
           yearsExperience: dp.years_experience ?? null,
           hospitalName:    dp.hospital_name ?? null,
         })
+        setDoctorUserRowId(u.id ?? null)
       })
   }, [consultationId])
+
+  // Doctor may edit their name/photo while a patient is sitting in the
+  // waiting room — the fetch above only ever runs once, so without this the
+  // patient would see stale identity for the whole wait.
+  const { name: liveDoctorName, photoUrl: liveDoctorPhotoUrl } = useUserProfileRealtime(
+    doctorUserRowId,
+    doctorInfo?.fullName,
+    doctorInfo?.photoUrl
+  )
 
   // Keep a ref to doctorInfo so the subscription callback always reads the
   // latest value without needing to be recreated when it loads.
   const doctorInfoRef = useRef<DoctorInfo | null>(null)
   useEffect(() => { doctorInfoRef.current = doctorInfo }, [doctorInfo])
+
+  // Doctor's specialty/hospital live on `doctor_profiles`, not `users`, so
+  // useUserProfileRealtime (name/photo only) never catches an edit to those
+  // fields — the fetch above only ever runs once, so without this the
+  // patient would see a stale specialty/hospital for the whole wait.
+  useEffect(() => {
+    if (!doctorId) return
+    const channel = supabase
+      .channel(`waiting-room-doctor-profile-${doctorId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorId}` },
+        (payload) => {
+          const updated = payload.new as any
+          setDoctorInfo(prev => prev ? {
+            ...prev,
+            specialty: updated.specialty ?? prev.specialty,
+            hospitalName: updated.hospital_name ?? prev.hospitalName,
+            yearsExperience: updated.years_experience ?? prev.yearsExperience,
+          } : prev)
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [doctorId])
 
   // ── Realtime subscription: track consultation status ─────────────────────
   useEffect(() => {
@@ -192,7 +230,7 @@ export default function WaitingRoomScreen() {
               .then(({ data }) => {
                 const amount = Number(data?.credit_amount ?? 0)
                 setCreditState({
-                  doctorName:           doctorInfo?.fullName ?? doctorNameParam ?? 'The doctor',
+                  doctorName:           doctorInfo?.fullName ?? doctorNameParam ?? '',
                   creditAmount:         amount,
                   creditConsultationId: consultationId,
                 })
@@ -207,7 +245,7 @@ export default function WaitingRoomScreen() {
               .single()
               .then(({ data }) => {
                 setCancelledState({
-                  doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'the doctor',
+                  doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? '',
                   creditAmount:         Number(data?.credit_amount ?? 0),
                   creditConsultationId: consultationId,
                 })
@@ -258,7 +296,7 @@ export default function WaitingRoomScreen() {
           .single()
           .then(({ data: cd }) => {
             setCreditState({
-              doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? 'The doctor',
+              doctorName:           doctorInfoRef.current?.fullName ?? doctorNameParam ?? '',
               creditAmount:         Number(cd?.credit_amount ?? 0),
               creditConsultationId: consultationId,
             })
@@ -356,7 +394,7 @@ export default function WaitingRoomScreen() {
     const issueCopy =
       callIssueState.reason === 'call_declined' ? 'You declined the call.' :
       callIssueState.reason === 'ended_abnormally' ? 'The call was disconnected before it could connect.' :
-      `You didn't answer in time when Dr. ${callIssueState.doctorName} called.`
+      `You didn't answer in time when ${formatDoctorName(callIssueState.doctorName)} called.`
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -374,7 +412,7 @@ export default function WaitingRoomScreen() {
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
-            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId, autoBook: '1', consultationType } })}
           >
             <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Try Again</Text>
@@ -397,7 +435,7 @@ export default function WaitingRoomScreen() {
 
           <Text style={styles.creditTitle}>Request Cancelled</Text>
           <Text style={styles.creditSub}>
-            You cancelled your consultation request with Dr. {cancelledState.doctorName}.
+            You cancelled your consultation request with {formatDoctorName(cancelledState.doctorName)}.
           </Text>
 
           {cancelledState.creditAmount > 0 && (
@@ -412,7 +450,7 @@ export default function WaitingRoomScreen() {
 
           <Pressable
             style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
-            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId, autoBook: '1', consultationType } })}
           >
             <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Reschedule</Text>
@@ -443,7 +481,7 @@ export default function WaitingRoomScreen() {
 
           <Text style={styles.creditTitle}>Consultation Unavailable</Text>
           <Text style={styles.creditSub}>
-            Dr. {creditState.doctorName} is unavailable.
+            {formatDoctorName(creditState.doctorName)} is unavailable.
           </Text>
 
           <View style={styles.creditCard}>
@@ -468,7 +506,7 @@ export default function WaitingRoomScreen() {
 
           <Pressable
             style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
-            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId } })}
+            onPress={() => router.replace({ pathname: '/(patient)/doctor-profile' as any, params: { id: doctorId, autoBook: '1', consultationType } })}
           >
             <Ionicons name="calendar-outline" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Reschedule</Text>
@@ -480,7 +518,8 @@ export default function WaitingRoomScreen() {
     )
   }
 
-  const displayName   = doctorInfo?.fullName ?? doctorNameParam ?? 'Doctor'
+  const displayName   = formatDoctorName(liveDoctorName ?? doctorInfo?.fullName ?? doctorNameParam, 'Doctor')
+  const displayPhotoUrl = liveDoctorPhotoUrl ?? doctorInfo?.photoUrl ?? null
   const statusMeta    = STATUS_LABELS[consultStatus] ?? STATUS_LABELS.waiting_for_doctor
   const estimatedTime = '5 – 10 minutes'
 
@@ -522,8 +561,8 @@ export default function WaitingRoomScreen() {
           <Text style={styles.sectionLabel}>Your Doctor</Text>
 
           <View style={styles.doctorRow}>
-            {doctorInfo?.photoUrl ? (
-              <Image source={{ uri: doctorInfo.photoUrl }} style={styles.doctorPhoto} />
+            {displayPhotoUrl ? (
+              <Image source={{ uri: displayPhotoUrl }} style={styles.doctorPhoto} />
             ) : (
               <View style={styles.doctorPhotoPlaceholder}>
                 <Ionicons name="person" size={36} color={colors.steelGrey} />

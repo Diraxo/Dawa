@@ -3,6 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Image,
   Modal,
   Pressable,
@@ -18,7 +19,8 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
-import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
+import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
@@ -33,12 +35,35 @@ interface DoctorData {
   languages?: string[] | null
 }
 interface ReviewData {
-  id: string; patientName: string; rating: number; comment: string; date: string
+  id: string; patientName: string; patientPhotoUrl: string | null
+  rating: number; comment: string; date: string; consultationType: string | null
+}
+
+const REVIEWS_PAGE_SIZE = 5
+
+function mapReviewRow(r: any): ReviewData {
+  return {
+    id: r.id,
+    patientName: r.patient_name ?? 'Former Patient',
+    patientPhotoUrl: r.patient_photo_url ?? null,
+    rating: r.rating,
+    comment: r.comment ?? '',
+    date: new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    consultationType: r.consultation_type ?? null,
+  }
 }
 
 export default function DoctorProfileScreen() {
   const { t } = useTranslation()
-  const { id } = useLocalSearchParams<{ id: string }>()
+  const { id, autoBook, consultationType } = useLocalSearchParams<{
+    id: string
+    // Set by the waiting-room screen when a consultation was just
+    // cancelled/declined — jumps straight into the booking sheet (at the
+    // date/time step, same consultation type) instead of leaving the patient
+    // to find and tap "Book Appointment" on this profile themselves.
+    autoBook?: string
+    consultationType?: string
+  }>()
   const router = useRouter()
 
   const CONSULT_OPTIONS = [
@@ -47,11 +72,19 @@ export default function DoctorProfileScreen() {
     { id: 'video' as const, label: t('videoCall'), icon: 'videocam', color: '#7C3AED', desc: t('faceToFaceVideo') },
   ]
   const [bookingVisible, setBookingVisible] = useState(false)
+  const autoBookedRef = useRef(false)
   const [imageFullscreen, setImageFullscreen] = useState(false)
   const [doctor, setDoctor] = useState<DoctorData | null>(null)
   const [reviews, setReviews] = useState<ReviewData[]>([])
   const [loading, setLoading] = useState(true)
-  const livePhotoUrl = useUserPhotoRealtime(doctor?.userId, doctor?.profile_photo_url)
+  const [reviewsOffset, setReviewsOffset] = useState(0)
+  const [hasMoreReviews, setHasMoreReviews] = useState(true)
+  const [loadingMoreReviews, setLoadingMoreReviews] = useState(false)
+  // Doctor renaming mid-view was previously invisible here — only photo was
+  // kept live (via a `users` subscription), name was set once in fetchDoctor
+  // and never revisited.
+  const { name: liveName, photoUrl: livePhotoUrl } = useUserProfileRealtime(doctor?.userId, doctor?.name, doctor?.profile_photo_url)
+  const displayName = formatDoctorName(normalizeNameCase(liveName ?? doctor?.name), 'Doctor')
 
   // Latest known realtime-derived fields for this doctor. A REST fetch
   // (initial load, or the post-SUBSCRIBED reconciliation fetch below) can
@@ -68,7 +101,14 @@ export default function DoctorProfileScreen() {
   useEffect(() => {
     if (!id) return
     let mounted = true
-    const CHANNEL_NAME = `patient-doctor-profile-status-${id}`
+    // Suffixed with Date.now() because `supabase.channel()` dedupes by topic
+    // string and returns any existing channel for the same topic — if a
+    // prior mount's `removeChannel()` (async unsubscribe, then teardown)
+    // hasn't finished when this effect re-runs (e.g. two stack instances of
+    // the same doctor's profile mounted at once), we'd otherwise get handed
+    // back the old, already-subscribed channel and `.on()` would throw
+    // ("cannot add postgres_changes callbacks ... after subscribe()").
+    const CHANNEL_NAME = `patient-doctor-profile-status-${id}-${Date.now()}`
     realtimeKnownRef.current = {}
 
     const fetchDoctor = async () => {
@@ -81,7 +121,7 @@ export default function DoctorProfileScreen() {
       if (dp) {
         setDoctor({
           id: dp.id,
-          name: (dp as any).users?.full_name ?? 'Dr. Unknown',
+          name: formatDoctorName((dp as any).users?.full_name, 'Dr. Unknown'),
           subtitle: dp.hospital_name ?? undefined,
           specialty: dp.specialty ?? 'General',
           rating_average: Number(dp.rating_average) ?? 0,
@@ -106,13 +146,15 @@ export default function DoctorProfileScreen() {
 
     ;(async () => {
       // Fired concurrently with the doctor fetch (not awaited yet) so it
-      // doesn't delay first paint of the doctor's own data.
-      const reviewsPromise = supabase
-        .from('reviews')
-        .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
-        .eq('doctor_id', id)
-        .order('created_at', { ascending: false })
-        .limit(10)
+      // doesn't delay first paint of the doctor's own data. Uses the
+      // get_doctor_reviews RPC (one review per patient — their latest —
+      // with a live-joined current name/photo bypassing users RLS) rather
+      // than querying `reviews` directly.
+      const reviewsPromise = supabase.rpc('get_doctor_reviews', {
+        p_doctor_id: id,
+        p_limit: REVIEWS_PAGE_SIZE,
+        p_offset: 0,
+      })
 
       // Fetch the doctor first, subscribe after — joining the realtime
       // channel concurrently with this REST fetch let UPDATE events land in
@@ -178,15 +220,9 @@ export default function DoctorProfileScreen() {
       const { data: rv } = await reviewsPromise
       if (!mounted) return
       if (rv) {
-        setReviews(
-          rv.map((r: any) => ({
-            id: r.id,
-            patientName: r.patient?.full_name ?? 'Patient',
-            rating: r.rating,
-            comment: r.comment ?? '',
-            date: new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          }))
-        )
+        setReviews(rv.map(mapReviewRow))
+        setHasMoreReviews(rv.length === REVIEWS_PAGE_SIZE)
+        setReviewsOffset(rv.length)
       }
     })()
 
@@ -196,11 +232,34 @@ export default function DoctorProfileScreen() {
     }
   }, [id])
 
+  useEffect(() => {
+    if (doctor && autoBook === '1' && !autoBookedRef.current) {
+      autoBookedRef.current = true
+      setBookingVisible(true)
+    }
+  }, [doctor, autoBook])
+
   const getPrice = (type: 'chat' | 'phone' | 'video') => {
     if (!doctor) return 0
     if (type === 'chat') return doctor.chat_price
     if (type === 'phone') return doctor.phone_price
     return doctor.video_price
+  }
+
+  const loadMoreReviews = async () => {
+    if (!id || loadingMoreReviews || !hasMoreReviews) return
+    setLoadingMoreReviews(true)
+    const { data } = await supabase.rpc('get_doctor_reviews', {
+      p_doctor_id: id,
+      p_limit: REVIEWS_PAGE_SIZE,
+      p_offset: reviewsOffset,
+    })
+    if (data) {
+      setReviews(prev => [...prev, ...data.map(mapReviewRow)])
+      setHasMoreReviews(data.length === REVIEWS_PAGE_SIZE)
+      setReviewsOffset(prev => prev + data.length)
+    }
+    setLoadingMoreReviews(false)
   }
 
   if (loading || !doctor) {
@@ -225,7 +284,7 @@ export default function DoctorProfileScreen() {
           style={styles.shareBtn}
           onPress={() =>
             Share.share({
-              message: `${doctor?.name ?? 'Doctor'} — ${doctor?.specialty ?? 'Specialist'} on Dawa`,
+              message: `${displayName} — ${doctor?.specialty ?? 'Specialist'} on Dawa`,
             })
           }
         >
@@ -258,7 +317,7 @@ export default function DoctorProfileScreen() {
             )}
           </View>
 
-          <Text style={styles.heroName}>{doctor.name}</Text>
+          <Text style={styles.heroName}>{displayName}</Text>
           <Text style={styles.heroSpecialty}>{doctor.specialty}</Text>
           {doctor.subtitle ? (
             <View style={styles.hospitalRow}>
@@ -357,25 +416,50 @@ export default function DoctorProfileScreen() {
             <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#9CA3AF' }}>
               {t('noReviewsYet')}
             </Text>
-          ) : reviews.map(review => (
-            <View key={review.id} style={styles.reviewCard}>
-              <View style={styles.reviewHeader}>
-                <View style={styles.reviewAvatar}>
-                  <Text style={styles.reviewAvatarText}>{review.patientName.charAt(0)}</Text>
-                </View>
-                <View style={styles.reviewMeta}>
-                  <Text style={styles.reviewName}>{review.patientName}</Text>
-                  <View style={styles.starsRow}>
-                    {Array.from({ length: 5 }).map((_, i) => (
-                      <Ionicons key={i} name="star" size={12} color={i < review.rating ? colors.warning : colors.steelGrey} />
-                    ))}
-                    <Text style={styles.reviewDate}>{review.date}</Text>
+          ) : (
+            <>
+              {reviews.map(review => (
+                <View key={review.id} style={styles.reviewCard}>
+                  <View style={styles.reviewHeader}>
+                    {review.patientPhotoUrl ? (
+                      <Image source={{ uri: review.patientPhotoUrl }} style={styles.reviewAvatar} />
+                    ) : (
+                      <View style={styles.reviewAvatar}>
+                        <Text style={styles.reviewAvatarText}>{review.patientName.charAt(0)}</Text>
+                      </View>
+                    )}
+                    <View style={styles.reviewMeta}>
+                      <Text style={styles.reviewName}>{review.patientName}</Text>
+                      <View style={styles.starsRow}>
+                        {Array.from({ length: 5 }).map((_, i) => (
+                          <Ionicons key={i} name="star" size={12} color={i < review.rating ? colors.warning : colors.steelGrey} />
+                        ))}
+                        <Text style={styles.reviewDate}>{review.date}</Text>
+                      </View>
+                    </View>
+                  </View>
+                  <Text style={styles.reviewComment}>{review.comment}</Text>
+                  <View style={styles.verifiedBadge}>
+                    <Ionicons name="checkmark-circle" size={12} color={colors.tealGreen} />
+                    <Text style={styles.verifiedBadgeText}>{t('verifiedConsultation')}</Text>
                   </View>
                 </View>
-              </View>
-              <Text style={styles.reviewComment}>{review.comment}</Text>
-            </View>
-          ))}
+              ))}
+              {hasMoreReviews && (
+                <Pressable
+                  style={({ pressed }) => [styles.showMoreBtn, pressed && { opacity: 0.7 }]}
+                  onPress={loadMoreReviews}
+                  disabled={loadingMoreReviews}
+                >
+                  {loadingMoreReviews ? (
+                    <ActivityIndicator size="small" color={colors.careBlue} />
+                  ) : (
+                    <Text style={styles.showMoreBtnText}>{t('showMoreReviews')}</Text>
+                  )}
+                </Pressable>
+              )}
+            </>
+          )}
         </Section>
 
         <View style={{ height: 100 }} />
@@ -402,6 +486,8 @@ export default function DoctorProfileScreen() {
         visible={bookingVisible}
         doctor={doctor as any}
         onClose={() => setBookingVisible(false)}
+        initialStep={autoBook === '1' ? 2 : 1}
+        initialConsultType={(consultationType as 'chat' | 'phone' | 'video' | undefined) ?? 'chat'}
       />
 
       {/* Fullscreen image viewer */}
@@ -527,6 +613,14 @@ const styles = StyleSheet.create({
   starsRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginTop: 2 },
   reviewDate: { fontFamily: fonts.regular, fontSize: 11, color: '#9CA3AF', marginLeft: 6 },
   reviewComment: { fontFamily: fonts.regular, fontSize: 13, color: '#374151', lineHeight: 20 },
+  verifiedBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 8 },
+  verifiedBadgeText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.tealGreen },
+  showMoreBtn: {
+    alignItems: 'center', justifyContent: 'center',
+    height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.careBlue,
+    marginTop: 4,
+  },
+  showMoreBtnText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.careBlue },
 
   // Fullscreen image
   fsOverlay: {

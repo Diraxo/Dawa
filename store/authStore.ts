@@ -76,8 +76,12 @@ export const useAuthStore = create<AuthState>()(
       },
 
       clearAuth: () => {
-        // Disconnect Stream before clearing state to prevent orphan connections
-        try { streamClient.disconnectUser() } catch {}
+        // Disconnect Stream before clearing state to prevent orphan connections.
+        // Must .catch (not just wrap in try/catch) — this is fire-and-forget,
+        // and a sync try/catch around an unawaited promise does not catch its
+        // rejection, which otherwise surfaces as an unhandled promise rejection
+        // (e.g. AxiosError: Network Error) when the disconnect call is offline.
+        streamClient.disconnectUser().catch(() => {})
         set({
           userRole: null,
           userId: null,

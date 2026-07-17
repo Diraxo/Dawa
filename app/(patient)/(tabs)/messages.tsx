@@ -15,8 +15,10 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { Conversation, ConversationItem } from '@/components/ui/ConversationItem'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
+import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { logger } from '@/lib/logger'
 import { useTranslation } from 'react-i18next'
@@ -65,12 +67,53 @@ export default function MessagesScreen() {
   const [matchingChannelIds, setMatchingChannelIds] = useState<Set<string>>(new Set())
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Latest known-live doctor identity, keyed by doctor `users.id`. Stream's
+  // channel `data.doctorName`/`doctorPhotoUrl` are a one-time snapshot taken
+  // when the doctor accepted that specific consultation (see
+  // app/(doctor)/incoming-request.tsx's createConsultationChannel call) and
+  // are never updated again — a doctor who later renames or changes their
+  // photo would otherwise show the old identity on every one of their
+  // channels forever. Supabase `users` is the actual source of truth, so its
+  // value always wins over both the frozen channel data AND Stream's own
+  // (also session-stale) user object. Persisted in a ref so a realtime
+  // UPDATE received between focus-effect re-runs isn't lost to the next
+  // Stream refetch clobbering it back to stale data.
+  const latestDoctorProfilesRef = useRef<Map<string, { name: string; photoUrl: string | null }>>(new Map())
+
+  const applyLatestDoctorProfiles = (convos: Conversation[]): Conversation[] =>
+    convos.map((c) => {
+      const known = latestDoctorProfilesRef.current.get(c.peerId)
+      return known ? { ...c, peerName: known.name, peerPhotoUrl: known.photoUrl } : c
+    })
+
   // ── Focus effect: fetch + real-time subscriptions ─────────────────────────
 
   useFocusEffect(
     useCallback(() => {
       if (!isStreamConnected || !userId) return
       const cancelled = { value: false }
+
+      // Fetches the current name/photo for every doctor in the list directly
+      // from Supabase and overlays it onto already-rendered conversations —
+      // the one true fix for Issue 1 (see comment on latestDoctorProfilesRef
+      // above). Runs after the Stream-derived list is already on screen so
+      // it never blocks first paint.
+      const syncDoctorIdentities = async (convos: Conversation[]) => {
+        const peerIds = Array.from(new Set(convos.map((c) => c.peerId).filter(Boolean)))
+        if (peerIds.length === 0) return
+        const { data, error } = await supabase
+          .from('users')
+          .select('id, full_name, profile_photo_url')
+          .in('id', peerIds)
+        if (error || !data || cancelled.value) return
+        for (const row of data as any[]) {
+          latestDoctorProfilesRef.current.set(row.id, {
+            name: formatDoctorName(row.full_name, 'Doctor'),
+            photoUrl: row.profile_photo_url ?? null,
+          })
+        }
+        setConversations((prev) => applyLatestDoctorProfiles(prev))
+      }
 
       const loadConversations = async () => {
         try {
@@ -95,10 +138,10 @@ export default function MessagesScreen() {
                 (d?.doctorId as string | undefined) ??
                 doctorMember?.user?.id ??
                 '',
-              peerName:
-                (d?.doctorName as string | undefined) ??
-                doctorMember?.user?.name ??
-                'Doctor',
+              peerName: formatDoctorName(
+                (d?.doctorName as string | undefined) ?? doctorMember?.user?.name,
+                'Doctor'
+              ),
               peerSubtitle: (d?.doctorSubtitle as string | undefined) ?? '',
               peerPhotoUrl:
                 (doctorMember?.user?.image as string | undefined) ??
@@ -119,7 +162,8 @@ export default function MessagesScreen() {
               ) as 'active' | 'completed',
             }
           })
-          setConversations(convos)
+          setConversations(applyLatestDoctorProfiles(convos))
+          syncDoctorIdentities(convos)
         } catch (err) {
           logger.error('[Messages] queryChannels error:', err)
         } finally {
@@ -185,7 +229,11 @@ export default function MessagesScreen() {
       })
 
       // Live avatar update — e.g. the doctor changes their profile photo
-      // while this list is open.
+      // while this list is open. Best-effort/secondary: Stream's own user
+      // object is only as fresh as the doctor's last connectUser() (or a
+      // pushOwnPhotoToStream call), so the Supabase subscription below is
+      // the authoritative one — this just gets the pixel on screen a little
+      // sooner when Stream happens to have it already.
       const sub5 = streamClient.on('user.updated', (event) => {
         const updatedUserId = event.user?.id
         if (!updatedUserId) return
@@ -196,6 +244,35 @@ export default function MessagesScreen() {
         )
       })
 
+      // The authoritative live source for Issue 1 — Supabase `users` is
+      // where a doctor's profile edit actually lands, independent of
+      // whether Stream ever learns about it this session. No column filter
+      // is possible here (multiple distinct doctor ids), so this subscribes
+      // to all `users` UPDATEs and filters client-side against the known
+      // conversation peer ids, matching the same broad-subscribe pattern
+      // already used in app/(patient)/(tabs)/home.tsx and doctors.tsx.
+      const USERS_CHANNEL = `patient-messages-doctor-identity-${userId}`
+      const staleUsersChannel = supabase.getChannels().find((c) => c.topic === `realtime:${USERS_CHANNEL}`)
+      if (staleUsersChannel) supabase.removeChannel(staleUsersChannel)
+      const sub6 = supabase
+        .channel(USERS_CHANNEL)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'users' },
+          (payload) => {
+            const updated = payload.new as any
+            setConversations((prev) => {
+              if (!prev.some((c) => c.peerId === updated.id)) return prev
+              latestDoctorProfilesRef.current.set(updated.id, {
+                name: formatDoctorName(updated.full_name, 'Doctor'),
+                photoUrl: updated.profile_photo_url ?? null,
+              })
+              return applyLatestDoctorProfiles(prev)
+            })
+          }
+        )
+        .subscribe()
+
       return () => {
         cancelled.value = true
         sub1.unsubscribe()
@@ -203,6 +280,7 @@ export default function MessagesScreen() {
         sub3.unsubscribe()
         sub4.unsubscribe()
         sub5.unsubscribe()
+        supabase.removeChannel(sub6)
       }
     }, [isStreamConnected, userId])
   )

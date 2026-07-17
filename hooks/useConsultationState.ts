@@ -26,6 +26,7 @@ interface ConsultationRow {
   started_at: string | null
   doctor_connected_at: string | null
   patient_connected_at: string | null
+  patient_left_at: string | null
 }
 
 export interface DeriveCallStateInput {
@@ -111,7 +112,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     let cancelled = false
     supabase
       .from('consultations')
-      .select('status, started_at, doctor_connected_at, patient_connected_at')
+      .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
       .eq('id', consultationId)
       .single()
       .then(
@@ -154,7 +155,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     const t = setInterval(() => {
       supabase
         .from('consultations')
-        .select('status, started_at, doctor_connected_at, patient_connected_at')
+        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
         .eq('id', consultationId)
         .single()
         .then(
@@ -192,12 +193,29 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
       .then(() => {}, () => {})
   }, [consultationId, role])
 
+  // Patient-only: called on every successful join/rejoin (initial connect
+  // *and* any later reconnect after "Leave Call"), unlike markSelfConnected
+  // which is a one-shot gated to the 'accepted' transition. Clears a stale
+  // patient_left_at so the doctor's "Patient has left" banner drops the
+  // instant the patient is actually back.
+  const clearPatientLeft = useCallback(() => {
+    if (role !== 'patient' || !consultationId) return
+    supabase
+      .from('consultations')
+      .update({ patient_left_at: null })
+      .eq('id', consultationId)
+      .then(() => {}, () => {})
+  }, [consultationId, role])
+
   return {
     phase: derived.phase,
     elapsedSeconds: derived.elapsedSeconds,
+    callStartedAtMs: derived.callStartedAtMs,
     startedAtIso: row?.started_at ?? null,
     isPeerConnected: role === 'doctor' ? !!row?.patient_connected_at : !!row?.doctor_connected_at,
     markSelfConnected,
+    clearPatientLeft,
+    patientHasLeft: !!row?.patient_left_at,
     rawStatus: row?.status ?? null,
   }
 }

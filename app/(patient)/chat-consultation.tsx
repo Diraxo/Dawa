@@ -20,7 +20,7 @@ import {
   Image,
 } from 'react-native'
 import * as Notifications from 'expo-notifications'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 import type { Channel } from 'stream-chat'
 
@@ -63,13 +63,20 @@ import { shadow } from '@/lib/shadow'
 import { streamClient, preloadImages, getMessageImageUrls } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
+import { isPdfAttachment } from '@/lib/pdfAttachment'
+import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
+import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
 import { useAuth } from '@clerk/clerk-expo'
 import { logger } from '@/lib/logger'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
+import { formatDoctorName, stripDrPrefix } from '@/lib/nameFormat'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveChatStore } from '@/store/activeChatStore'
+import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -136,6 +143,7 @@ export default function ChatConsultationScreen() {
   const router = useRouter()
   const { t } = useTranslation()
   const { getToken, userId } = useAuth()
+  const insets = useSafeAreaInsets()
   const isStreamConnected = useAuthStore((s) => s.isStreamConnected)
   const setActiveChannelId = useActiveChatStore((s) => s.setActiveChannelId)
 
@@ -147,6 +155,17 @@ export default function ChatConsultationScreen() {
     setActiveChannelId(channelId)
     return () => setActiveChannelId(null)
   }, [channelId, setActiveChannelId])
+
+  const setActiveConsultationId = useActiveConsultationScreenStore((s) => s.setActiveConsultationId)
+  // Tracked so usePushNotifications.ts's foreground handler can suppress a
+  // consultation push (e.g. "Tap to join") that arrives after this exact
+  // chat is already open — same purpose as activeChannelId above, scoped to
+  // consultation-status pushes instead of Stream messages.
+  useEffect(() => {
+    if (!channelId) return
+    setActiveConsultationId(channelId)
+    return () => setActiveConsultationId(null)
+  }, [channelId, setActiveConsultationId])
 
   const initialState: ConsultationState = (() => {
     if (consultationStatus === 'completed') return 'completed'
@@ -160,9 +179,10 @@ export default function ChatConsultationScreen() {
   )
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null)
   const [channelLoading, setChannelLoading] = useState(false)
-  const prevStateRef = useRef<ConsultationState | null>(null)
+  const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [peerOnline, setPeerOnline] = useState(false)
   const [peerTyping, setPeerTyping] = useState(false)
+  const [peerReadAt, setPeerReadAt] = useState<string | null>(null)
   const [doctorUserId, setDoctorUserId] = useState<string | null>(null)
   const [doctorInitialName, setDoctorInitialName] = useState<string | null>(null)
   const [doctorInitialPhotoUrl, setDoctorInitialPhotoUrl] = useState<string | null>(null)
@@ -187,8 +207,8 @@ export default function ChatConsultationScreen() {
         const localPhotoUri = await localizeNotificationPhoto(doctorPhotoUrl)
         Notifications.scheduleNotificationAsync({
           content: {
-            title: `Call with ${chatDisplayName}`,
-            body: `Tap to return to your chat with ${chatDisplayName}`,
+            title: `Chat with ${formatDoctorName(chatDisplayName)}`,
+            body: `Tap to return to your chat with ${formatDoctorName(chatDisplayName)}`,
             sound: 'default',
             data: {
               screen: 'consultation',
@@ -233,31 +253,6 @@ export default function ChatConsultationScreen() {
 
   useHeartbeat(channelId as string | undefined, consultationState === 'active')
 
-  // ── Verify the consultation isn't already completed ──────────────────────
-  // `initialState` above is derived only from route params (a fast-path hint
-  // that may be stale or absent, e.g. via a deep link/push-notification tap
-  // reached while the consultation was already completed) — fetch the
-  // authoritative DB status once on mount and correct `consultationState` if
-  // it's actually terminal, so the composer never renders enabled for a
-  // completed consultation just because the param said otherwise.
-  useEffect(() => {
-    if (!channelId) return
-    let mounted = true
-    supabase
-      .from('consultations')
-      .select('status')
-      .eq('id', channelId)
-      .single()
-      .then(({ data }) => {
-        if (!mounted) return
-        const status = (data as any)?.status as string | undefined
-        if (status && ['completed', 'declined', 'cancelled'].includes(status)) {
-          setConsultationState('completed')
-        }
-      })
-    return () => { mounted = false }
-  }, [channelId])
-
   // ── Live countdown ─────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -281,9 +276,9 @@ export default function ChatConsultationScreen() {
     const applyStatus = (status: string) => {
       if (status === 'accepted' || status === 'in_progress' || status === 'active') {
         setConsultationState('active')
-      } else if (status === 'completed' || status === 'declined' || status === 'cancelled') {
-        setConsultationState('completed')
       }
+      // Completion is detected exclusively by useConsultationCompletion below —
+      // this effect only needs to advance waiting -> active.
     }
 
     const sub = supabase
@@ -317,53 +312,27 @@ export default function ChatConsultationScreen() {
     }
   }, [consultationState, channelId])
 
-  // ── Detect consultation end while patient is actively chatting ───────────
-
-  useEffect(() => {
-    if (consultationState !== 'active' || !channelId) return
-    const sub = supabase
-      .channel(`patient-chat-end-${channelId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${channelId}` },
-        (payload) => {
-          if ((payload.new as { status: string }).status === 'completed') {
-            setConsultationState('completed')
-          }
-        }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(sub) }
-  }, [consultationState, channelId])
-
-  // ── Alert patient and offer to view summary when consultation ends ────────
-
-  useEffect(() => {
-    if (consultationState === 'completed' && prevStateRef.current === 'active') {
-      router.replace('/(patient)/(tabs)/messages' as never)
-      Alert.alert(
-        'Consultation Ended',
-        'Your doctor has ended the consultation and added a summary. Tap this conversation from Messages to view it.',
-        [
-          {
-            text: 'View Summary',
-            onPress: () =>
-              router.push({
-                pathname: '/(patient)/consultation-summary' as any,
-                params: {
-                  consultationId: channelId,
-                  doctorId,
-                  doctorName,
-                  consultationType: 'chat',
-                },
-              }),
-          },
-          { text: 'OK', style: 'cancel' },
-        ]
-      )
-    }
-    prevStateRef.current = consultationState
-  }, [consultationState])
+  // ── Single source of truth for reaching a terminal status ────────────────
+  // Detection lives in useConsultationState (mount fetch + realtime + poll);
+  // useConsultationCompletion owns the one-shot reaction — chat has no
+  // Agora/Stream resource that needs explicit teardown (Stream's watch is
+  // released on unmount below), so onTeardown just flips the local state
+  // machine into 'completed' to drive the existing read-only rendering.
+  const completionStatus = useConsultationState({
+    consultationId: channelId,
+    role: 'patient',
+    localAgoraReconnecting: false,
+  })
+  const completion = useConsultationCompletion({
+    phase: completionStatus.phase,
+    rawStatus: completionStatus.rawStatus,
+    role: 'patient',
+    kind: 'chat',
+    consultationId: channelId,
+    doctorId,
+    doctorName,
+    onTeardown: () => setConsultationState('completed'),
+  })
 
   // ── Mark consultation in_progress when patient enters active chat ─────────
 
@@ -389,7 +358,6 @@ export default function ChatConsultationScreen() {
 
     let mounted = true
     let currentChannel: Channel | null = null
-    let channelUpdateSub: { unsubscribe: () => void } | null = null
     let connSub: { unsubscribe: () => void } | null = null
     setChannelLoading(true)
 
@@ -431,16 +399,6 @@ export default function ChatConsultationScreen() {
         setActiveChannel(ch)
         if (doctorClerkId) setPeerOnline(!!ch.state.members[doctorClerkId]?.user?.online)
         if (consultationState !== 'completed') ch.markRead().catch(() => {})
-        // `streamClient.channel(...)` returns a shared/cached object per
-        // channel id, so without unsubscribing on cleanup every re-run of
-        // this effect (status transitions, remounts) stacks another handler
-        // onto the same underlying channel object.
-        channelUpdateSub = ch.on('channel.updated', (event: any) => {
-          if (!mounted) return
-          const updatedStatus =
-            event.channel?.data?.consultationStatus ?? (event.channel as any)?.consultationStatus
-          if (updatedStatus === 'completed') setConsultationState('completed')
-        })
         // A dropped socket (backgrounding, network blip) resumes silently —
         // Stream does not automatically re-`watch()` a previously watched
         // channel after reconnect, so live message.new/typing/presence events
@@ -465,7 +423,6 @@ export default function ChatConsultationScreen() {
 
     return () => {
       mounted = false
-      channelUpdateSub?.unsubscribe()
       connSub?.unsubscribe()
       currentChannel?.stopWatching().catch(() => {})
       setActiveChannel(null)
@@ -499,6 +456,25 @@ export default function ChatConsultationScreen() {
       subs.forEach(s => s.unsubscribe())
       setPeerTyping(false)
     }
+  }, [activeChannel, userId])
+
+  // ── Read receipts ─────────────────────────────────────────────────────────
+  // Mirrors the doctor screen: a "Seen" indicator once the doctor has read
+  // past the patient's last sent message.
+  useEffect(() => {
+    if (!activeChannel || !userId) { setPeerReadAt(null); return }
+    const isPeer = (id?: string) => !!id && id !== userId
+
+    const members = Object.values(activeChannel.state.members ?? {}) as any[]
+    const peerMember = members.find((m) => isPeer(m.user?.id))
+
+    const readState = (activeChannel.state as any).read as Record<string, { last_read?: Date }> | undefined
+    const peerRead = peerMember?.user?.id ? readState?.[peerMember.user.id] : undefined
+    setPeerReadAt(peerRead?.last_read ? new Date(peerRead.last_read).toISOString() : null)
+
+    const onRead = (event: any) => { if (isPeer(event.user?.id)) setPeerReadAt(event.created_at ?? new Date().toISOString()) }
+    const sub = activeChannel.on('message.read', onRead)
+    return () => sub.unsubscribe()
   }, [activeChannel, userId])
 
   // ── Live online/offline indicator — requires `presence: true` above ──────
@@ -608,6 +584,21 @@ export default function ChatConsultationScreen() {
     }, 1800)
   }
 
+  // Intercepts Stream Chat's message-press handling so PDF attachments open
+  // in the in-app viewer instead of the default Linking.openURL, which kicks
+  // the user out to Chrome. Every other press type (images, links, replies)
+  // falls through to Stream's own defaultHandler untouched.
+  const handleMessagePress = (payload: any) => {
+    if (payload?.emitter === 'fileAttachment') {
+      const attachment = payload.additionalInfo?.attachment
+      if (isPdfAttachment(attachment) && attachment?.asset_url) {
+        setPdfViewer({ url: attachment.asset_url, title: attachment.title || 'Document.pdf', size: attachment.file_size })
+        return
+      }
+    }
+    payload?.defaultHandler?.()
+  }
+
   const pickPhoto = async () => {
     setShowAttachMenu(false)
     await waitForModalDismiss()
@@ -666,8 +657,9 @@ export default function ChatConsultationScreen() {
   }
 
   // ── Doctor info derived from name param, kept live via Realtime ────────────
-  const displayName = liveDoctorName ?? doctorName ?? 'Doctor'
-  const nameInitial = displayName.charAt(0).toUpperCase()
+  const rawDisplayName = liveDoctorName ?? doctorName ?? 'Doctor'
+  const displayName = formatDoctorName(rawDisplayName)
+  const nameInitial = stripDrPrefix(rawDisplayName).charAt(0).toUpperCase()
   const isCompleted = consultationState === 'completed'
 
   // ── Countdown screen ───────────────────────────────────────────────────────
@@ -738,8 +730,16 @@ export default function ChatConsultationScreen() {
 
   // ── Active / Completed chat ────────────────────────────────────────────────
 
+  const lastOwnMessage = [...((activeChannel?.state.messages as any[]) ?? [])]
+    .reverse()
+    .find((m: any) => m.user?.id === userId)
+  const isSeen = !!(
+    peerReadAt && lastOwnMessage?.created_at &&
+    new Date(peerReadAt).getTime() >= new Date(lastOwnMessage.created_at).getTime()
+  )
+
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       {/* ── Search Overlay Modal ── */}
       <Modal visible={searchActive} animationType="slide" onRequestClose={() => { setSearchActive(false); setSearchQuery('') }}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.mistWhite }}>
@@ -813,7 +813,7 @@ export default function ChatConsultationScreen() {
       >
         <View style={styles.modalOverlay}>
           <Pressable style={styles.modalBackdrop} onPress={() => setShowProfile(false)} />
-          <View style={styles.profileSheet}>
+          <View style={[styles.profileSheet, { paddingBottom: Math.max(40, insets.bottom + 16) }]}>
             <View style={styles.modalHandle} />
             {/* Close button */}
             <View style={styles.profileHeader}>
@@ -926,7 +926,7 @@ export default function ChatConsultationScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
         <Pressable style={styles.reportOverlay} onPress={() => !reportSubmitted && setShowReportModal(false)}>
-          <Pressable style={styles.reportSheet} onPress={() => {}}>
+          <Pressable style={[styles.reportSheet, { paddingBottom: Math.max(40, insets.bottom + 16) }]} onPress={() => {}}>
             <View style={styles.modalHandle} />
             {reportSubmitted ? (
               <View style={styles.reportSuccessWrap}>
@@ -997,7 +997,7 @@ export default function ChatConsultationScreen() {
       {/* ── Attachment Menu Modal ── */}
       <Modal visible={showAttachMenu} transparent animationType="slide" onRequestClose={() => setShowAttachMenu(false)}>
         <Pressable style={styles.attachMenuOverlay} onPress={() => setShowAttachMenu(false)}>
-          <Pressable style={styles.attachMenuSheet} onPress={() => {}}>
+          <Pressable style={[styles.attachMenuSheet, { paddingBottom: Math.max(36, insets.bottom + 16) }]} onPress={() => {}}>
             <View style={styles.modalHandle} />
             <Text style={styles.attachMenuTitle}>Add Attachment</Text>
             <Pressable style={styles.attachMenuItem} onPress={pickPhoto}>
@@ -1102,6 +1102,7 @@ export default function ChatConsultationScreen() {
                 handleAttachButtonPress={() => setShowAttachMenu(true)}
                 audioRecordingEnabled={false}
                 messageActions={(params: any) => restrictedMessageActions(params, () => setShowReportModal(true))}
+                onPressMessage={handleMessagePress}
               >
                 <UploadBridge uploadRef={uploadFileRef} />
                 <MessageList
@@ -1118,6 +1119,11 @@ export default function ChatConsultationScreen() {
                 {!isCompleted && peerTyping && (
                   <View style={styles.typingRow}>
                     <Text style={styles.typingText}>{t('typing')}</Text>
+                  </View>
+                )}
+                {!isCompleted && !peerTyping && isSeen && (
+                  <View style={styles.typingRow}>
+                    <Text style={styles.seenText}>Seen</Text>
                   </View>
                 )}
                 {!isCompleted && !isBlocked && (
@@ -1155,6 +1161,21 @@ export default function ChatConsultationScreen() {
           )}
         </KeyboardAvoidingView>
       )}
+
+      <PdfViewerModal
+        visible={!!pdfViewer}
+        url={pdfViewer?.url ?? null}
+        title={pdfViewer?.title}
+        fileSize={pdfViewer?.size}
+        onClose={() => setPdfViewer(null)}
+      />
+
+      <ConsultationCompletedModal
+        visible={completion.showCompletedModal}
+        rawStatus={completion.rawStatus}
+        onViewSummary={completion.goToSummary}
+        onClose={completion.dismissModal}
+      />
     </SafeAreaView>
   )
 }
@@ -1229,6 +1250,7 @@ const styles = StyleSheet.create({
 
   typingRow: { paddingHorizontal: 16, paddingVertical: 4 },
   typingText: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', fontStyle: 'italic' },
+  seenText: { fontFamily: fonts.regular, fontSize: 11, color: '#9CA3AF', textAlign: 'right' },
 
   // ── Security banner ───────────────────────────────────────────────────────
   securityBanner: {

@@ -23,13 +23,15 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
 function mapDoctor(d: any): Doctor {
   return {
     id: d.id,
-    name: d.users?.full_name ?? 'Dr. Unknown',
+    user_id: d.user_id,
+    name: formatDoctorName(d.users?.full_name, 'Dr. Unknown'),
     subtitle: d.hospital_name ?? undefined,
     specialty: d.specialty ?? 'General',
     rating_average: Number(d.rating_average) ?? 0,
@@ -106,7 +108,8 @@ export default function HomeScreen() {
   // wins) before it reaches state.
   const realtimeKnownRef = useRef<Map<string, Partial<Pick<Doctor,
     'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
-    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count'
+    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count' |
+    'name' | 'profile_photo_url'
   >>>>(new Map())
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
@@ -123,6 +126,15 @@ export default function HomeScreen() {
     doctorId: string,
     patch: Partial<Doctor>
   ): Doctor[] => list.map(d => (d.id === doctorId ? { ...d, ...patch } : d))
+
+  // full_name/profile_photo_url live on `users`, not `doctor_profiles` — that
+  // row's realtime payload carries users.id, so matching goes through
+  // user_id instead of doctor.id.
+  const applyDoctorUpdateByUserId = (
+    list: Doctor[],
+    userId: string,
+    patch: Partial<Doctor>
+  ): Doctor[] => list.map(d => (d.user_id === userId ? { ...d, ...patch } : d))
 
   useEffect(() => {
     if (!user) return
@@ -165,33 +177,6 @@ export default function HomeScreen() {
       // join-latency-window gap.
       await fetchDoctorLists()
       if (!mounted) return
-
-      // Upcoming appointment — requires patient's Supabase UUID for explicit filtering
-      const token = await getToken()
-      if (!token || !mounted) return
-      const client = getAuthClient(token)
-      const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).maybeSingle()
-      if (!me || !mounted) return
-
-      const apptRes = await client
-        .from('consultations')
-        .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
-        .eq('patient_id', (me as any).id)
-        .in('status', ['pending', 'active'])
-        .order('scheduled_at', { ascending: true })
-        .limit(1)
-
-      if (!mounted) return
-      if (apptRes.data?.length) {
-        const appt = apptRes.data[0] as any
-        const d = new Date(appt.scheduled_at)
-        setUpcomingAppointment({
-          doctorName: (appt.doctor_profiles as any)?.users?.full_name ?? 'Doctor',
-          type: appt.type ?? 'chat',
-          date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-          time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        })
-      }
 
       if (!mounted) return
 
@@ -277,6 +262,23 @@ export default function HomeScreen() {
             }
           }
         )
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'users' },
+          (payload) => {
+            const updated = payload.new as any
+            const doc = topDoctorsRef.current.find(d => d.user_id === updated.id)
+              ?? onlineDoctorsRef.current.find(d => d.user_id === updated.id)
+            if (!doc) return
+            const patch = {
+              name: formatDoctorName(updated.full_name, 'Dr. Unknown'),
+              profile_photo_url: (updated.profile_photo_url ?? null) as string | null,
+            }
+            realtimeKnownRef.current.set(doc.id, { ...realtimeKnownRef.current.get(doc.id), ...patch })
+            setTopDoctors(prev => applyDoctorUpdateByUserId(prev, updated.id, patch))
+            setOnlineDoctors(prev => applyDoctorUpdateByUserId(prev, updated.id, patch))
+          }
+        )
         .subscribe((status) => {
           if (status === 'SUBSCRIBED') {
             // Reconcile anything that changed during the join-latency window
@@ -294,6 +296,78 @@ export default function HomeScreen() {
       if (channelRef.current) supabase.removeChannel(channelRef.current)
     }
   }, [user])
+
+  // Upcoming appointment widget — kept live so a freshly-booked/rescheduled/
+  // cancelled consultation reflects here immediately without a manual
+  // refresh, matching the dedicated Appointments tab (app/(patient)/(tabs)/
+  // appointments.tsx). Real post-booking statuses are 'scheduled' (paid
+  // scheduled booking) and 'waiting_for_doctor' (on-demand/activated) —
+  // 'pending'/'active' were never actually written by book_appointment_slot().
+  useEffect(() => {
+    if (!user) return
+    let mounted = true
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
+    const loadUpcomingAppointment = async (client: ReturnType<typeof getAuthClient>, patientId: string) => {
+      const apptRes = await client
+        .from('consultations')
+        .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
+        .eq('patient_id', patientId)
+        .in('status', ['scheduled', 'waiting_for_doctor', 'accepted', 'in_progress', 'active'])
+        .order('scheduled_at', { ascending: true })
+        .limit(1)
+      if (!mounted) return
+      if (apptRes.data?.length) {
+        const appt = apptRes.data[0] as any
+        const d = new Date(appt.scheduled_at)
+        setUpcomingAppointment({
+          doctorName: formatDoctorName((appt.doctor_profiles as any)?.users?.full_name, 'Doctor'),
+          type: appt.type ?? 'chat',
+          date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        })
+      } else {
+        setUpcomingAppointment(null)
+      }
+    }
+
+    ;(async () => {
+      const token = await getToken()
+      if (!token || !mounted) return
+      const client = getAuthClient(token)
+      const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).maybeSingle()
+      if (!me || !mounted) return
+
+      await loadUpcomingAppointment(client, (me as any).id)
+      if (!mounted) return
+
+      const topic = `patient-home-upcoming-${(me as any).id}`
+      // See doctors.tsx / incoming-request.tsx: a stale same-topic channel
+      // can still be registered on the client when removeChannel's teardown
+      // from a prior mount hasn't finished — supabase.channel() would then
+      // hand back that already-subscribed instance and .on() below would
+      // throw "cannot add postgres_changes callbacks after subscribe()".
+      const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
+      if (stale) supabase.removeChannel(stale)
+      channel = supabase
+        .channel(topic)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${(me as any).id}` },
+          async () => {
+            const freshToken = await getToken()
+            if (!freshToken || !mounted) return
+            await loadUpcomingAppointment(getAuthClient(freshToken), (me as any).id)
+          }
+        )
+        .subscribe()
+    })()
+
+    return () => {
+      mounted = false
+      if (channel) supabase.removeChannel(channel)
+    }
+  }, [user, getToken])
 
   // Tab screens stay mounted across tab switches, so the mount-only effect
   // above never sees a doctor's photo edited while this tab was in the

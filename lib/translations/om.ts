@@ -183,6 +183,7 @@ const om: TranslationKeys = {
   emailAddress: 'Teessoo Imeelaa',
   contactInformation: 'Odeeffannoo Qunnamtii',
   selectGender: 'Saala Filadhu',
+  selectCountry: 'Biyya Filadhu',
   address: 'Teessoo',
   country: 'Biyya',
   saveChanges: 'Jijjiirama Ol Kaa\'i',
@@ -197,6 +198,8 @@ const om: TranslationKeys = {
   cameraPermissionMsg: 'Suuraa profaayilii kaasuf seensisa kaameraa barbaachisa.',
   galleryPermissionMsg: 'Suuraa filachuuf seensisa mana suuraa barbaachisa.',
   profileSaved: 'Ol Kaa\'ame',
+  change: 'Jijjiiri',
+  emailUpdatedMsg: 'Imeeliin kee haaromfameera.',
   profileSavedMsg: 'Profaayiliin keessan haaromfameera.',
   profileSaveError: 'Dogoggora',
   profileSaveErrorMsg: 'Profaayilii ol kaa\'uu hin danda\'amne. Maaloo irra deebi\'ii yaali.',
@@ -330,8 +333,6 @@ const om: TranslationKeys = {
   noRecordsYet: 'Ammaaf galmee hin jiru',
   noRecordsDesc: 'Xumura marii fi qorichaa keessan galmee mariii keessanii jalqabaa booda asitti ni mul\'ata.',
   uploadNewDocument: 'Dokumentii Haaraa Fe\'i',
-  comingSoon: 'Dafee Dhufa',
-  featureComingSoonMsg: 'Fe\'uun dokumentii haaromsa fuulduraa keessatti ni argama.',
   close: 'Cufí',
 
   searchCountry: 'Biyya barbaadi...',
@@ -366,7 +367,9 @@ const om: TranslationKeys = {
   weeklyAvailability: 'Argamummaa Torbee',
   availableHoursNote: 'Wiixata–Jimaata, 9 AM – 5 PM argama',
   patientReviews: 'Qeeqawwan Dhukkubsataa',
-  noReviewsYet: 'Hanga yoonaatti qeeqa hin jiru',
+  noReviewsYet: 'Hanga yoonaatti qeeqni hin jiru. Dhukkubsataa jalqabaa kan ogeessa kana qeequ ta\'aa.',
+  showMoreReviews: 'Dabalata Argisiisi',
+  verifiedConsultation: 'Mari Mirkanaa\'e',
   bookConsultation: 'Mariitti Galmeessi',
 
   chatConsultation: 'Mariitti Dubbii',
@@ -400,7 +403,7 @@ const om: TranslationKeys = {
   downloadAsPDF: 'PDF godhii buusi',
   rateYourDoctor: 'Doktara Keessan Qixi',
   howWasExperience: 'Muuxannoon keessan faana',
-  leaveComment: 'Yaada kenni (dirqama miti)...',
+  leaveComment: 'Yaada kenni...',
   submitAndDone: 'Ergi & Xumuri',
   submitting: 'Ergaa jira...',
   thankYou: 'Galatoomi!',
@@ -499,7 +502,6 @@ const om: TranslationKeys = {
   notifyMeMsg: 'Kaffaltiin eegalutti kan dursa beekamu ati ta\'atta!',
 
   // Chat consultation screen
-  upcomingAppointment: 'Qorannoo Dhufu',
   consultationHasntStarted: 'Gorsaan Ammallee Hin Eegalamne',
   appointmentBeginsIn: 'Beellaamni kee eegaluuf yeroo',
   chatUnlockNote: 'Tokkumaan torbee yeroo dokterichi marii jalqabutti qofaatti banama.',
@@ -537,7 +539,6 @@ const om: TranslationKeys = {
   // Doctor chat screen
   connectingToConsultation: 'Gorsicha walitti hidhamaa...',
   activeSession: 'Xumura hojii',
-  done: 'Xumuramee',
   consultationEndedChatReadOnly: 'Gorsaan dhumateera · Tokkumaan dubbisuf qofa',
   chatRequiresDevelopmentBuild: 'Tokkumaan dhiyeessii ijaarsa barbaada.',
   waitingForChannelConnection: 'Wal-qunnamtii toorii eegaachaa...',

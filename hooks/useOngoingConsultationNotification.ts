@@ -23,6 +23,7 @@ import { useEffect, useRef } from 'react'
 import { Platform } from 'react-native'
 import { logger } from '@/lib/logger'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
+import { formatDoctorName } from '@/lib/nameFormat'
 
 let notifee: any = null
 let AndroidImportance: any = null
@@ -60,9 +61,12 @@ function ensureChannel(): Promise<void> {
   return channelReady ?? Promise.resolve()
 }
 
-const TYPE_LABEL: Record<'phone' | 'video', string> = {
-  phone: 'Voice consultation in progress',
-  video: 'Video consultation in progress',
+// Never call every consultation a "call" — phone is "Voice Consultation",
+// video is "Video Consultation", matching the wording used everywhere else
+// (in-app notifications, push notifications, banners).
+const TYPE_TITLE: Record<'phone' | 'video', string> = {
+  phone: 'Voice Consultation',
+  video: 'Video Consultation',
 }
 
 export function useOngoingConsultationNotification() {
@@ -88,14 +92,24 @@ export function useOngoingConsultationNotification() {
     if (shownForRef.current === active!.consultationId) return
     shownForRef.current = active!.consultationId
 
-    const anchorMs = Date.now() - active!.elapsedSeconds * 1000
+    // Prefer the real DB started_at (callStartedAtMs) over back-computing
+    // from elapsedSeconds — that snapshot can be 0/stale if this fires
+    // before the call screen's own DB fetch had resolved, permanently
+    // pinning the chronometer to the wrong anchor for the rest of the call.
+    const anchorMs = active!.callStartedAtMs ?? (Date.now() - active!.elapsedSeconds * 1000)
+
+    // Patient's counterpart is the doctor — always show the "Dr." prefix;
+    // doctor's counterpart is the patient — shown as-is.
+    const displayName = active!.role === 'patient'
+      ? formatDoctorName(active!.otherPersonName)
+      : active!.otherPersonName
 
     ensureChannel().then(() =>
       notifee
         .displayNotification({
           id: NOTIFICATION_ID,
-          title: `Call with ${active!.otherPersonName}`,
-          body: TYPE_LABEL[active!.type as 'phone' | 'video'],
+          title: `${TYPE_TITLE[active!.type as 'phone' | 'video']} with ${displayName}`,
+          body: 'Tap to return to your consultation',
           data: {
             screen: 'consultation',
             consultationId: active!.consultationId,

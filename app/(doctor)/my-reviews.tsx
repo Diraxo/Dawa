@@ -53,7 +53,12 @@ export default function MyReviewsScreen() {
         if (!token) return
         const client = getAuthClient(token)
 
-        const { data: profile } = await client.from('doctor_profiles').select('id, rating_average').single()
+        // doctor_profiles SELECT RLS returns own row + every approved doctor's
+        // row (for patient browsing), so this must be filtered to the caller's
+        // own row or .single() throws once any other approved doctor exists.
+        const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!me) return
+        const { data: profile } = await client.from('doctor_profiles').select('id, rating_average').eq('user_id', (me as any).id).single()
         if (!profile) return
         const doctorId = (profile as any).id
 

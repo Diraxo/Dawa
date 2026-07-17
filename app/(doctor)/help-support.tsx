@@ -42,7 +42,7 @@ const FAQ_SECTIONS: Section[] = [
     title: 'Earnings',
     items: [
       { q: 'How do I set my consultation fees?', a: 'Go to Profile → My Pricing to set your fees for chat, phone, and video consultations. Fees are shown in ETB.' },
-      { q: 'How does the platform fee work?', a: 'Dawa takes a 20% platform fee from each completed consultation. The remaining 80% is credited to your earnings balance.' },
+      { q: 'How does the platform fee work?', a: 'Dawa takes a platform fee (currently 20%) from each completed consultation. The remainder is credited to your earnings balance — your exact split is shown in your Earnings Preview and pricing screen.' },
       { q: 'When can I withdraw my earnings?', a: 'Go to Profile → Withdraw Earnings. Enter your bank details and the amount, and our team will process the transfer within 1–3 business days.' },
     ],
   },
@@ -52,14 +52,13 @@ const FAQ_SECTIONS: Section[] = [
     items: [
       { q: 'How do I update my profile or documents?', a: 'You can update your name, bio, hospital, and photo from Profile → Edit Profile. For document updates (license, ID), contact support as these require re-verification.' },
       { q: 'How is my data stored?', a: 'All data is stored securely with Row Level Security enforced on all database tables. We never share your data with third parties without your consent.' },
-      { q: 'How do I delete my account?', a: 'To delete your account, please contact support at support@dawa.app. This permanently removes all your data and cannot be undone.' },
+      { q: 'How do I delete my account?', a: 'Go to Profile → Delete Account. This permanently removes your account, documents, and consultation data and cannot be undone.' },
     ],
   },
 ]
 
 const CONTACT_OPTIONS = [
   { icon: 'mail-outline', label: 'Email Support', value: 'support@dawa.app', action: () => Linking.openURL('mailto:support@dawa.app') },
-  { icon: 'logo-whatsapp', label: 'WhatsApp', value: '+251 900 000 000', action: () => Linking.openURL('https://wa.me/251900000000') },
 ]
 
 function FaqItem({ item, isOpen, onToggle }: { item: FaqItem; isOpen: boolean; onToggle: () => void }) {
@@ -152,7 +151,7 @@ export default function DoctorHelpSupportScreen() {
         <View style={styles.card}>
           {[
             { label: 'Privacy Policy', onPress: () => router.push('/(doctor)/privacy-policy' as never) },
-            { label: 'Terms of Service', onPress: () => router.push('/(doctor)/privacy-policy' as never) },
+            { label: 'Terms of Service', onPress: () => router.push('/(public)/terms' as never) },
           ].map((item, idx, arr) => (
             <View key={item.label}>
               <Pressable style={({ pressed }) => [styles.legalRow, pressed && { backgroundColor: '#F9FAFB' }]} onPress={item.onPress}>

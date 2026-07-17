@@ -5,23 +5,9 @@ import { createJSONStorage, persist } from 'zustand/middleware'
 export type Gender = 'Male' | 'Female'
 export type DoctorStatus = 'pending' | 'approved' | 'rejected' | 'suspended' | null
 
-export interface IncomingRequest {
-  id: string
-  patientName: string
-  patientAge: number
-  consultationType: 'chat' | 'phone' | 'video'
-  price: number
-  currency: string
-  patientId: string
-  patientClerkId: string
-  patientPhotoUrl?: string | null
-  waitingStartedAt?: string
-}
-
 interface DoctorState {
   isOnline: boolean
   doctorStatus: DoctorStatus
-  incomingRequest: IncomingRequest | null
 
   // Registration — Step 1: Personal Info
   regFullName: string
@@ -56,9 +42,8 @@ interface DoctorState {
 
   setIsOnline: (online: boolean) => void
   setDoctorStatus: (status: DoctorStatus) => void
-  setIncomingRequest: (req: IncomingRequest | null) => void
   updateReg: (data: Partial<Omit<DoctorState,
-    'setIsOnline' | 'setIncomingRequest' | 'updateReg' | 'clearReg' | 'incomingRequest'
+    'setIsOnline' | 'updateReg' | 'clearReg'
   >>) => void
   clearReg: () => void
 }
@@ -68,7 +53,6 @@ export const useDoctorStore = create<DoctorState>()(
     (set) => ({
       isOnline: false,
       doctorStatus: null,
-      incomingRequest: null,
 
       regFullName: '',
       regPhone: '',
@@ -97,7 +81,6 @@ export const useDoctorStore = create<DoctorState>()(
 
       setIsOnline: (online) => set({ isOnline: online }),
       setDoctorStatus: (status) => set({ doctorStatus: status }),
-      setIncomingRequest: (req) => set({ incomingRequest: req }),
       updateReg: (data) => set(data as Partial<DoctorState>),
 
       clearReg: () =>

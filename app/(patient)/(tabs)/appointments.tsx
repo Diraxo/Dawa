@@ -21,6 +21,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { formatDoctorName } from '@/lib/nameFormat'
 import { useTranslation } from 'react-i18next'
 
 interface FollowupReminder {
@@ -38,6 +39,7 @@ type AppointmentTab = 'upcoming' | 'past'
 interface Appointment {
   id: string
   doctorId: string
+  doctorUserId: string
   doctorName: string
   doctorSpecialty: string
   doctorHospital: string
@@ -47,7 +49,7 @@ interface Appointment {
   scheduledAt: string
   dateLabel: string
   timeLabel: string
-  status: 'pending' | 'scheduled' | 'active' | 'completed' | 'cancelled'
+  status: 'pending' | 'scheduled' | 'waiting_for_doctor' | 'active' | 'accepted' | 'in_progress' | 'completed' | 'cancelled'
   amount: number
   isOnDemand: boolean
 }
@@ -87,7 +89,8 @@ function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Ap
   return {
     id: row.id,
     doctorId: dp?.id ?? '',
-    doctorName: dp?.users?.full_name ?? 'Doctor',
+    doctorUserId: dp?.users?.id ?? '',
+    doctorName: formatDoctorName(dp?.users?.full_name, 'Doctor'),
     doctorSpecialty: dp?.specialty ?? 'General',
     doctorHospital: dp?.hospital_name ?? '',
     doctorIsOnline: dp?.is_online ?? false,
@@ -189,21 +192,23 @@ function UpcomingCard({
   onJoin,
   onReschedule,
   onWaitingRoom,
+  onOpenDoctor,
 }: {
   item: Appointment
   onJoin: (item: Appointment) => void
   onReschedule: (item: Appointment) => void
   onWaitingRoom: (item: Appointment) => void
+  onOpenDoctor: (item: Appointment) => void
 }) {
   const { t } = useTranslation()
   const icon = TYPE_ICONS[item.type]
   const typeLabel = item.type === 'chat' ? t('chat') : item.type === 'phone' ? t('phoneCall') : t('videoCall')
   const joinLabel = item.type === 'chat' ? t('joinChatConsultation') : item.type === 'phone' ? t('joinPhoneCall') : t('joinVideoCall')
-  const canJoin = item.status === 'active'
+  const canJoin = item.status === 'active' || item.status === 'accepted' || item.status === 'in_progress'
   return (
     <View style={cardStyles.card}>
-      {/* Top row: avatar + info + date */}
-      <View style={cardStyles.topRow}>
+      {/* Top row: avatar + info + date — tap opens the doctor's profile */}
+      <Pressable style={({ pressed }) => [cardStyles.topRow, pressed && { opacity: 0.75 }]} onPress={() => onOpenDoctor(item)}>
         <DoctorAvatar name={item.doctorName} isOnline={item.doctorIsOnline} photoUrl={item.doctorPhotoUrl} />
 
         <View style={cardStyles.info}>
@@ -223,9 +228,9 @@ function UpcomingCard({
             <Text style={cardStyles.typeText}>{typeLabel}</Text>
           </View>
         </View>
-      </View>
+      </Pressable>
 
-      {/* Join button (active) or awaiting confirmation (pending) */}
+      {/* Join button (active) / scheduled-but-not-started / entering waiting room / legacy awaiting confirmation */}
       {canJoin ? (
         <Pressable
           style={({ pressed }) => [cardStyles.btnWrap, pressed && { opacity: 0.88 }]}
@@ -240,6 +245,34 @@ function UpcomingCard({
             <Ionicons name={icon as any} size={17} color={colors.mistWhite} style={cardStyles.btnIcon} />
             <Text style={cardStyles.joinBtnText}>{joinLabel}</Text>
           </LinearGradient>
+        </Pressable>
+      ) : item.status === 'scheduled' ? (
+        // Payment succeeded for a future slot — the patient is never told to
+        // wait on a confirmation that doesn't exist; the doctor only sees
+        // Accept/Decline once scheduled_at actually arrives.
+        <View style={{ gap: 8 }}>
+          <View style={cardStyles.pendingRow}>
+            <Ionicons name="calendar-outline" size={15} color="#6B7280" />
+            <Text style={cardStyles.pendingText}>Appointment Scheduled</Text>
+          </View>
+          <Pressable
+            style={({ pressed }) => [cardStyles.rescheduleBtn, pressed && { opacity: 0.75 }]}
+            onPress={() => onReschedule(item)}
+          >
+            <Ionicons name="calendar-outline" size={15} color={colors.careBlue} />
+            <Text style={cardStyles.rescheduleBtnText}>Reschedule</Text>
+          </Pressable>
+        </View>
+      ) : item.status === 'waiting_for_doctor' ? (
+        // scheduled_at has arrived — the global waiting-room recovery effect
+        // should already be pulling the patient in silently; this button is
+        // the fallback if that hasn't landed yet.
+        <Pressable
+          style={({ pressed }) => [cardStyles.rescheduleBtn, pressed && { opacity: 0.75 }]}
+          onPress={() => onWaitingRoom(item)}
+        >
+          <Ionicons name="hourglass-outline" size={15} color={colors.careBlue} />
+          <Text style={cardStyles.rescheduleBtnText}>Entering waiting room…</Text>
         </Pressable>
       ) : (
         <View style={{ gap: 8 }}>
@@ -589,6 +622,12 @@ export default function AppointmentsScreen() {
   const [activeTab, setActiveTab] = useState<AppointmentTab>(tabParam === 'past' ? 'past' : 'upcoming')
   const [upcoming, setUpcoming] = useState<Appointment[]>([])
   const [past, setPast] = useState<Appointment[]>([])
+  // Mirrors upcoming/past so the users-table realtime handler (below) can
+  // check "is this changed doctor one of mine?" without a stale closure.
+  const upcomingRef = useRef<Appointment[]>([])
+  const pastRef = useRef<Appointment[]>([])
+  useEffect(() => { upcomingRef.current = upcoming }, [upcoming])
+  useEffect(() => { pastRef.current = past }, [past])
   const [reminders, setReminders] = useState<FollowupReminder[]>([])
 
   // This tab screen stays mounted across tab switches, so a plain useState
@@ -605,7 +644,7 @@ export default function AppointmentsScreen() {
         .from('consultations')
         .select(`
           id, type, status, payment_status, scheduled_at, started_at, created_at, patient_amount,
-          doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(full_name, profile_photo_url))
+          doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(id, full_name, profile_photo_url))
         `)
         .eq('patient_id', patientId)
         .order('scheduled_at', { ascending: false }),
@@ -633,6 +672,19 @@ export default function AppointmentsScreen() {
       data.filter(r => {
         if (r.status === 'active') return true
         if (r.status === 'scheduled') return true
+        // The doctor has accepted (or the call is already underway) but the
+        // patient hasn't navigated in yet — the realtime recovery listener
+        // in app/_layout.tsx normally sweeps the patient straight into the
+        // call, but this card must still exist (with a working Join button)
+        // for the brief window before that happens, and as a fallback if it
+        // doesn't. Without this branch the row vanished from both tabs the
+        // instant the doctor accepted.
+        if (r.status === 'accepted' || r.status === 'in_progress') return true
+        // A scheduled appointment sits here for the brief window between the
+        // server-time cron activating it (scheduled_at reached) and the
+        // doctor accepting — without this branch the row vanished from both
+        // tabs entirely for that window.
+        if (r.status === 'waiting_for_doctor' && !isOnDemandRow(r)) return true
         if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
           return new Date(r.scheduled_at) > now
         }
@@ -678,6 +730,43 @@ export default function AppointmentsScreen() {
             'postgres_changes',
             { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${me.id}` },
             async () => {
+              const freshToken = await getToken()
+              if (!freshToken) return
+              await loadAppointments(getAuthClient(freshToken), me.id)
+            }
+          )
+          .on(
+            // A doctor editing their name/photo/bio doesn't touch
+            // `consultations` at all, so the subscription above never fires
+            // for it — without this, a patient sitting on this tab keeps
+            // seeing the doctor's old identity until they navigate away and back.
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'users' },
+            async (payload) => {
+              const updated = payload.new as any
+              const isMyDoctor =
+                upcomingRef.current.some((a) => a.doctorUserId === updated.id) ||
+                pastRef.current.some((a) => a.doctorUserId === updated.id)
+              if (!isMyDoctor) return
+              const freshToken = await getToken()
+              if (!freshToken) return
+              await loadAppointments(getAuthClient(freshToken), me.id)
+            }
+          )
+          .on(
+            // Same gap as above but for doctor_profiles fields (is_online,
+            // specialty, hospital_name) — a doctor going online/offline while
+            // a patient sits on this tab previously stayed frozen at whatever
+            // it was on the last fetch/focus, unlike doctors.tsx/home.tsx
+            // which already subscribe to this table.
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
+            async (payload) => {
+              const updated = payload.new as any
+              const isMyDoctor =
+                upcomingRef.current.some((a) => a.doctorId === updated.id) ||
+                pastRef.current.some((a) => a.doctorId === updated.id)
+              if (!isMyDoctor) return
               const freshToken = await getToken()
               if (!freshToken) return
               await loadAppointments(getAuthClient(freshToken), me.id)
@@ -841,7 +930,7 @@ export default function AppointmentsScreen() {
         ListEmptyComponent={<EmptyState tab={activeTab} />}
         renderItem={({ item }) =>
           activeTab === 'upcoming' ? (
-            <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onWaitingRoom={handleWaitingRoom} />
+            <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onWaitingRoom={handleWaitingRoom} onOpenDoctor={handleBookAgain} />
           ) : (
             <PastCard
               item={item}

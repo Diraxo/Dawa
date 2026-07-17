@@ -29,8 +29,14 @@ export function useUserProfileRealtime(
 
   useEffect(() => {
     if (!userRowId) return
+    // Suffixed with Date.now() because `supabase.channel()` dedupes by topic
+    // string and returns any existing channel for the same topic — if a
+    // prior mount's `removeChannel()` (async unsubscribe, then teardown)
+    // hasn't finished when this effect re-runs, we'd otherwise get handed
+    // back the old, already-subscribed channel and `.on()` would throw
+    // ("cannot add postgres_changes callbacks ... after subscribe()").
     const channel = supabase
-      .channel(`user-profile-${userRowId}`)
+      .channel(`user-profile-${userRowId}-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userRowId}` },

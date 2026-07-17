@@ -1,10 +1,13 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
+import { useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -16,11 +19,13 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
+import { AppointmentDetailsSheet, type AppointmentDetails } from '@/components/doctor/AppointmentDetailsSheet'
 import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
@@ -37,10 +42,13 @@ interface DayAvailability {
 
 interface Appointment {
   id: string
+  patientId: string
   patientName: string
+  patientPhotoUrl: string | null
   date: string
   time: string
   type: 'chat' | 'phone' | 'video'
+  status: string
 }
 
 const DEFAULT_AVAILABILITY: Record<DayKey, DayAvailability> = {
@@ -241,11 +249,13 @@ export default function ScheduleScreen() {
   const { user } = useUser()
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
+  const router = useRouter()
   const [availability, setAvailability] = useState(DEFAULT_AVAILABILITY)
   const [blockedDates, setBlockedDates] = useState<string[]>([])
   const [savingAvailability, setSavingAvailability] = useState(false)
   const [profileId, setProfileId] = useState<string | null>(null)
   const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
   const [loadingAppts, setLoadingAppts] = useState(true)
   const [timePicker, setTimePicker] = useState<{ day: DayKey; field: 'startTime' | 'endTime' } | null>(null)
   const [showBlockPicker, setShowBlockPicker] = useState(false)
@@ -255,30 +265,48 @@ export default function ScheduleScreen() {
     return d.toISOString().split('T')[0]
   })
 
-  // Future days only (>= tomorrow) — today's live consultations are already
-  // covered by Home's "Today's Schedule" widget, so including them here
-  // duplicated them under "Upcoming Appointments" instead of keeping today
-  // and upcoming visually separate. Re-run on Realtime changes (below) so a
-  // newly-paid or rescheduled appointment appears without a manual refresh.
+  // Today onward (>= start of today), same status set as Home's "Today's
+  // Schedule" widget — must show identical data for anything scheduled
+  // today, plus everything further out. Previously started at tomorrow and
+  // omitted 'waiting_for_doctor', so a same-day booking (or one whose status
+  // the per-minute cron had already flipped from 'scheduled' to
+  // 'waiting_for_doctor' as its time arrived — see
+  // trigger_appointment_notifications() in migration 041) showed on Home but
+  // never here. Re-run on Realtime changes (below) so a newly-paid or
+  // rescheduled appointment appears without a manual refresh.
   const loadAppointments = async (client: ReturnType<typeof getAuthClient>, doctorProfileId: string) => {
-    const tomorrowStart = new Date(new Date().setHours(0, 0, 0, 0))
-    tomorrowStart.setDate(tomorrowStart.getDate() + 1)
+    // Ethiopia wall-clock boundary, not device-local midnight — see Home's
+    // matching ethiopiaTodayRange() usage; both screens must agree on what
+    // "today" means regardless of the doctor device's own timezone setting.
+    const { startIso: todayStart } = ethiopiaTodayRange()
     const { data: appts } = await client
       .from('consultations')
-      .select('id, type, scheduled_at, patient:users!consultations_patient_id_fkey(full_name)')
+      .select('id, patient_id, type, status, scheduled_at, patient:users!consultations_patient_id_fkey(full_name, profile_photo_url)')
       .eq('doctor_id', doctorProfileId)
-      .in('status', ['pending', 'active', 'scheduled'])
-      .gte('scheduled_at', tomorrowStart.toISOString())
+      .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress', 'scheduled'])
+      .gte('scheduled_at', todayStart)
       .order('scheduled_at', { ascending: true })
       .limit(20)
 
     setAppointments(
       (appts ?? []).map((a: any) => {
         const { date, time } = formatApptDate(a.scheduled_at)
-        return { id: a.id, patientName: a.patient?.full_name ?? 'Patient', date, time, type: a.type }
+        return {
+          id: a.id,
+          patientId: a.patient_id,
+          patientName: a.patient?.full_name ?? 'Patient',
+          patientPhotoUrl: a.patient?.profile_photo_url ?? null,
+          date, time, type: a.type,
+          status: a.status ?? 'scheduled',
+        }
       })
     )
   }
+
+  // Mirrors `appointments` so the users-table realtime handler (below) can
+  // check "is this changed patient one of mine?" without a stale closure.
+  const appointmentsRef = useRef<Appointment[]>([])
+  useEffect(() => { appointmentsRef.current = appointments }, [appointments])
 
   const scrollRef = useRef<ScrollView>(null)
 
@@ -352,8 +380,42 @@ export default function ScheduleScreen() {
           await loadAppointments(getAuthClient(token), profileId)
         }
       )
+      .on(
+        // A patient editing their name/photo doesn't touch `consultations` at
+        // all, so the subscription above never fires for it — without this,
+        // Upcoming Appointments keeps showing the patient's old identity
+        // until the doctor navigates away and back.
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'users' },
+        async (payload) => {
+          const updated = payload.new as any
+          if (!appointmentsRef.current.some((a) => a.patientId === updated.id)) return
+          const token = await getToken()
+          if (!token) return
+          await loadAppointments(getAuthClient(token), profileId)
+        }
+      )
       .subscribe()
     return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
+  // Realtime sockets get suspended while the OS backgrounds the app (locked
+  // screen, app-switch) — a scheduled booking made in that window can fire
+  // its postgres_changes event while nobody's listening, and this screen
+  // stays mounted across tab switches (no focus-triggered refetch either),
+  // so without this the doctor would need a manual pull-to-refresh or app
+  // restart to see it. Mirrors useDoctorOnlineToggle's resyncOnForeground.
+  useEffect(() => {
+    if (!profileId) return
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return
+      getToken().then(async (token) => {
+        if (!token) return
+        await loadAppointments(getAuthClient(token), profileId)
+      })
+    })
+    return () => sub.remove()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId])
 
@@ -485,10 +547,22 @@ export default function ScheduleScreen() {
           </View>
         ) : (
           appointments.map((appt) => (
-            <View key={appt.id} style={styles.apptCard}>
-              <View style={[styles.apptLeft, { backgroundColor: `${TYPE_COLORS[appt.type]}18` }]}>
-                <Ionicons name={TYPE_ICONS[appt.type]} size={21} color={TYPE_COLORS[appt.type]} />
-              </View>
+            <Pressable
+              key={appt.id}
+              style={({ pressed }) => [styles.apptCard, pressed && { opacity: 0.75 }]}
+              onPress={() => setDetailsAppt({
+                id: appt.id, type: appt.type, status: appt.status,
+                patientName: appt.patientName, patientPhotoUrl: appt.patientPhotoUrl,
+                whenLabel: `${appt.date} · ${appt.time}`,
+              })}
+            >
+              {appt.patientPhotoUrl ? (
+                <Image source={{ uri: appt.patientPhotoUrl }} style={styles.apptLeft} />
+              ) : (
+                <View style={[styles.apptLeft, { backgroundColor: `${TYPE_COLORS[appt.type]}18` }]}>
+                  <Ionicons name={TYPE_ICONS[appt.type]} size={21} color={TYPE_COLORS[appt.type]} />
+                </View>
+              )}
               <View style={styles.apptInfo}>
                 <Text style={styles.apptPatient}>{appt.patientName}</Text>
                 <Text style={styles.apptTime}>{appt.date} · {appt.time}</Text>
@@ -496,7 +570,7 @@ export default function ScheduleScreen() {
               <View style={styles.apptStatusBadge}>
                 <Text style={styles.apptStatusText}>Upcoming</Text>
               </View>
-            </View>
+            </Pressable>
           ))
         )}
 
@@ -608,6 +682,21 @@ export default function ScheduleScreen() {
 
         <View style={{ height: 24 }} />
       </ScrollView>
+      <AppointmentDetailsSheet
+        appt={detailsAppt}
+        onClose={() => setDetailsAppt(null)}
+        onJoin={(appt) => {
+          setDetailsAppt(null)
+          const params = { patientName: appt.patientName, consultationId: appt.id }
+          if (appt.type === 'chat') router.push({ pathname: '/(doctor)/chat-consultation', params })
+          else if (appt.type === 'phone') router.push({ pathname: '/(doctor)/phone-consultation', params })
+          else router.push({ pathname: '/(doctor)/video-consultation', params })
+        }}
+        onViewSummary={(appt) => {
+          setDetailsAppt(null)
+          router.push({ pathname: '/(doctor)/consultation-summary', params: { consultationId: appt.id, patientName: appt.patientName } })
+        }}
+      />
     </SafeAreaView>
   )
 }

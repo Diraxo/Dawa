@@ -146,7 +146,7 @@ export default function ForgotPasswordScreen() {
           const { data } = await client
             .from('users')
             .select('role')
-            .eq('clerk_id', result.createdUserId)
+            .eq('email', email.trim().toLowerCase())
             .single()
           if (data?.role === 'patient') targetRouteRef.current = '/(patient)/(tabs)/home'
           else if (data?.role === 'doctor') targetRouteRef.current = '/(doctor)/(tabs)/home'

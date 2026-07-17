@@ -1,4 +1,4 @@
-import { useAuth } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -30,6 +30,7 @@ const TYPES = [
 
 export default function MyPricingScreen() {
   const { getToken } = useAuth()
+  const { user } = useUser()
   const router = useRouter()
 
   const [chatPrice, setChatPrice] = useState('')
@@ -37,13 +38,23 @@ export default function MyPricingScreen() {
   const [videoPrice, setVideoPrice] = useState('')
   const [saving, setSaving] = useState(false)
   const [commissionRate, setCommissionRate] = useState(20)
+  const [dbUserId, setDbUserId] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!user?.id) return
     getToken().then(async (token) => {
       if (!token) return
-      const { data } = await getAuthClient(token)
+      const client = getAuthClient(token)
+      const { data: userRow } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+      if (!userRow) return
+      setDbUserId((userRow as any).id ?? null)
+      // doctor_profiles SELECT RLS returns own row + every approved doctor's
+      // row (for patient browsing), so this must be filtered to the caller's
+      // own row or .single() throws once any other approved doctor exists.
+      const { data } = await client
         .from('doctor_profiles')
         .select('chat_price, phone_price, video_price')
+        .eq('user_id', (userRow as any).id)
         .single()
       if (data) {
         setChatPrice(String((data as any).chat_price ?? ''))
@@ -54,7 +65,7 @@ export default function MyPricingScreen() {
     supabase.rpc('get_commission_rate').then(({ data }) => {
       if (typeof data === 'number') setCommissionRate(data)
     })
-  }, [])
+  }, [user?.id])
 
   const handleSave = async () => {
     const chatNum = Number(chatPrice)
@@ -68,18 +79,24 @@ export default function MyPricingScreen() {
     try {
       const token = await getToken()
       if (!token) throw new Error('No token')
+      if (!dbUserId) throw new Error('Your profile has not finished loading yet. Please try again in a moment.')
       const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
         .update({ chat_price: chatNum, phone_price: phoneNum, video_price: videoNum })
+        .eq('user_id', dbUserId)
         .select('id')
-      if (error) throw error
+      if (error) {
+        console.error('Failed to save prices:', error)
+        throw new Error(error.message || 'Failed to save prices. Please try again.')
+      }
       if (!updatedRows || updatedRows.length === 0) {
-        throw new Error('No doctor profile row matched — nothing was saved.')
+        console.error('doctor_profiles price update matched 0 rows for user_id:', dbUserId)
+        throw new Error('Failed to save prices. Please try again.')
       }
       Alert.alert('Saved', 'Your consultation prices have been updated.')
       router.back()
-    } catch {
-      Alert.alert('Error', 'Failed to save prices. Please try again.')
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to save prices. Please try again.')
     } finally {
       setSaving(false)
     }

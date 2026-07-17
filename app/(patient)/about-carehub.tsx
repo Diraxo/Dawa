@@ -26,13 +26,6 @@ export default function AboutDawaScreen() {
     { icon: 'flash',            color: '#F59E0B',              title: t('valueSpeedTitle'),     desc: t('valueSpeedDesc') },
   ]
 
-  const STATS = [
-    { value: '500+', label: t('verifiedDoctors') },
-    { value: '10K+', label: t('patientsServed') },
-    { value: '4.9★', label: t('appRating') },
-    { value: '3',    label: t('consultationTypes') },
-  ]
-
   const HOW_STEPS = [
     t('howStep1'), t('howStep2'), t('howStep3'), t('howStep4'), t('howStep5'),
   ]
@@ -75,16 +68,6 @@ export default function AboutDawaScreen() {
           <Text style={styles.cardTitle}>{t('missionLabel')}</Text>
           <Text style={styles.cardBody}>{t('missionBodyP1')}</Text>
           <Text style={[styles.cardBody, { marginTop: 10 }]}>{t('missionBodyP2')}</Text>
-        </View>
-
-        {/* Stats */}
-        <View style={styles.statsRow}>
-          {STATS.map((stat) => (
-            <View key={stat.label} style={styles.statCard}>
-              <Text style={styles.statValue}>{stat.value}</Text>
-              <Text style={styles.statLabel}>{stat.label}</Text>
-            </View>
-          ))}
         </View>
 
         {/* Core values */}

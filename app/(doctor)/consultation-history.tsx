@@ -40,6 +40,16 @@ function displayTimestamp(row: ConsultRow): string | null {
   return row.startedAt ?? row.scheduledAt ?? row.createdAt
 }
 
+// Duration in minutes for a completed consultation. Chat consultations in
+// particular don't always set `started_at`, so fall back to `created_at` as
+// the session start rather than silently showing no duration at all.
+function displayDurationMinutes(row: ConsultRow): number | null {
+  if (!row.endedAt) return null
+  const start = row.startedAt ?? row.createdAt
+  if (!start) return null
+  return Math.round((new Date(row.endedAt).getTime() - new Date(start).getTime()) / 60000)
+}
+
 const TYPE_ICONS: Record<string, string> = { chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam' }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -191,7 +201,7 @@ export default function ConsultationHistoryScreen() {
                     {displayTimestamp(row)
                       ? new Date(displayTimestamp(row)!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
                       : 'Not started'}
-                    {row.endedAt && row.startedAt && ` · ${Math.round((new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()) / 60000)} min`}
+                    {displayDurationMinutes(row) !== null && ` · ${displayDurationMinutes(row)} min`}
                   </Text>
                   {row.status === 'completed' && (
                     <Text style={styles.viewSummaryHint}>Tap to view summary & prescription</Text>

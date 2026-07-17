@@ -361,7 +361,7 @@ export default function DoctorConsultationSummaryScreen() {
   </div>
   ${payload.referral_needed ? `<div class="referral">📋 Referral recommended${payload.referral_specialty ? ` (${esc(payload.referral_specialty)})` : ''}.</div>` : ''}
 
-  <div class="footer">Powered by Dawa Health Platform · ${esc(dateStr)}</div>
+  <div class="footer">This summary was generated during a Dawa teleconsultation and is not a substitute for in-person emergency care. If the patient is experiencing a medical emergency, direct them to local emergency services immediately.<br/>Powered by Dawa Health Platform · ${esc(dateStr)}</div>
 </body>
 </html>`
 

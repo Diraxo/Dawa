@@ -200,7 +200,7 @@ export default function ProfileScreen() {
         visible={showDeactivateAlert}
         variant="warning"
         title="Deactivate Account"
-        message="Your account will be deactivated and you will be logged out. You can reactivate by contacting support."
+        message="You will be signed out on this device. Your account and data stay intact — to fully deactivate or reactivate your account, contact support at support@dawa.app."
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeactivateAlert(false) },
           { text: 'Deactivate', style: 'danger', onPress: confirmDeactivate },

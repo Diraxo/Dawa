@@ -183,6 +183,7 @@ const ti: TranslationKeys = {
   emailAddress: 'ናይ ኢሜይል ኣድራሻ',
   contactInformation: 'ናይ ምርኻብ ሓበሬታ',
   selectGender: 'ጾታ ምረጽ',
+  selectCountry: 'ሃገር ምረጽ',
   address: 'ኣድራሻ',
   country: 'ሃገር',
   saveChanges: 'ለውጢታት ዕቀብ',
@@ -197,6 +198,8 @@ const ti: TranslationKeys = {
   cameraPermissionMsg: 'ናይ ፕሮፋይል ስእሊ ንምውሳድ ናይ ካሜራ ምፍቃድ የድሊ።',
   galleryPermissionMsg: 'ስእሊ ንምምራጽ ናይ ፎቶ ቤተ-መጻሕፍቲ ምፍቃድ የድሊ።',
   profileSaved: 'ተዓቒቡ',
+  change: 'ቀይር',
+  emailUpdatedMsg: 'ኢመይልካ ተዓዲሉ።',
   profileSavedMsg: 'ፕሮፋይልካ ሕድሽ ኮይኑ ኣሎ።',
   profileSaveError: 'ጌጋ',
   profileSaveErrorMsg: 'ፕሮፋይል ምዕቃብ ኣይተኻእለን። በጃኻ ደጊምካ ፈትን።',
@@ -330,8 +333,6 @@ const ti: TranslationKeys = {
   noRecordsYet: 'ገና ዝርዝር የለን',
   noRecordsDesc: 'ናይ ምኽሪ ጸብጻባትካን ናይ ሓኪም ትእዛዛትካን ድሕሪ ፍሉይ ምኽሪ ኣብዚ ይርኤ።',
   uploadNewDocument: 'ሓድሽ ሰነድ ስቀል',
-  comingSoon: 'ቀሪቡ ይመጽእ',
-  featureComingSoonMsg: 'ምስቃል ሰነዳት ኣብ መጻኢ ሕድሽ ሕልወት ክርከብ እዩ።',
   close: 'ዕጸወ',
 
   searchCountry: 'ሃገር ድለ...',
@@ -366,7 +367,9 @@ const ti: TranslationKeys = {
   weeklyAvailability: 'ምርካብ ሰሙናዊ',
   availableHoursNote: 'ሰኑይ–ዓርቢ፣ 9 ቅ.ቀ – 5 ድ.ቀ ዝርከብ',
   patientReviews: 'ግምገማ ሕሙም',
-  noReviewsYet: 'ክሳዕ ሕጂ ግምገማ የለን',
+  noReviewsYet: 'ክሳዕ ሕጂ ግምገማ የለን። ነዚ ሓኪም ዝግምግም ቀዳማይ ሕሙም ኹን።',
+  showMoreReviews: 'ተወሳኺ ኣርኢ',
+  verifiedConsultation: 'ዝተረጋገጸ ምኽሪ',
   bookConsultation: 'ምኽሪ ቆጸሮ',
 
   chatConsultation: 'ምኽሪ ብዝርርብ',
@@ -400,7 +403,7 @@ const ti: TranslationKeys = {
   downloadAsPDF: 'ከም PDF ጻሕሊ',
   rateYourDoctor: 'ሓኪምካ ግምግምዎ',
   howWasExperience: 'ምስ',
-  leaveComment: 'ሓሳብ ሃብ (ናይ ምርጫ)...',
+  leaveComment: 'ሓሳብ ሃብ...',
   submitAndDone: 'ኣቕርብ & ውዳእ',
   submitting: 'ይቐርብ ኣሎ...',
   thankYou: 'የቐንየልና!',
@@ -499,7 +502,6 @@ const ti: TranslationKeys = {
   notifyMeMsg: 'ክፍሊት ምስ ጀመረ ቀዳማይ ዝፈልጥ ክትከውን ኢኻ!',
 
   // Chat consultation screen
-  upcomingAppointment: 'ቀጻሊ ቆጸራ',
   consultationHasntStarted: 'ምኽሪ ገና ኣይጀመረን',
   appointmentBeginsIn: 'ቆጸራኻ ይጅምር',
   chatUnlockNote: 'ዶክተር ኣኼባ ምስ ጀመሩ ጥራይ ዝርርብ ክፉት ይኸውን።',
@@ -537,7 +539,6 @@ const ti: TranslationKeys = {
   // Doctor chat screen
   connectingToConsultation: 'ናብ ምኽሪ ይራኸብ...',
   activeSession: 'ዝካየድ ኣኼባ',
-  done: 'ተወዲኡ',
   consultationEndedChatReadOnly: 'ምኽሪ ተወዲኡ · ዝርርብ ምንባብ ጥራይ',
   chatRequiresDevelopmentBuild: 'ዝርርብ ናይ ልምዓት ህንጻ ይሓትት።',
   waitingForChannelConnection: 'ናይ ቻናል ርክብ ይጽበ...',

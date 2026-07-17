@@ -1,4 +1,4 @@
-import { useAuth } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -24,6 +24,7 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 
 export default function MySpecialtiesScreen() {
   const { getToken } = useAuth()
+  const { user } = useUser()
   const router = useRouter()
 
   const [specialty, setSpecialty] = useState('')
@@ -32,19 +33,28 @@ export default function MySpecialtiesScreen() {
   const [showPicker, setShowPicker] = useState(false)
   const [saving, setSaving] = useState(false)
   const [specialties, setSpecialties] = useState<string[]>([])
+  const [dbUserId, setDbUserId] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!user?.id) return
     // Load admin-managed specialties and doctor's current profile in parallel
     Promise.all([
       supabase.from('specialties').select('name').order('name'),
-      getToken().then(token =>
-        token
-          ? getAuthClient(token)
-              .from('doctor_profiles')
-              .select('specialty, years_experience, license_number')
-              .single()
-          : { data: null }
-      ),
+      getToken().then(async (token) => {
+        if (!token) return { data: null }
+        const client = getAuthClient(token)
+        const { data: userRow } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!userRow) return { data: null }
+        setDbUserId((userRow as any).id ?? null)
+        // doctor_profiles SELECT RLS returns own row + every approved doctor's
+        // row (for patient browsing), so this must be filtered to the caller's
+        // own row or .single() throws once any other approved doctor exists.
+        return client
+          .from('doctor_profiles')
+          .select('specialty, years_experience, license_number')
+          .eq('user_id', (userRow as any).id)
+          .single()
+      }),
     ]).then(([specsRes, profileRes]) => {
       setSpecialties((specsRes.data ?? []).map((s: any) => s.name as string))
       if (profileRes.data) {
@@ -53,8 +63,7 @@ export default function MySpecialtiesScreen() {
         setLicenseNumber((profileRes.data as any).license_number ?? '')
       }
     })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [user?.id])
 
   const handleSave = async () => {
     const yearsNum = Number(yearsExp)
@@ -70,18 +79,24 @@ export default function MySpecialtiesScreen() {
     try {
       const token = await getToken()
       if (!token) throw new Error('No token')
+      if (!dbUserId) throw new Error('Your profile has not finished loading yet. Please try again in a moment.')
       const { data: updatedRows, error } = await getAuthClient(token)
         .from('doctor_profiles')
         .update({ specialty: specialty.trim(), years_experience: yearsNum })
+        .eq('user_id', dbUserId)
         .select('id')
-      if (error) throw error
+      if (error) {
+        console.error('Failed to save specialty/experience:', error)
+        throw new Error(error.message || 'Failed to save. Please try again.')
+      }
       if (!updatedRows || updatedRows.length === 0) {
-        throw new Error('No doctor profile row matched — nothing was saved.')
+        console.error('doctor_profiles specialty update matched 0 rows for user_id:', dbUserId)
+        throw new Error('Failed to save. Please try again.')
       }
       Alert.alert('Saved', 'Your specialties have been updated.')
       router.back()
-    } catch {
-      Alert.alert('Error', 'Failed to save. Please try again.')
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to save. Please try again.')
     } finally {
       setSaving(false)
     }

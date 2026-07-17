@@ -27,6 +27,7 @@ const ClientRoleBroadcaster = 1
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
+import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
@@ -35,10 +36,13 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
+import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 import { callkeep } from '@/lib/callkeep'
 import { logger } from '@/lib/logger'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
@@ -64,10 +68,6 @@ try {
 } catch {}
 
 type CallStatus = 'waiting_for_doctor' | 'ringing' | 'connecting' | 'waiting' | 'connected' | 'reconnecting' | 'error'
-
-function formatTime(s: number) {
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-}
 
 function StatusBadge({ icon, label, color }: { icon: string; label: string; color: string }) {
   return (
@@ -103,29 +103,26 @@ function CtrlBtn({ icon, label, active = false, disabled = false, onPress }: {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {})
         onPress()
       }}
+      accessibilityLabel={label}
+      hitSlop={8}
     >
       <Ionicons
         name={icon as any}
         size={24}
         color={disabled ? 'rgba(255,255,255,0.25)' : active ? colors.mistWhite : 'rgba(255,255,255,0.85)'}
       />
-      <Text style={[ctrl.label, active && ctrl.labelActive, disabled && ctrl.labelDisabled]}>{label}</Text>
     </Pressable>
   )
 }
 
 const ctrl = StyleSheet.create({
   btn: {
-    alignItems: 'center', gap: 6,
-    width: 60, height: 60, borderRadius: 30,
+    alignItems: 'center', justifyContent: 'center',
+    width: 66, height: 66, borderRadius: 33,
     backgroundColor: 'rgba(255,255,255,0.1)',
-    justifyContent: 'center',
   },
   btnActive: { backgroundColor: colors.careBlue },
   btnDisabled: { backgroundColor: 'rgba(255,255,255,0.04)' },
-  label: { fontFamily: fonts.medium, fontSize: 10, color: 'rgba(255,255,255,0.7)' },
-  labelActive: { color: colors.mistWhite },
-  labelDisabled: { color: 'rgba(255,255,255,0.25)' },
 })
 
 export default function PhoneConsultationScreen() {
@@ -160,7 +157,7 @@ export default function PhoneConsultationScreen() {
   const router = useRouter()
   const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
-  const { setActive, updateElapsed, setConnectionStatus } = useActiveConsultationStore()
+  const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
 
   ScreenCapture.usePreventScreenCapture()
 
@@ -186,6 +183,10 @@ export default function PhoneConsultationScreen() {
   const [ringCountdown, setRingCountdown] = useState(RING_TIMEOUT_SECS)
   const [reconnectCountdown, setReconnectCountdown] = useState(90)
   const [isReconnecting, setIsReconnecting] = useState(false)
+  // True once this client has actually observed the doctor's peer join the
+  // audio channel — DB phase alone only proves each side's OWN join
+  // succeeded, not that the two are actually connected to each other.
+  const [remoteConnected, setRemoteConnected] = useState(false)
   const [localError, setLocalError] = useState(false)
   const [agoraToken, setAgoraToken] = useState<string | null>(null)
   const [tokenFetchFailed, setTokenFetchFailed] = useState(false)
@@ -236,6 +237,17 @@ export default function PhoneConsultationScreen() {
   // Single source of truth for call phase/timer — derived from the DB row via
   // Realtime, never from local Agora events. See hooks/useConsultationState.
   const state = useConsultationState({ consultationId: channelName, role: 'patient', localAgoraReconnecting: isReconnecting })
+
+  const setActiveConsultationId = useActiveConsultationScreenStore((s) => s.setActiveConsultationId)
+  // Tracked so usePushNotifications.ts's foreground handler can suppress a
+  // consultation push (e.g. "Tap to join") that arrives after this call is
+  // already open.
+  useEffect(() => {
+    if (!channelName) return
+    setActiveConsultationId(channelName)
+    return () => setActiveConsultationId(null)
+  }, [channelName, setActiveConsultationId])
+
   const phaseRef = useRef(state.phase)
   useEffect(() => { phaseRef.current = state.phase }, [state.phase])
   const seconds = state.elapsedSeconds ?? 0
@@ -250,6 +262,10 @@ export default function PhoneConsultationScreen() {
     }
   }, [ringPhase, state.rawStatus])
 
+  // `remoteConnected` gates 'connected' too, not just phase — the DB-driven
+  // phase only proves each side's OWN join succeeded (markSelfConnected),
+  // not that this client has actually observed the doctor's peer join the
+  // audio channel.
   const callStatus: CallStatus = ringPhase === 'waiting_for_doctor'
     ? 'waiting_for_doctor'
     : ringPhase === 'ringing'
@@ -259,7 +275,7 @@ export default function PhoneConsultationScreen() {
     : state.phase === 'reconnecting'
     ? 'reconnecting'
     : state.phase === 'on_call'
-    ? 'connected'
+    ? (remoteConnected ? 'connected' : 'connecting')
     : state.phase === 'waiting_for_doctor'
     ? 'waiting'
     : 'connecting'
@@ -277,24 +293,27 @@ export default function PhoneConsultationScreen() {
   const ringPulse = useRef(new Animated.Value(1)).current
   const callPulse = useRef(new Animated.Value(1)).current
   const chatOpenRef = useRef(false)
-  const endedHandledRef = useRef(false)
 
-  // Once the DB-derived phase reaches 'ended' — the doctor ended the call, or
-  // it completed/ended abnormally on some other device/session — release
-  // Agora resources and navigate away exactly once.
-  useEffect(() => {
-    if (state.phase !== 'ended' || endedHandledRef.current) return
-    endedHandledRef.current = true
-    try { getAgoraEngine()?.leaveChannel() } catch {}
-    releaseAgoraEngine()
-    if (consultationId) clearPersistedMute(consultationId)
-    setActive(null)
-    if (consultationId) callkeep.reportCallEnded(consultationId, 'remoteEnded')
-    Alert.alert('Call Ended', 'The doctor has ended the consultation.', [
-      { text: 'OK', onPress: () => router.replace('/(patient)/(tabs)/appointments' as any) },
-    ])
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.phase])
+  // Single source of truth for the "call ended" reaction — release Agora
+  // resources exactly once, then (patient only) surface the completion
+  // dialog, whether the doctor ended the call or it completed/ended
+  // abnormally on some other device/session.
+  const completion = useConsultationCompletion({
+    phase: state.phase,
+    rawStatus: state.rawStatus,
+    role: 'patient',
+    kind: 'phone',
+    consultationId,
+    doctorId,
+    doctorName: doctorName ?? doctorNameParam,
+    onTeardown: () => {
+      try { getAgoraEngine()?.leaveChannel() } catch {}
+      releaseAgoraEngine()
+      if (consultationId) clearPersistedMute(consultationId)
+      setActive(null)
+      if (consultationId) callkeep.reportCallEnded(consultationId, 'remoteEnded')
+    },
+  })
 
   // ── Fetch doctor specialty ─────────────────────────────────────────────────
   useEffect(() => {
@@ -426,8 +445,20 @@ export default function PhoneConsultationScreen() {
   }, [consultationId, ringPhase])
 
   useEffect(() => { updateElapsed(seconds) }, [seconds, updateElapsed])
+
+  // Keeps the Resume banner / Android notification's name+photo current —
+  // the initial setActive() above only runs once per (consultationId,
+  // ringPhase) transition, so without this a mid-call doctor rename/photo
+  // change stays wrong for the rest of the call.
+  useEffect(() => { updateIdentity(doctorName ?? 'Doctor', doctorPhotoUrl) }, [doctorName, doctorPhotoUrl])
+
+  // Anchors the Android ongoing-call notification's chronometer to the real
+  // DB started_at instead of a snapshot of elapsedSeconds taken before it
+  // was known — see hooks/useOngoingConsultationNotification.ts.
+  useEffect(() => { updateCallStartedAt(state.callStartedAtMs ?? null) }, [state.callStartedAtMs])
+
   useEffect(() => {
-    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : 'active')
+    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : callStatus === 'connected' ? 'active' : 'connecting')
   }, [callStatus, setConnectionStatus])
 
   // ── Background notification (iOS only — Android gets the persistent,
@@ -441,8 +472,8 @@ export default function PhoneConsultationScreen() {
         const localPhotoUri = await localizeNotificationPhoto(doctorPhotoUrl)
         Notifications.scheduleNotificationAsync({
           content: {
-            title: `Call with ${formatDoctorName(doctorName)}`,
-            body: `Tap to return to your call with ${formatDoctorName(doctorName)}`,
+            title: `Voice Consultation with ${formatDoctorName(doctorName)}`,
+            body: `Tap to return to your voice consultation with ${formatDoctorName(doctorName)}`,
             sound: 'default',
             data: {
               screen: 'consultation',
@@ -510,10 +541,11 @@ export default function PhoneConsultationScreen() {
       }, 1000)
       gracePeriodRef.current = setTimeout(() => {
         if (!mounted) return
-        clearGracePeriod()
-        // Doctor is authoritative for ended_abnormally — patient just leaves silently
-        setActive(null)
-        router.replace('/(patient)/(tabs)/appointments' as any)
+        // Network issues must never end the consultation or force the patient
+        // out of the call screen — only the doctor ending/declining/cancelling
+        // may do that. Keep reconnecting indefinitely.
+        logger.warn('[Phone][Patient] Grace period elapsed — still reconnecting, not leaving call')
+        startGracePeriod()
       }, GRACE_PERIOD_MS)
     }
 
@@ -537,6 +569,7 @@ export default function PhoneConsultationScreen() {
         clearGracePeriod()
         if (connectionTimeoutRef.current) { clearTimeout(connectionTimeoutRef.current); connectionTimeoutRef.current = null }
         setIsReconnecting(false)
+        setRemoteConnected(true)
         setRemoteMuted(false)
         setLocalError(false)
       },
@@ -550,6 +583,7 @@ export default function PhoneConsultationScreen() {
           if (!mounted) return
           remoteUidRef.current = null
           setIsReconnecting(true)
+          setRemoteConnected(false)
           startGracePeriod()
         }, MUTE_DEBOUNCE_MS)
       },
@@ -768,15 +802,32 @@ export default function PhoneConsultationScreen() {
 
   const handleEnd = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
-    Alert.alert('Leave Call', 'You can rejoin from your Appointments tab.', [
-      { text: 'Stay', style: 'cancel' },
+    Alert.alert('Leave Call', 'You can rejoin at any time — the doctor will remain in the consultation.', [
+      { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Leave', style: 'destructive',
+        text: 'Leave Call', style: 'destructive',
         onPress: () => {
+          // Best-effort, fire-and-forget — signals the doctor's screen to
+          // show "Patient has left" instead of a generic "Reconnecting…".
+          // Never touches `status`: the consultation stays in_progress.
+          if (consultationId) {
+            supabase
+              .from('consultations')
+              .update({ patient_left_at: new Date().toISOString() })
+              .eq('id', consultationId)
+              .eq('status', 'in_progress')
+              .then(() => {}, () => {})
+          }
           try { getAgoraEngine()?.leaveChannel() } catch {}
           releaseAgoraEngine()
           if (consultationId) callkeep.reportCallEnded(consultationId, 'remoteEnded')
-          setActive(null)
+          // Deliberately do NOT setActive(null) — the consultation is still
+          // in_progress and the doctor remains in it. Leaving the
+          // active-consultation store populated keeps ActiveCallBanner's
+          // "Resume" pill (and the recovery effects in app/_layout.tsx)
+          // pointed at this same consultation, so reopening the app or
+          // tapping the ongoing-call notification takes the patient straight
+          // back in.
           router.replace('/(patient)/(tabs)/appointments' as any)
         },
       },
@@ -804,7 +855,7 @@ export default function PhoneConsultationScreen() {
                 : <Ionicons name="person" size={52} color="rgba(255,255,255,0.5)" />
               }
             </View>
-            <Text style={styles.waitingDoctorName}>{doctorName ?? 'Doctor'}</Text>
+            <Text style={styles.waitingDoctorName}>{formatDoctorName(doctorName)}</Text>
             {doctorSpecialty ? <Text style={styles.waitingSpecialty}>{doctorSpecialty}</Text> : null}
             <Text style={styles.waitingSubtitle}>The doctor will call you shortly…</Text>
             <Text style={styles.waitingHint}>Your call will start automatically when the doctor joins.</Text>
@@ -841,7 +892,7 @@ export default function PhoneConsultationScreen() {
                 </View>
               </View>
             </Animated.View>
-            <Text style={styles.ringName}>{doctorName ?? 'Doctor'}</Text>
+            <Text style={styles.ringName}>{formatDoctorName(doctorName)}</Text>
             {doctorSpecialty ? <Text style={styles.ringSpecialty}>{doctorSpecialty}</Text> : null}
             <Text style={styles.ringSubtitle}>is calling you…</Text>
             <Text style={styles.ringCountdown}>Auto-declining in {ringCountdown}s</Text>
@@ -891,7 +942,7 @@ export default function PhoneConsultationScreen() {
 
         <Text style={styles.timerLarge} numberOfLines={1} adjustsFontSizeToFit>
           {isConnected && startedAtIso
-            ? formatTime(seconds)
+            ? formatCallDuration(seconds)
             : callStatus === 'reconnecting'
             ? 'Reconnecting…'
             : 'Connecting…'}
@@ -904,7 +955,7 @@ export default function PhoneConsultationScreen() {
           }
         </Animated.View>
 
-        <Text style={styles.callerName}>{doctorName ?? 'Doctor'}</Text>
+        <Text style={styles.callerName}>{formatDoctorName(doctorName)}</Text>
         {doctorSpecialty ? <Text style={styles.callerSub}>{doctorSpecialty}</Text> : null}
 
         {remoteMuted && isConnected && (
@@ -1021,9 +1072,10 @@ export default function PhoneConsultationScreen() {
         <Pressable
           style={({ pressed }) => [styles.endBtn, pressed && { opacity: 0.82 }]}
           onPress={handleEnd}
+          accessibilityLabel="Leave call"
+          hitSlop={8}
         >
           <Ionicons name="call" size={28} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
-          <Text style={styles.endBtnLabel}>End</Text>
         </Pressable>
       </View>
 
@@ -1049,6 +1101,14 @@ export default function PhoneConsultationScreen() {
         channelLoading={channelLoading}
         userId={userId}
         consultationTypeIcon="call"
+        readOnly={completion.showCompletedModal}
+      />
+
+      <ConsultationCompletedModal
+        visible={completion.showCompletedModal}
+        rawStatus={completion.rawStatus}
+        onViewSummary={completion.goToSummary}
+        onClose={completion.dismissModal}
       />
     </SafeAreaView>
   )
@@ -1198,14 +1258,13 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 28, borderTopRightRadius: 28,
   },
   endBtn: {
-    width: 72, height: 72, borderRadius: 36,
+    width: 78, height: 78, borderRadius: 39,
     backgroundColor: colors.error,
-    alignItems: 'center', justifyContent: 'center', gap: 6,
+    alignItems: 'center', justifyContent: 'center',
     shadowColor: colors.error,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.5, shadowRadius: 12, elevation: 8,
   },
-  endBtnLabel: { fontFamily: fonts.regular, fontSize: 11, color: '#fff' },
   unreadBadge: {
     position: 'absolute', top: -4, right: -4,
     minWidth: 18, height: 18, borderRadius: 9,
