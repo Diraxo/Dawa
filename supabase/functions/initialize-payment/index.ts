@@ -46,6 +46,14 @@ function formatDoctorName(rawName: string | null | undefined): string {
   return `Dr. ${name.replace(/^Dr\.?\s+/i, '').trim()}`
 }
 
+// Chapa test secret keys are prefixed CHASECK_TEST-, live keys CHASECK-.
+// Never log the full key — only enough to confirm which one is loaded.
+function maskChapaKey(key: string): { masked: string; mode: 'test' | 'live' | 'unknown' } {
+  const mode = /test/i.test(key) ? 'test' : /^CHASECK-/i.test(key) ? 'live' : 'unknown'
+  const visible = key.slice(0, 12)
+  return { masked: `${visible}${'*'.repeat(Math.max(key.length - visible.length, 0))}`, mode }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS })
@@ -68,8 +76,11 @@ Deno.serve(async (req: Request) => {
 
   const chapaKey = Deno.env.get('CHAPA_SECRET_KEY')
   if (!chapaKey) {
+    console.error('[initialize-payment] CHAPA_SECRET_KEY is not set in this environment')
     return new Response('Payment service not configured', { status: 500, headers: CORS })
   }
+  const { masked, mode } = maskChapaKey(chapaKey)
+  console.log(`[initialize-payment] Chapa key mode=${mode} loaded=${masked}`)
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -98,6 +109,11 @@ Deno.serve(async (req: Request) => {
     },
   }
 
+  // Log the exact outgoing request (Authorization redacted, everything else as-sent).
+  console.log('[initialize-payment] Chapa request URL: https://api.chapa.co/v1/transaction/initialize')
+  console.log('[initialize-payment] Chapa request body:', JSON.stringify(chapaPayload))
+  console.log(`[initialize-payment] Authorization header: Bearer ${masked}`)
+
   let chapaData: ChapaInitResponse
   try {
     const resp = await fetch('https://api.chapa.co/v1/transaction/initialize', {
@@ -110,10 +126,12 @@ Deno.serve(async (req: Request) => {
     })
     chapaData = await resp.json() as ChapaInitResponse
 
+    // Always log the complete response — status, headers, and body — not just "failed".
+    console.log('[initialize-payment] Chapa HTTP status:', resp.status)
+    console.log('[initialize-payment] Chapa response headers:', JSON.stringify(Object.fromEntries(resp.headers.entries())))
+    console.log('[initialize-payment] Chapa response body:', JSON.stringify(chapaData))
+
     if (!resp.ok || chapaData.status !== 'success' || !chapaData.data?.checkout_url) {
-      // Log everything: HTTP status from Chapa + full body
-      console.error('[initialize-payment] Chapa HTTP status:', resp.status)
-      console.error('[initialize-payment] Chapa response:', JSON.stringify(chapaData))
       // Chapa sometimes returns message as a validation-error object, not a string.
       // Always convert to a readable string for the browser error banner.
       const raw = (chapaData as any)?.message

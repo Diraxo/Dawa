@@ -15,7 +15,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
@@ -119,6 +119,7 @@ export default function RegistrationStep4() {
   const { getToken } = useAuth()
   const { user } = useUser()
   const { t } = useTranslation()
+  const insets = useSafeAreaInsets()
 
   const { setDoctorStatus } = useDoctorStore()
   const [chatPrice, setChatPrice] = useState(store.regChatPrice)
@@ -320,7 +321,7 @@ export default function RegistrationStep4() {
           <View style={{ height: 100 }} />
         </ScrollView>
 
-        <View style={styles.footer}>
+        <View style={[styles.footer, { paddingBottom: Math.max(32, insets.bottom + 16) }]}>
           <View style={styles.footerRow}>
             <View style={styles.backBtnWrap}>
               <OutlineButton label={t('back')} onPress={() => router.back()} />
@@ -398,7 +399,7 @@ const styles = StyleSheet.create({
   earningsAmount: { fontFamily: fonts.bold, fontSize: 14, color: '#15803D' },
   earningsNote: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280' },
 
-  footer: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
+  footer: { paddingHorizontal: 24, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
   footerRow: { flexDirection: 'row', gap: 12 },
   backBtnWrap: { flex: 1 },
   submitBtnWrap: { flex: 2 },

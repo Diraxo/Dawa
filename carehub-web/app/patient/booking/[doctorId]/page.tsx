@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 import { useAuth, useUser } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
+import { useServerNow } from '@/lib/serverClock'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
 import { MessageCircle, Phone, Video, Zap, Calendar, Wallet, Check } from 'lucide-react'
@@ -65,7 +66,12 @@ export default function BookingPage() {
   const { user } = useUser()
 
   const initialType = (searchParams.get('type') ?? 'chat') as ConsultType
-  const [step, setStep] = useState<Step>(1)
+  // Lets a caller (e.g. the waiting-room page, after a cancelled/declined
+  // consultation) land directly on the date/time step instead of making the
+  // patient re-pick a consultation type they already chose once.
+  const requestedStep = Number(searchParams.get('step'))
+  const initialStep = (requestedStep === 2 || requestedStep === 3 || requestedStep === 4 ? requestedStep : 1) as Step
+  const [step, setStep] = useState<Step>(initialStep)
   const [doctor, setDoctor] = useState<DoctorProfile | null>(null)
   const [selectedType, setSelectedType] = useState<ConsultType>(initialType)
   // Starts unset (not a hardcoded 'now' literal) so the very first render of
@@ -83,7 +89,14 @@ export default function BookingPage() {
   const [creditLoading, setCreditLoading] = useState(false)
   const [commissionRate, setCommissionRate] = useState(20)
   const [doctorBusy, setDoctorBusy] = useState(false)
-  const days = getNextDays(7)
+  const [doctorScheduledSoon, setDoctorScheduledSoon] = useState(false)
+
+  // Device-clock-independent "now", synced against Postgres' own now() —
+  // see lib/serverClock.ts. Both re-syncs periodically and ticks every 30s,
+  // so a slot that just became past disappears without the patient touching
+  // anything, and can't be kept bookable by a wrong/rolled-back device clock.
+  const nowMs = useServerNow()
+  const days = getNextDays(7, undefined, nowMs)
 
   // Fetches the doctor profile. Called on mount, then once more when the
   // realtime channel below reaches SUBSCRIBED — reconciles an is_online /
@@ -121,7 +134,7 @@ export default function BookingPage() {
     setDoctor(prev => prev ? { ...prev, is_online: fields.is_online, availability: fields.availability ?? prev.availability } : prev)
   }, () => { loadDoctor() })
 
-  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy
+  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy && !doctorScheduledSoon
 
   // The real default before the patient makes an explicit choice — derived
   // from canStartNow on every render (not a one-time effect), so the timing
@@ -143,22 +156,36 @@ export default function BookingPage() {
     return Boolean(data)
   }
 
+  // Doctor has a scheduled consultation starting within the configurable
+  // on-demand safety buffer (platform_settings.on_demand_buffer_minutes,
+  // 5 min by default — see migration 083). Checked client-side so "Right
+  // Now" greys out with the real reason before the patient reaches payment,
+  // instead of only discovering it from a server rejection.
+  async function checkDoctorScheduledSoon(doctorId: string) {
+    const { data } = await supabase.rpc('is_doctor_scheduled_soon', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
   useEffect(() => {
     if (!doctorId) return
     let cancelled = false
-    checkDoctorBusy(doctorId).then(busy => { if (!cancelled) setDoctorBusy(busy) })
-    const interval = setInterval(() => {
+    const refresh = () => {
       checkDoctorBusy(doctorId).then(busy => { if (!cancelled) setDoctorBusy(busy) })
-    }, 10_000)
+      checkDoctorScheduledSoon(doctorId).then(soon => { if (!cancelled) setDoctorScheduledSoon(soon) })
+    }
+    refresh()
+    const interval = setInterval(refresh, 10_000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [doctorId])
 
   // Which of the currently-generated slots for the selected day are already
-  // booked. Checked per-slot via the is_slot_available RPC (SECURITY DEFINER
-  // — same reasoning as checkDoctorBusy above: a patient has no SELECT
-  // access to another patient's consultation/slot_lock rows, so this can't
-  // be a direct table read) rather than trusting only the post-submit
-  // SLOT_TAKEN error, which left already-booked slots looking selectable.
+  // booked. Read directly from slot_locks (patients can SELECT any doctor's
+  // locks — see migration 019's "Patients can view all slot locks" policy),
+  // mirroring RescheduleModal.tsx and mobile's BookingModal.tsx. Previously
+  // this used the is_slot_available RPC, which conflates "locked" and
+  // "already in the past" into a single boolean — that made a merely-past
+  // (never-booked) slot render identically to a truly booked one instead of
+  // falling through to the separate grey "Past" style below.
   // Re-runs whenever the selected day (or the doctor's hours) changes.
   useEffect(() => {
     if (!doctorId || !doctor) { setBookedSlots(new Set()); return }
@@ -166,19 +193,27 @@ export default function BookingPage() {
     if (!dayValue) return
     const slots = getAvailableSlots(doctor.availability ?? null, dayValue)
     if (slots.length === 0) { setBookedSlots(new Set()); return }
-    let cancelled = false
+    const dayStart = new Date(`${dayValue}T00:00:00`)
+    const dayEnd = new Date(`${dayValue}T23:59:59.999`)
 
     const fetchBookedSlots = () => {
-      Promise.all(
-        slots.map(slot =>
-          supabase
-            .rpc('is_slot_available', { p_doctor_id: doctorId, p_slot_start: parseScheduledAt(dayValue, slot) })
-            .then(({ data }) => ({ slot, available: data !== false }))
-        )
-      ).then(results => {
-        if (cancelled) return
-        setBookedSlots(new Set(results.filter(r => !r.available).map(r => r.slot)))
-      })
+      supabase
+        .from('slot_locks')
+        .select('slot_start')
+        .eq('doctor_id', doctorId)
+        .gte('slot_start', dayStart.toISOString())
+        .lte('slot_start', dayEnd.toISOString())
+        .gt('expires_at', new Date().toISOString())
+        .then(({ data }) => {
+          if (!data) { setBookedSlots(new Set()); return }
+          setBookedSlots(new Set(data.map((row: any) => {
+            const d = new Date(row.slot_start)
+            const h = d.getHours(), m = d.getMinutes()
+            const meridiem = h >= 12 ? 'PM' : 'AM'
+            const h12 = h % 12 === 0 ? 12 : h % 12
+            return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
+          })))
+        })
     }
 
     fetchBookedSlots()
@@ -195,7 +230,7 @@ export default function BookingPage() {
       )
       .subscribe()
 
-    return () => { cancelled = true; supabase.removeChannel(channel) }
+    return () => { supabase.removeChannel(channel) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctorId, selectedDay, doctor?.availability])
 
@@ -251,22 +286,32 @@ export default function BookingPage() {
     if (effectiveScheduleMode === 'now' && !canStartNow) {
       setPayError(
         doctor && !doctor.is_online
-          ? 'This doctor is currently offline. Please schedule for a later time or choose another doctor.'
-          : 'Doctor is currently in another consultation. Please schedule for later or choose another doctor.'
+          ? 'This doctor is currently unavailable. Please choose another doctor.'
+          : doctorScheduledSoon
+            ? 'This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.'
+            : 'This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.'
       )
       return
     }
     setBooking(true)
     let createdConsultationId: string | null = null
     try {
-      // Final busy re-check right before payment — the periodic poll above
-      // could be stale by up to 10s, and the patient must never be charged
-      // for an On-Demand consultation with a doctor who became busy in that
-      // window. book_appointment_slot() also enforces this server-side
-      // (DOCTOR_BUSY below) as the authoritative last-resort guard.
+      // Final busy/scheduled-soon re-check right before payment — the
+      // periodic poll above could be stale by up to 10s, and the patient
+      // must never be charged for an On-Demand consultation with a doctor
+      // who became unavailable in that window. book_appointment_slot() also
+      // enforces both server-side (DOCTOR_BUSY / DOCTOR_SCHEDULED_SOON
+      // below) as the authoritative last-resort guard.
       if (effectiveScheduleMode === 'now' && await checkDoctorBusy(doctorId)) {
         setDoctorBusy(true)
-        setPayError('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+        setPayError('This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.')
+        setBooking(false)
+        return
+      }
+
+      if (effectiveScheduleMode === 'now' && await checkDoctorScheduledSoon(doctorId)) {
+        setDoctorScheduledSoon(true)
+        setPayError('This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.')
         setBooking(false)
         return
       }
@@ -315,8 +360,20 @@ export default function BookingPage() {
         if (msg.includes('ON_DEMAND_DISABLED')) {
           throw new Error('This doctor is not accepting on-demand consultations right now.')
         }
+        if (msg.includes('DOCTOR_SCHEDULED_SOON')) {
+          throw new Error('This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.')
+        }
         if (msg.includes('DOCTOR_BUSY')) {
-          throw new Error('Doctor is currently in another consultation. Please schedule for later or choose another doctor.')
+          throw new Error('This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_OFFLINE')) {
+          throw new Error('This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_UNAVAILABLE')) {
+          throw new Error('This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('SLOT_EXPIRED')) {
+          throw new Error('This time slot has already passed. Please select another available time.')
         }
         if (msg.includes('PATIENT_BUSY')) {
           throw new Error('You already have an active consultation. Please finish it before starting a new one.')
@@ -333,7 +390,7 @@ export default function BookingPage() {
         if (msg.includes('OUTSIDE_HOURS')) {
           throw new Error("This time is outside the doctor's working hours. Please pick another time.")
         }
-        throw new Error('Failed to create booking')
+        throw new Error("We couldn't complete this booking. Please try again.")
       }
       createdConsultationId = newConsultationId as string
 
@@ -571,7 +628,9 @@ export default function BookingPage() {
                     ? 'Doctor is currently offline'
                     : doctorBusy
                       ? 'Doctor is currently in another consultation'
-                      : 'Doctor will be notified immediately'}
+                      : doctorScheduledSoon
+                        ? 'Doctor has a scheduled consultation starting soon'
+                        : 'Doctor will be notified immediately'}
                 </p>
               </div>
             </button>
@@ -635,7 +694,7 @@ export default function BookingPage() {
                     <div className="flex flex-wrap gap-2 mb-3">
                       {slots.map(slot => {
                         const isBooked = bookedSlots.has(slot)
-                        const isPast = !isBooked && isSlotPast(dayValue, slot)
+                        const isPast = !isBooked && isSlotPast(dayValue, slot, nowMs)
                         const isDisabled = isBooked || isPast
                         return (
                           <button
@@ -665,7 +724,7 @@ export default function BookingPage() {
             <button onClick={() => setStep(1)} className="btn-outline flex-1">← Back</button>
             <button
               onClick={() => setStep(3)}
-              disabled={effectiveScheduleMode === 'schedule' && (!selectedTime || bookedSlots.has(selectedTime) || isSlotPast(days[selectedDay].value, selectedTime))}
+              disabled={effectiveScheduleMode === 'schedule' && (!selectedTime || bookedSlots.has(selectedTime) || isSlotPast(days[selectedDay].value, selectedTime, nowMs))}
               className="btn-primary flex-1 disabled:opacity-50"
             >
               Continue →

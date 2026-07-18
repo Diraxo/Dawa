@@ -33,6 +33,7 @@ import { fonts } from '@/constants/fonts'
 import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
@@ -158,6 +159,14 @@ export default function PhoneConsultationScreen() {
   const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
   const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
+
+  // Auto-clear: reaching this call screen at all — whether via the
+  // notification, the OS call UI, or waiting-room recovery — means the
+  // corresponding notification has been handled; mark it read.
+  useEffect(() => {
+    if (!consultationId || !userId) return
+    markNotificationsReadForConsultation(supabase, userId, consultationId)
+  }, [consultationId, userId])
 
   ScreenCapture.usePreventScreenCapture()
 

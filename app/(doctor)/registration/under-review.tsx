@@ -14,7 +14,7 @@ import {
   Text,
   View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
@@ -31,6 +31,7 @@ export default function UnderReviewScreen() {
   const { user } = useUser()
   const { clearReg } = useDoctorStore()
   const { t } = useTranslation()
+  const insets = useSafeAreaInsets()
 
   const STEPS = [
     { icon: 'search-outline', label: t('reviewStep1'), color: colors.information },
@@ -130,7 +131,7 @@ export default function UnderReviewScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+    <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Illustration area */}
         <View style={styles.illustrationWrap}>
@@ -183,7 +184,7 @@ export default function UnderReviewScreen() {
       </ScrollView>
 
       {/* Footer buttons */}
-      <View style={styles.footer}>
+      <View style={[styles.footer, { paddingBottom: Math.max(32, insets.bottom + 16) }]}>
         <GradientButton
           label={t('goHome')}
           onPress={() => router.replace('/(doctor)/(tabs)/home')}
@@ -209,7 +210,7 @@ export default function UnderReviewScreen() {
       <Modal visible={showRejectionModal} transparent animationType="slide" onRequestClose={() => setShowRejectionModal(false)}>
         <View style={styles.modalOverlay}>
           <Pressable style={{ flex: 1 }} onPress={() => setShowRejectionModal(false)} />
-          <View style={styles.modalSheet}>
+          <View style={[styles.modalSheet, { paddingBottom: Math.max(24, insets.bottom + 16) }]}>
             <View style={styles.modalHandle} />
             <View style={styles.rejectionIconWrap}>
               <Ionicons name="close-circle" size={40} color={colors.error} />
@@ -265,7 +266,7 @@ const styles = StyleSheet.create({
   helpLink: { fontFamily: fonts.semiBold, color: colors.tealGreen },
 
   footer: {
-    paddingHorizontal: 24, paddingBottom: 32, paddingTop: 12,
+    paddingHorizontal: 24, paddingTop: 12,
     backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey,
   },
   checkStatusBtn: {

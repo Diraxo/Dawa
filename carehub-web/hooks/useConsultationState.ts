@@ -30,6 +30,7 @@ interface ConsultationRow {
   started_at: string | null
   doctor_connected_at: string | null
   patient_connected_at: string | null
+  patient_left_at: string | null
 }
 
 export interface DeriveCallStateInput {
@@ -115,7 +116,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     async function load() {
       const { data, error } = await supabase
         .from('consultations')
-        .select('status, started_at, doctor_connected_at, patient_connected_at')
+        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
         .eq('id', consultationId)
         .single()
       if (cancelled) return
@@ -135,9 +136,17 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
   // Realtime — the one subscription both roles rely on for this row; the DB
   // trigger (see migration 035) is the only writer of status/started_at for
   // the connect transition, so this event is identical for both parties.
+  //
+  // Topic suffixed with Date.now() because `supabase.channel()` dedupes by
+  // topic string and returns any existing channel for the same topic — if a
+  // prior mount's `removeChannel()` (async unsubscribe, then teardown) hasn't
+  // finished when this effect re-runs (e.g. React StrictMode's double-invoke),
+  // we'd otherwise get handed back the old, already-subscribed channel and
+  // `.on()` would throw ("cannot add postgres_changes callbacks ... after
+  // subscribe()"). Mirrors hooks/useUserPhotoRealtime.ts.
   useEffect(() => {
     const ch = supabase
-      .channel(`consultation-state-${role}-${consultationId}`)
+      .channel(`consultation-state-${role}-${consultationId}-${Date.now()}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` }, (payload) => {
         const r = payload.new as ConsultationRow
         logger.log(`[ConsultationState][${role}][${Date.now()}] realtime UPDATE — status:${r.status} doctorConnected:${!!r.doctor_connected_at} patientConnected:${!!r.patient_connected_at}`)
@@ -161,7 +170,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     const t = setInterval(async () => {
       const { data, error } = await supabase
         .from('consultations')
-        .select('status, started_at, doctor_connected_at, patient_connected_at')
+        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
         .eq('id', consultationId)
         .single()
       if (error) {
@@ -234,12 +243,33 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     }
   }, [consultationId, role, getToken])
 
+  // Patient-only: called on every successful join/rejoin (initial connect
+  // *and* any later reconnect after "Leave Call"), unlike markSelfConnected
+  // which is a one-shot gated to the 'accepted' transition. Clears a stale
+  // patient_left_at so the doctor's "Patient has left" banner drops the
+  // instant the patient is actually back.
+  const clearPatientLeft = useCallback(async () => {
+    if (role !== 'patient') return
+    try {
+      const tok = await getToken()
+      if (!tok) return
+      await getAuthClient(tok)
+        .from('consultations')
+        .update({ patient_left_at: null })
+        .eq('id', consultationId)
+    } catch (err) {
+      logger.error(`[ConsultationState][${role}][${Date.now()}] clearPatientLeft — threw:`, err)
+    }
+  }, [consultationId, role, getToken])
+
   return {
     phase: derived.phase,
     elapsedSeconds: derived.elapsedSeconds,
     startedAtIso: row?.started_at ?? null,
     isPeerConnected: role === 'doctor' ? !!row?.patient_connected_at : !!row?.doctor_connected_at,
     markSelfConnected,
+    clearPatientLeft,
+    patientHasLeft: !!row?.patient_left_at,
     rawStatus: row?.status ?? null,
   }
 }

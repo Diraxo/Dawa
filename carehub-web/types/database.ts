@@ -244,26 +244,30 @@ export type Database = {
           doctor_amount: number | null
           doctor_connected_at: string | null
           doctor_id: string
+          doctor_viewed_at: string | null
           duration_minutes: number | null
           ended_at: string | null
           id: string
+          is_on_demand: boolean | null
           last_heartbeat_at: string | null
           missed_at: string | null
           notification_sent: boolean
           patient_amount: number | null
           patient_connected_at: string | null
           patient_id: string
+          patient_left_at: string | null
           payment_status: string | null
           platform_amount: number | null
           previous_scheduled_at: string | null
           refund_status: string
           reminder_30_sent: boolean
-          reminder_5_sent: boolean
+          reminder_10_sent: boolean
           reminder_sent: boolean
           replacement_consultation_id: string | null
           scheduled_at: string | null
           started_at: string | null
           status: string
+          status_changed_at: string
           type: string
           updated_at: string | null
           waiting_started_at: string | null
@@ -282,26 +286,30 @@ export type Database = {
           doctor_amount?: number | null
           doctor_connected_at?: string | null
           doctor_id: string
+          doctor_viewed_at?: string | null
           duration_minutes?: number | null
           ended_at?: string | null
           id?: string
+          is_on_demand?: boolean | null
           last_heartbeat_at?: string | null
           missed_at?: string | null
           notification_sent?: boolean
           patient_amount?: number | null
           patient_connected_at?: string | null
           patient_id: string
+          patient_left_at?: string | null
           payment_status?: string | null
           platform_amount?: number | null
           previous_scheduled_at?: string | null
           refund_status?: string
           reminder_30_sent?: boolean
-          reminder_5_sent?: boolean
+          reminder_10_sent?: boolean
           reminder_sent?: boolean
           replacement_consultation_id?: string | null
           scheduled_at?: string | null
           started_at?: string | null
           status?: string
+          status_changed_at?: string
           type: string
           updated_at?: string | null
           waiting_started_at?: string | null
@@ -320,26 +328,30 @@ export type Database = {
           doctor_amount?: number | null
           doctor_connected_at?: string | null
           doctor_id?: string
+          doctor_viewed_at?: string | null
           duration_minutes?: number | null
           ended_at?: string | null
           id?: string
+          is_on_demand?: boolean | null
           last_heartbeat_at?: string | null
           missed_at?: string | null
           notification_sent?: boolean
           patient_amount?: number | null
           patient_connected_at?: string | null
           patient_id?: string
+          patient_left_at?: string | null
           payment_status?: string | null
           platform_amount?: number | null
           previous_scheduled_at?: string | null
           refund_status?: string
           reminder_30_sent?: boolean
-          reminder_5_sent?: boolean
+          reminder_10_sent?: boolean
           reminder_sent?: boolean
           replacement_consultation_id?: string | null
           scheduled_at?: string | null
           started_at?: string | null
           status?: string
+          status_changed_at?: string
           type?: string
           updated_at?: string | null
           waiting_started_at?: string | null
@@ -1013,10 +1025,26 @@ export type Database = {
         Returns: string
       }
       get_commission_rate: { Args: never; Returns: number }
+      get_on_demand_buffer_minutes: { Args: never; Returns: number }
       get_doctor_profile_id: { Args: never; Returns: string }
+      get_doctor_reviews: {
+        Args: { p_doctor_id: string; p_limit?: number; p_offset?: number }
+        Returns: {
+          comment: string | null
+          consultation_type: string | null
+          created_at: string
+          id: string
+          patient_id: string
+          patient_name: string
+          patient_photo_url: string | null
+          rating: number
+        }[]
+      }
+      get_server_time: { Args: never; Returns: string }
       get_user_id_from_jwt_sub: { Args: never; Returns: string }
       is_admin: { Args: never; Returns: boolean }
       is_doctor_busy: { Args: { p_doctor_id: string }; Returns: boolean }
+      is_doctor_scheduled_soon: { Args: { p_doctor_id: string }; Returns: boolean }
       is_patient_busy: { Args: { p_patient_id: string }; Returns: boolean }
       is_slot_available: {
         Args: { p_doctor_id: string; p_slot_start: string }

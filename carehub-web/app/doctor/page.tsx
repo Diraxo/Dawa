@@ -6,6 +6,7 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 import { writeDoctorOnlineStatus } from '@/lib/doctorOnline'
 import { getGreeting, stripDrPrefix } from '@/lib/utils'
 import { ClipboardList, CheckCircle2, Star, Wallet, Calendar, User, XCircle, Clock, Ban, MessageCircle, Phone, Video } from 'lucide-react'
+import { AppointmentDetailsModal, type AppointmentDetails } from '@/components/doctor/AppointmentDetailsModal'
 
 interface DoctorStats {
   totalConsultations: number
@@ -21,6 +22,7 @@ interface TodayAppointment {
   id: string
   type: string
   patientName: string
+  patientPhotoUrl: string | null
   time: string
   status: string
 }
@@ -33,6 +35,7 @@ export default function DoctorHomePage() {
   })
   const [loading, setLoading] = useState(true)
   const [todaySchedule, setTodaySchedule] = useState<TodayAppointment[]>([])
+  const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
 
   useEffect(() => {
     if (!user) return
@@ -90,7 +93,7 @@ export default function DoctorHomePage() {
 
     const { data: scheduleData } = await client
       .from('consultations')
-      .select('id, type, status, scheduled_at, patient:users!patient_id(full_name)')
+      .select('id, type, status, scheduled_at, patient:users!patient_id(full_name, profile_photo_url)')
       .eq('doctor_id', doctorProfileId)
       .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress', 'scheduled'])
       .gte('scheduled_at', today.toISOString())
@@ -101,6 +104,7 @@ export default function DoctorHomePage() {
       id: c.id,
       type: c.type,
       patientName: c.patient?.full_name ?? 'Patient',
+      patientPhotoUrl: c.patient?.profile_photo_url ?? null,
       time: c.scheduled_at ? new Date(c.scheduled_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
       status: c.status,
     })))
@@ -267,21 +271,34 @@ export default function DoctorHomePage() {
               const typeIcons: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
               const ApptIcon = typeIcons[appt.type] ?? ClipboardList
               return (
-                <div key={appt.id} className="card p-4 flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0">
-                    <ApptIcon size={20} className="text-ink-black/60" />
+                <button
+                  key={appt.id}
+                  onClick={() => setDetailsAppt({
+                    id: appt.id, type: appt.type, status: appt.status,
+                    patientName: appt.patientName, patientPhotoUrl: appt.patientPhotoUrl,
+                    whenLabel: `Today at ${appt.time}`,
+                  })}
+                  className="card p-4 flex items-center gap-3 text-left w-full hover:bg-cloud-grey/40 transition-colors"
+                >
+                  <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0 overflow-hidden">
+                    {appt.patientPhotoUrl ? (
+                      <img src={appt.patientPhotoUrl} alt={appt.patientName} className="w-11 h-11 object-cover" />
+                    ) : (
+                      <ApptIcon size={20} className="text-ink-black/60" />
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-montserrat font-semibold text-sm text-ink-black">{appt.patientName}</p>
                     <p className="text-xs text-ink-black/40 mt-0.5">{appt.time} · {appt.type.charAt(0).toUpperCase() + appt.type.slice(1)}</p>
                   </div>
                   <div className="w-2 h-2 rounded-full bg-teal-green flex-shrink-0" />
-                </div>
+                </button>
               )
             })}
           </div>
         )}
       </div>
+      <AppointmentDetailsModal appt={detailsAppt} onClose={() => setDetailsAppt(null)} />
     </div>
   )
 }

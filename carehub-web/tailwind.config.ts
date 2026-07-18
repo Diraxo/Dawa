@@ -36,6 +36,7 @@ const config: Config = {
         'shimmer':    'shimmer 2.5s linear infinite',
         'spin-slow':  'spin 12s linear infinite',
         'bounce-sm':  'bounceSm 2s ease-in-out infinite',
+        'speak-pulse': 'speakPulse 1.1s ease-in-out infinite',
       },
       keyframes: {
         fadeUp: {
@@ -61,6 +62,10 @@ const config: Config = {
         bounceSm: {
           '0%, 100%': { transform: 'translateY(0)' },
           '50%':      { transform: 'translateY(-6px)' },
+        },
+        speakPulse: {
+          '0%, 100%': { transform: 'scale(1)', opacity: '0' },
+          '50%':      { transform: 'scale(1.1)', opacity: '0.65' },
         },
       },
       boxShadow: {

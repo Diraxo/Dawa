@@ -1,19 +1,41 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
 import { useAuth, useUser } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { getStreamClient, fetchStreamToken, preloadImages, getMessageImageUrls, onStreamReconnect } from '@/lib/stream'
 import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { WebVoiceNotePlayer } from '@/components/ui/WebVoiceNotePlayer'
 import { EndConsultationModal } from '@/components/doctor/EndConsultationModal'
+import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
 import { logger } from '@/lib/logger'
 import type { Channel, FormatMessageResponse } from 'stream-chat'
-import { Image as ImageIcon, Mic, Paperclip, MessageCircle, ClipboardList } from 'lucide-react'
+import { Image as ImageIcon, Mic, Paperclip, MessageCircle, ClipboardList, FileText } from 'lucide-react'
+
+// pdf.js touches canvas/DOM APIs unavailable during SSR — load client-only.
+const PdfViewerOverlay = dynamic(
+  () => import('./PdfViewerOverlay').then((m) => m.PdfViewerOverlay),
+  { ssr: false }
+)
+
+function isPdfAttachment(att: Att): boolean {
+  if (att.mime_type === 'application/pdf') return true
+  const name = att.title || att.fallback || att.asset_url || att.file || ''
+  return /\.pdf(\?|$)/i.test(name)
+}
+
+function formatFileSize(bytes?: number): string | null {
+  if (!bytes || bytes <= 0) return null
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
 
 // ── ConsultationChatThread ───────────────────────────────────────────────────
 // The single chat implementation shared by the standalone chat page AND the
@@ -57,6 +79,7 @@ type Att = {
   duration?: number
   title?: string
   fallback?: string
+  file_size?: number
 }
 
 function getAtts(m: FormatMessageResponse): Att[] {
@@ -216,6 +239,7 @@ export function ConsultationChatThread({
 
   const [pendingFiles, setPendingFiles] = useState<Array<{ file: File; preview: string }>>([])
   const [imageViewer, setImageViewer] = useState<{ images: string[]; index: number; message: FormatMessageResponse } | null>(null)
+  const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [showImageMenu, setShowImageMenu] = useState(false)
   const [showAttachMenu, setShowAttachMenu] = useState(false)
   const isSendingRef = useRef(false)
@@ -301,20 +325,6 @@ export function ConsultationChatThread({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [imageViewer])
-
-  useEffect(() => {
-    if (!id) return
-    const ch = supabase
-      .channel(`${role}-chat-status-${id}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${id}` }, (payload) => {
-        const s = (payload.new as { status: string })?.status
-        if (s === 'completed' || s === 'ended_abnormally' || s === 'cancelled') {
-          setConsultation(prev => prev ? { ...prev, status: s } : prev)
-        }
-      })
-      .subscribe()
-    return () => { supabase.removeChannel(ch) }
-  }, [id, role])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -657,8 +667,22 @@ export function ConsultationChatThread({
     try {
       const attachments = await Promise.all(
         files.map(async (file) => {
-          const res = await channel.sendImage(file)
-          return { type: 'image' as const, image_url: res.file, asset_url: res.file }
+          if (file.type.startsWith('image/')) {
+            const res = await channel.sendImage(file)
+            return { type: 'image' as const, image_url: res.file, asset_url: res.file }
+          }
+          // Non-image documents (PDF, Word, etc.) must go through sendFile —
+          // sendImage silently mislabels them type:'image', which makes the
+          // renderer try (and fail) to paint a PDF as an <img>.
+          const res = await channel.sendFile(file, file.name, file.type)
+          return {
+            type: 'file' as const,
+            asset_url: res.file,
+            file: res.file,
+            title: file.name,
+            mime_type: file.type,
+            file_size: file.size,
+          }
         })
       )
       await channel.sendMessage({ text: caption || '', attachments, quoted_message_id: replyTo?.id })
@@ -685,7 +709,23 @@ export function ConsultationChatThread({
     })
   }
 
-  const isReadOnly = consultation?.status === 'completed' || consultation?.status === 'cancelled' || consultation?.status === 'ended_abnormally'
+  // Single source of truth for reaching a terminal status — detection lives
+  // in useConsultationState (mount fetch + realtime + poll), and
+  // useConsultationCompletion owns the one-shot reaction. The completion
+  // dialog only ever renders on the patient's own standalone page (not the
+  // in-call drawer variant, which the phone/video pages already handle via
+  // their own end-of-call modal, and not the doctor's view) — see the JSX
+  // gate below.
+  const completionStatus = useConsultationState({ consultationId: id, role, localAgoraReconnecting: false })
+  const completion = useConsultationCompletion({
+    phase: completionStatus.phase,
+    rawStatus: completionStatus.rawStatus,
+    role,
+    kind: 'chat',
+    consultationId: id,
+    onTeardown: () => {},
+  })
+  const isReadOnly = completion.isCompleted
   useEffect(() => { isReadOnlyRef.current = isReadOnly }, [isReadOnly])
   const rawPeerName = consultation?.peerName ?? (isDoctor ? 'Patient' : 'Doctor')
   const peerDisplayName = isDoctor ? rawPeerName : (rawPeerName ? `Dr. ${stripDrPrefix(rawPeerName)}` : 'Doctor')
@@ -738,6 +778,28 @@ export function ConsultationChatThread({
     const mine = m.user?.id === clerkUserId
     const msgImages = atts.filter(a => a.type === 'image' || a.image_url).map(a => a.image_url ?? a.asset_url ?? '')
     return atts.map((att, i) => {
+      if (isPdfAttachment(att) && (att.asset_url || att.file)) {
+        const name = att.title || att.fallback || 'Document.pdf'
+        const size = formatFileSize(att.file_size)
+        return (
+          <button
+            key={i}
+            type="button"
+            onClick={() => setPdfViewer({ url: (att.asset_url ?? att.file) as string, title: name, size: att.file_size })}
+            className={`flex items-center gap-2.5 mb-1.5 px-3 py-2.5 rounded-xl border w-full max-w-[240px] text-left transition-colors ${
+              mine ? 'bg-white/10 border-white/15 hover:bg-white/15' : 'bg-white border-steel-grey/30 hover:bg-cloud-grey'
+            }`}
+          >
+            <span className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${mine ? 'bg-white/15' : 'bg-red-50'}`}>
+              <FileText size={18} className={mine ? 'text-white' : 'text-red-500'} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className={`block text-[12.5px] font-semibold truncate ${mine ? 'text-white' : 'text-ink-black'}`}>{name}</span>
+              <span className={`block text-[10.5px] ${mine ? 'text-white/60' : 'text-ink-black/40'}`}>{size ? `${size} · PDF` : 'PDF document'}</span>
+            </span>
+          </button>
+        )
+      }
       if (att.type === 'image' || att.image_url) {
         const src = att.image_url ?? att.asset_url ?? ''
         return (
@@ -791,7 +853,7 @@ export function ConsultationChatThread({
         <EndConsultationModal
           consultationId={id}
           patientName={peerDisplayName}
-          onDone={() => router.replace('/doctor/consultations')}
+          onDone={() => { completion.markHandled(); router.replace('/doctor/consultations') }}
           onClose={() => setShowEndSheet(false)}
         />
       )}
@@ -1361,6 +1423,23 @@ export function ConsultationChatThread({
             )}
           </div>
         </div>
+      )}
+
+      {pdfViewer && (
+        <PdfViewerOverlay
+          url={pdfViewer.url}
+          title={pdfViewer.title}
+          fileSize={pdfViewer.size}
+          onClose={() => setPdfViewer(null)}
+        />
+      )}
+
+      {isPage && !isDoctor && (
+        <ConsultationCompletedModal
+          open={completion.showCompletedModal}
+          onViewSummary={completion.goToSummary}
+          onClose={completion.dismissModal}
+        />
       )}
     </div>
   )

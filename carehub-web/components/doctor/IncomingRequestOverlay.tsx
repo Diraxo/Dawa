@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth, useUser } from '@clerk/nextjs'
-import { useRouter } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { Bell, CheckCircle2, ChevronRight, CreditCard, Clock, MessageCircle, Phone, User, Video, X } from 'lucide-react'
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
 import { getAuthClient, supabase } from '@/lib/supabase'
@@ -27,6 +27,13 @@ const TYPE_META: Record<string, { icon: typeof MessageCircle; label: string; col
 }
 
 const NOTIF_BANNER_DISMISSED_KEY = 'carehub_notif_banner_dismissed'
+
+// Notification title wording — never call every consultation a "call".
+const NOTIF_TYPE_TITLE: Record<string, string> = {
+  chat:  'Chat',
+  phone: 'Voice Consultation',
+  video: 'Video Consultation',
+}
 
 function formatWaiting(waitingStartedAt: string): string {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(waitingStartedAt).getTime()) / 1000))
@@ -71,9 +78,15 @@ export default function IncomingRequestOverlay() {
   const { user }      = useUser()
   const { getToken }  = useAuth()
   const router        = useRouter()
+  const pathname      = usePathname()
+  // Never show the queue badge, Accept/Decline modal, or any banner on top of
+  // an active consultation screen — matches DoctorConsultationRecovery's own
+  // exemption for this route prefix.
+  const onConsultationScreen = pathname?.startsWith('/doctor/consultation/') ?? false
 
   const [request,      setRequest]      = useState<IncomingRequest | null>(null)
   const [queueCount,   setQueueCount]   = useState(0)
+  const [queueList,    setQueueList]    = useState<{ id: string; patientName: string; waitingStartedAt: string }[]>([])
   const [doctorStatus, setDoctorStatus] = useState<string>('')
   const [waitingLabel, setWaitingLabel] = useState('')
   const [showPermBanner, setShowPermBanner] = useState(false)
@@ -87,6 +100,10 @@ export default function IncomingRequestOverlay() {
   // not a transient failure — shown as its own non-retryable banner instead of
   // the generic "couldn't confirm, retry" one below.
   const [acceptBusy, setAcceptBusy] = useState(false)
+  // Surfaced only if the background 'declined' write never lands after
+  // retrying — otherwise the modal dismisses cleanly while the patient stays
+  // stuck on "Waiting for Doctor" forever.
+  const [declineFailure, setDeclineFailure] = useState<{ id: string; reason: string; patientName: string } | null>(null)
 
   const profileIdRef      = useRef<string | null>(null)
   const doctorUserRowIdRef = useRef<string | null>(null)
@@ -96,6 +113,10 @@ export default function IncomingRequestOverlay() {
   const ringIntervalRef   = useRef<ReturnType<typeof setInterval> | null>(null)
   const ringTimeoutRef    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const respondingRef     = useRef(false)   // guards a double Accept/Decline click
+  // Drives ConsultationActionButtons' disabled prop — respondingRef alone
+  // guards re-entrant handling, but a ref update doesn't re-render, so
+  // without this the buttons stay visually clickable for a frame after click.
+  const [responding, setResponding] = useState(false)
 
   const stopRinging = useCallback(() => {
     if (ringIntervalRef.current) { clearInterval(ringIntervalRef.current); ringIntervalRef.current = null }
@@ -139,8 +160,26 @@ export default function IncomingRequestOverlay() {
         stopRinging()
         setRequest(null)
         setShowDeclineReasons(false)
+        setQueueList([])
         return
       }
+
+      // Ordered queue for display (names + wait time) — separate from the
+      // richer single-patient fetch below (which also needs photo/clerk id
+      // for the Accept modal), so a name-only batch covers every waiting
+      // patient without re-fetching for the one becoming `request`.
+      const { data: queuePatients } = await client
+        .from('users')
+        .select('id, full_name')
+        .in('id', waiting!.map((w) => w.patient_id))
+      const nameById = new Map((queuePatients ?? []).map((p) => [p.id, p.full_name]))
+      setQueueList(
+        waiting!.map((w) => ({
+          id: w.id,
+          patientName: nameById.get(w.patient_id) ?? 'Patient',
+          waitingStartedAt: w.waiting_started_at ?? new Date().toISOString(),
+        }))
+      )
 
       // Doctor is busy — show queue badge but hold off on the modal
       if (busy && busy.length > 0) return
@@ -168,6 +207,7 @@ export default function IncomingRequestOverlay() {
         waitingStartedAt: first.waiting_started_at ?? new Date().toISOString(),
       }
 
+      setResponding(false)
       setRequest(req)
 
       // Sound + browser notification — only once per new request; then keep
@@ -177,7 +217,7 @@ export default function IncomingRequestOverlay() {
         stopRinging()
         playNotificationSound()
         showBrowserNotification(
-          'Incoming Consultation Request',
+          `${NOTIF_TYPE_TITLE[req.type] ?? 'Consultation'} with ${req.patientName}`,
           `${req.patientName} wants a ${req.type} consultation`,
         )
         ringIntervalRef.current = setInterval(playNotificationSound, 3000)
@@ -332,25 +372,28 @@ export default function IncomingRequestOverlay() {
   }, [])
 
   // ── Accept ───────────────────────────────────────────────────────────────────
+  // Navigates the instant the doctor taps Accept — the consultation screen's
+  // own "Connecting…" state covers the network round trip, so the doctor is
+  // never left staring at Home. activeIdRef stays pinned to req.id (cleared
+  // only once writeAccepted/channelCreate finish) so checkForWaiting's own
+  // dedupe ("already showing this request") suppresses the modal popping
+  // back up while the background write is still in flight — this is what an
+  // earlier "optimistic" version was missing when it caused that regression.
   function handleAccept(req: IncomingRequest) {
     if (respondingRef.current) return
     respondingRef.current = true
-    stopRinging()
-    // Navigate immediately — no waiting on Stream or DB
-    activeIdRef.current = null
-    setRequest(null)
+    setResponding(true)
     setAcceptFailure(null)
+
+    stopRinging()
+    setRequest(null)
+    respondingRef.current = false
     router.replace(`/doctor/consultation/${req.type}/${req.id}`)
 
-    // Background: create Stream channel + update DB status concurrently —
-    // the call screens lazily create/join the channel via watch({members})
-    // if it isn't ready yet, so the status write (which the patient's
-    // Realtime-triggered navigation depends on) no longer has to wait on
-    // the Stream API round-trip.
     ;(async () => {
       try {
         const token = await getToken()
-        if (!token) { setAcceptFailure(req); return }
+        if (!token) { activeIdRef.current = null; setAcceptFailure(req); return }
 
         // Create/upsert the Stream channel with both members regardless of
         // consultation type — phone and video consultations use the same
@@ -384,14 +427,19 @@ export default function IncomingRequestOverlay() {
         })()
 
         const [, result] = await Promise.all([channelCreate, writeAccepted(token, req.id)])
-        if (result === 'busy') {
+
+        if (result === 'ok') {
+          activeIdRef.current = null
+        } else if (result === 'busy') {
+          activeIdRef.current = null
           setAcceptBusy(true)
-          // The accept never landed — the doctor was already navigated to
-          // the consultation screen for a request that's still just
-          // 'waiting_for_doctor', which would strand them there.
-          router.replace('/doctor')
+        } else {
+          // Failed — surfaces a retry banner (rendered even on the
+          // consultation screen the doctor already navigated into, since
+          // this overlay is mounted at the layout level) instead of leaving
+          // the patient stranded on "Waiting for Doctor".
+          setAcceptFailure(req)
         }
-        else if (result !== 'ok') setAcceptFailure(req)
       } catch {
         setAcceptFailure(req)
       }
@@ -402,23 +450,38 @@ export default function IncomingRequestOverlay() {
     if (!acceptFailure) return
     const req = acceptFailure
     setAcceptFailure(null)
+    respondingRef.current = true
     ;(async () => {
       const token = await getToken()
-      if (!token) { setAcceptFailure(req); return }
+      if (!token) { respondingRef.current = false; setAcceptFailure(req); return }
       const result = await writeAccepted(token, req.id)
-      if (result === 'busy') { setAcceptBusy(true); router.replace('/doctor') }
-      else if (result !== 'ok') setAcceptFailure(req)
+      if (result === 'ok') {
+        stopRinging()
+        activeIdRef.current = null
+        setRequest(null)
+        respondingRef.current = false
+        router.replace(`/doctor/consultation/${req.type}/${req.id}`)
+      } else if (result === 'busy') {
+        stopRinging()
+        activeIdRef.current = null
+        setRequest(null)
+        respondingRef.current = false
+        setAcceptBusy(true)
+      } else {
+        respondingRef.current = false
+        setAcceptFailure(req)
+      }
     })()
   }
 
-  // ── Decline ──────────────────────────────────────────────────────────────────
-  async function handleDecline(id: string, reason: string) {
-    if (respondingRef.current) return
-    respondingRef.current = true
-    stopRinging()
-    const token = await getToken()
-    if (token) {
-      await getAuthClient(token)
+  // Writes status:'declined', retrying a couple of times on failure — mirrors
+  // writeAccepted above. Treats "0 rows matched" as success if some other
+  // path (patient cancelled, another device already responded) already moved
+  // the row past 'waiting_for_doctor'.
+  const writeDeclined = useCallback(async (token: string, id: string, reason: string): Promise<'ok' | 'failed'> => {
+    const client = getAuthClient(token)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { data, error } = await client
         .from('consultations')
         .update({
           status: 'declined',
@@ -427,12 +490,47 @@ export default function IncomingRequestOverlay() {
           declined_at: new Date().toISOString(),
         })
         .eq('id', id)
+        .eq('status', 'waiting_for_doctor')
+        .select('id')
+      if (!error && data && data.length > 0) return 'ok'
+      if (!error) {
+        const { data: row } = await client.from('consultations').select('status').eq('id', id).single()
+        if (row?.status !== 'waiting_for_doctor') return 'ok'
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500))
     }
+    return 'failed'
+  }, [])
+
+  // ── Decline ──────────────────────────────────────────────────────────────────
+  async function handleDecline(id: string, reason: string) {
+    if (respondingRef.current) return
+    respondingRef.current = true
+    setResponding(true)
+    stopRinging()
+    const patientName = request?.patientName ?? 'the patient'
     activeIdRef.current = null
     setRequest(null)
     setShowDeclineReasons(false)
     respondingRef.current = false
     // Next poll cycle (≤5 s) will surface the next waiting patient if any
+
+    const token = await getToken()
+    if (!token) { setDeclineFailure({ id, reason, patientName }); return }
+    const result = await writeDeclined(token, id, reason)
+    if (result !== 'ok') setDeclineFailure({ id, reason, patientName })
+  }
+
+  function retryDecline() {
+    if (!declineFailure) return
+    const { id, reason, patientName } = declineFailure
+    setDeclineFailure(null)
+    ;(async () => {
+      const token = await getToken()
+      if (!token) { setDeclineFailure({ id, reason, patientName }); return }
+      const result = await writeDeclined(token, id, reason)
+      if (result !== 'ok') setDeclineFailure({ id, reason, patientName })
+    })()
   }
 
   // Unapproved doctors never see the overlay
@@ -496,22 +594,61 @@ export default function IncomingRequestOverlay() {
     </div>
   )
 
+  const declineFailureBanner = declineFailure && (
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-3 bg-danger text-mist-white rounded-2xl pl-4 pr-2 py-2.5 text-sm shadow-xl max-w-md w-[calc(100%-2rem)]">
+      <span className="flex-1">
+        Couldn&apos;t confirm declining the request from {declineFailure.patientName}.
+      </span>
+      <button
+        onClick={retryDecline}
+        className="shrink-0 bg-mist-white text-danger font-semibold rounded-full px-3 py-1.5 text-xs hover:opacity-90"
+      >
+        Retry
+      </button>
+      <button
+        onClick={() => setDeclineFailure(null)}
+        aria-label="Dismiss"
+        className="shrink-0 text-mist-white/70 hover:text-mist-white"
+      >
+        <X size={16} />
+      </button>
+    </div>
+  )
+
   // ── Busy badge — doctor is in a session but patients are queued ──────────────
-  if (!request && queueCount > 0) {
+  // Never show the queue badge or the Accept/Decline modal on top of an
+  // active consultation screen — the failure/busy banners above stay visible
+  // since they're an actionable result of the doctor's own action, not a
+  // ghost "waiting" panel.
+  if (!request && queueCount > 0 && !onConsultationScreen) {
     return (
       <>
         {permBanner}
         {acceptFailureBanner}
         {acceptBusyBanner}
-        <div className="fixed top-4 right-4 z-50 flex items-center gap-2 bg-warning/10 border border-warning/30 text-warning rounded-2xl px-4 py-2.5 text-sm font-montserrat font-semibold shadow-lg pointer-events-none">
-          <Clock size={15} />
-          {queueCount} patient{queueCount > 1 ? 's' : ''} waiting
+        {declineFailureBanner}
+        <div className="fixed top-4 right-4 z-50 bg-white border border-warning/30 rounded-2xl shadow-lg pointer-events-none max-w-xs w-full overflow-hidden">
+          <div className="flex items-center gap-2 bg-warning/10 text-warning px-4 py-2.5 text-sm font-montserrat font-semibold">
+            <Clock size={15} />
+            {queueCount} patient{queueCount > 1 ? 's' : ''} waiting
+          </div>
+          {queueList.length > 0 && (
+            <ul className="divide-y divide-ink-black/[0.06] text-left">
+              {queueList.map((q, i) => (
+                <li key={q.id} className="flex items-center gap-2.5 px-4 py-2 text-xs">
+                  <span className="text-ink-black/35 font-semibold w-4 shrink-0">{i + 1}.</span>
+                  <span className="flex-1 font-semibold text-ink-black truncate">{q.patientName}</span>
+                  <span className="text-ink-black/40 shrink-0">{formatWaiting(q.waitingStartedAt)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </>
     )
   }
 
-  if (!request) return <>{permBanner}{acceptFailureBanner}{acceptBusyBanner}</>
+  if (!request || onConsultationScreen) return <>{permBanner}{acceptFailureBanner}{acceptBusyBanner}{declineFailureBanner}</>
 
   const meta = TYPE_META[request.type] ?? TYPE_META.chat
   const TypeIcon = meta.icon
@@ -521,6 +658,7 @@ export default function IncomingRequestOverlay() {
       {permBanner}
       {acceptFailureBanner}
       {acceptBusyBanner}
+      {declineFailureBanner}
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div className="card p-8 max-w-sm w-full text-center">
           {/* Type badge */}
@@ -577,11 +715,28 @@ export default function IncomingRequestOverlay() {
             </div>
           </div>
 
-          {/* Queue hint */}
-          {queueCount > 1 && (
-            <p className="text-ink-black/40 text-xs mb-4">
-              +{queueCount - 1} more patient{queueCount - 1 > 1 ? 's' : ''} in queue
-            </p>
+          {/* Queue hint — queueList[0] is the patient shown above as `request`,
+              so the rest of the list is who's waiting behind them. */}
+          {queueList.length > 1 && (
+            <div className="text-left mb-4">
+              <p className="text-ink-black/40 text-[11px] font-semibold uppercase tracking-wide mb-1.5">
+                Next in queue
+              </p>
+              <ul className="rounded-xl border border-ink-black/10 divide-y divide-ink-black/[0.06]">
+                {queueList.slice(1, 4).map((q, i) => (
+                  <li key={q.id} className="flex items-center gap-2.5 px-3 py-1.5 text-xs">
+                    <span className="text-ink-black/35 font-semibold w-3.5 shrink-0">{i + 1}.</span>
+                    <span className="flex-1 font-semibold text-ink-black truncate">{q.patientName}</span>
+                    <span className="text-ink-black/40 shrink-0">{formatWaiting(q.waitingStartedAt)}</span>
+                  </li>
+                ))}
+              </ul>
+              {queueList.length > 4 && (
+                <p className="text-ink-black/40 text-xs mt-1.5">
+                  +{queueList.length - 4} more waiting
+                </p>
+              )}
+            </div>
           )}
 
           {/* Actions */}
@@ -589,6 +744,7 @@ export default function IncomingRequestOverlay() {
             <ConsultationActionButtons
               onDecline={() => setShowDeclineReasons(true)}
               onAccept={() => handleAccept(request)}
+              disabled={responding}
             />
           ) : (
             <div className="text-left">

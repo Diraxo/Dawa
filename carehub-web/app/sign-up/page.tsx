@@ -42,9 +42,8 @@ export default function SignUpPage() {
   const [globalError, setGlobalError] = useState('')
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
-  const [facebookLoading, setFacebookLoading] = useState(false)
 
-  const oauthLoading = googleLoading || facebookLoading
+  const oauthLoading = googleLoading
   const isFormReady =
     fullName.trim().length > 1 &&
     isValidEmail(email) &&
@@ -130,25 +129,6 @@ export default function SignUpPage() {
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code !== 'oauth_access_denied') {
         setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
-      }
-    }
-  }, [suLoaded, oauthLoading, signUp])
-
-  const handleFacebook = useCallback(async () => {
-    if (!suLoaded || oauthLoading) return
-    setFacebookLoading(true)
-    setGlobalError('')
-    try {
-      await signUp!.authenticateWithRedirect({
-        strategy: 'oauth_facebook',
-        redirectUrl: `${window.location.origin}/sso-callback`,
-        redirectUrlComplete: `${window.location.origin}/dashboard`,
-      })
-    } catch (err: any) {
-      setFacebookLoading(false)
-      const code: string = err?.errors?.[0]?.code ?? ''
-      if (code !== 'oauth_access_denied') {
-        setGlobalError(err?.errors?.[0]?.message ?? 'Facebook sign-in failed. Please try again.')
       }
     }
   }, [suLoaded, oauthLoading, signUp])
@@ -266,20 +246,6 @@ export default function SignUpPage() {
             </svg>
           )}
           Continue with Google
-        </button>
-        <button
-          onClick={handleFacebook}
-          disabled={oauthLoading}
-          className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-60"
-        >
-          {facebookLoading ? (
-            <Spinner />
-          ) : (
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M18 9a9 9 0 10-10.406 8.891V11.6H5.309V9h2.285V7.023c0-2.256 1.343-3.503 3.4-3.503.984 0 2.014.176 2.014.176V5.9h-1.135c-1.117 0-1.466.694-1.466 1.406V9h2.494l-.399 2.6h-2.095v6.291A9 9 0 0018 9z" fill="#1877F2"/>
-            </svg>
-          )}
-          Continue with Facebook
         </button>
       </div>
 

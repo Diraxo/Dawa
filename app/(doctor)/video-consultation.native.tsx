@@ -44,6 +44,7 @@ import { EndConsultationSheet } from '@/components/doctor/EndConsultationSheet'
 import { submitConsultationCompletion } from '@/lib/consultationCompletion'
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
+import { CallHeader, ConnectionStatus } from '@/components/consultation/CallHeader'
 import { DraggableSelfView } from '@/components/consultation/DraggableSelfView'
 import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { colors } from '@/constants/colors'
@@ -54,9 +55,9 @@ import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/ca
 import { getPersistedCameraOff, setPersistedCameraOff, clearPersistedCameraOff } from '@/lib/callCameraStorage'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
-import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { useAuthStore } from '@/store/authStore'
@@ -84,6 +85,14 @@ export default function DoctorVideoConsultationScreen() {
   const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
   const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
+
+  // Auto-clear: reaching this call screen at all — whether via the
+  // notification, the OS call UI, or the in-app queue — means the
+  // corresponding notification has been handled; mark it read.
+  useEffect(() => {
+    if (!consultationId || !userId) return
+    markNotificationsReadForConsultation(supabase, userId, consultationId)
+  }, [consultationId, userId])
 
   ScreenCapture.usePreventScreenCapture()
 
@@ -246,6 +255,26 @@ export default function DoctorVideoConsultationScreen() {
     ? 'waiting'
     : 'connecting'
 
+  // Header/timer connection status — deliberately driven ONLY by the
+  // DB-derived `state.phase` (identical on both clients via the same
+  // Realtime row), not by this device's local `remoteUid`/video-arrival
+  // signal used above for `callStatus`. That local gate is correct for
+  // deciding what the video area renders (placeholder vs. live stream) but
+  // is inherently asymmetric between the two clients — each side learns of
+  // the other's video at a slightly different time — which is exactly what
+  // caused the doctor and patient screens to disagree on "Connecting" vs
+  // "Connected" and run out-of-sync timers. `localError` is the one
+  // legitimate local-only override: it reflects this device's own Agora
+  // session having genuinely failed, not a difference in how the same
+  // reality is being reported.
+  const connectionStatus: ConnectionStatus = localError
+    ? 'disconnected'
+    : state.phase === 'reconnecting'
+    ? 'reconnecting'
+    : state.phase === 'on_call'
+    ? 'connected'
+    : 'connecting'
+
   const remoteUidRef = useRef<number | null>(null)
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const gracePeriodRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -325,8 +354,8 @@ export default function DoctorVideoConsultationScreen() {
   useEffect(() => { updateCallStartedAt(state.callStartedAtMs ?? null) }, [state.callStartedAtMs])
 
   useEffect(() => {
-    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : callStatus === 'connected' ? 'active' : 'connecting')
-  }, [callStatus])
+    setConnectionStatus(connectionStatus === 'reconnecting' ? 'reconnecting' : connectionStatus === 'connected' ? 'active' : 'connecting')
+  }, [connectionStatus])
 
   // ── Background/foreground: notification + camera lifecycle ───────────────
   // Camera keeps publishing if left untouched while backgrounded, which
@@ -804,7 +833,6 @@ export default function DoctorVideoConsultationScreen() {
   }
 
   const isConnecting = callStatus === 'connecting'
-  const netLabel = networkQuality <= 2 ? 'Excellent' : networkQuality <= 4 ? 'Good' : networkQuality > 0 ? 'Poor' : null
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -847,32 +875,24 @@ export default function DoctorVideoConsultationScreen() {
           </View>
         )}
 
-        {/* Timer + network quality overlay */}
-        <View style={styles.timerOverlay}>
-          <View style={[
-            styles.timerBadge,
-            callStatus !== 'connected' && (patientHasLeft ? styles.timerBadgeInfo : styles.timerBadgeWarning),
-          ]}>
-            <View style={[
-              styles.liveDot,
-              callStatus !== 'connected' && (patientHasLeft ? styles.liveDotInfo : styles.liveDotWarning),
-            ]} />
-            <Text style={styles.timerText}>
-              {callStatus === 'connected'
-                ? formatCallDuration(seconds)
-                : callStatus === 'reconnecting'
-                ? (patientHasLeft ? 'Patient has left the consultation' : 'Reconnecting…')
-                : callStatus === 'connecting'
-                ? 'Connecting…'
-                : '--:--'}
-            </Text>
-          </View>
-          {netLabel && callStatus === 'connected' && (
-            <View style={[styles.netQualityChip, netLabel === 'Poor' && styles.netQualityChipPoor]}>
-              <Text style={styles.netQualityText}>{netLabel}</Text>
-            </View>
-          )}
-        </View>
+        {/* Shared header: timer/status (row 1, driven by the DB-derived
+            connectionStatus, identical on both clients) + chat/switch-camera
+            below it, participant chip centered, info button below status. */}
+        <CallHeader
+          elapsedSeconds={seconds}
+          connectionStatus={connectionStatus}
+          counterpartName={displayName}
+          counterpartPhotoUrl={patientPhotoUrl}
+          onChatPress={chatOpen ? closeChat : openChat}
+          chatActive={chatOpen}
+          unreadCount={unreadCount}
+          onSwitchCamera={() => {
+            const engine = getAgoraEngine()
+            try { engine?.switchCamera() } catch {}
+          }}
+          onInfoPress={() => setShowInfoSheet(true)}
+          disabled={isConnecting}
+        />
 
         {/* Reconnect overlay — distinguishes a genuine network drop from the
             patient having tapped Leave Call (calm/informational, not a warning
@@ -898,19 +918,14 @@ export default function DoctorVideoConsultationScreen() {
           </View>
         )}
 
-        {/* Doctor self-view — draggable, WhatsApp-style floating PiP, starts top-right */}
+        {/* Doctor self-view — draggable, WhatsApp-style floating PiP, starts
+            top-right below the header (chat/switch-camera row). */}
         <DraggableSelfView
-          top={70}
+          top={118}
+          canvas={{ uid: 0, sourceType: VideoSourceCamera, renderMode: RenderModeFit }}
           isOff={!(agoraReady && !camOff && RtcSurfaceView)}
           isSpeaking={localSpeaking}
-        >
-          {RtcSurfaceView ? (
-            <RtcSurfaceView
-              canvas={{ uid: 0, sourceType: VideoSourceCamera, renderMode: RenderModeFit }}
-              style={styles.fullFill}
-            />
-          ) : null}
-        </DraggableSelfView>
+        />
       </View>
 
       {/* Controls */}
@@ -933,43 +948,11 @@ export default function DoctorVideoConsultationScreen() {
           />
 
           <DrCtrlBtn
-            icon="camera-reverse"
-            label="Flip"
-            disabled={isConnecting}
-            onPress={() => {
-              const engine = getAgoraEngine()
-              try { engine?.switchCamera() } catch {}
-            }}
-          />
-
-          <DrCtrlBtn
             icon={camOff ? 'videocam-off' : 'videocam'}
             label={camOff ? 'Cam On' : 'Video'}
             active={camOff}
             disabled={isConnecting}
             onPress={toggleCamera}
-          />
-
-          <View>
-            <DrCtrlBtn
-              icon="chatbubble-ellipses"
-              label="Chat"
-              active={chatOpen}
-              disabled={isConnecting}
-              onPress={chatOpen ? closeChat : openChat}
-            />
-            {unreadCount > 0 && !chatOpen && (
-              <View style={styles.unreadBadge}>
-                <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
-              </View>
-            )}
-          </View>
-
-          <DrCtrlBtn
-            icon="information-circle-outline"
-            label="Info"
-            disabled={isConnecting}
-            onPress={() => setShowInfoSheet(true)}
           />
 
           <Pressable style={styles.endBtn} onPress={handleEnd}>
@@ -1043,18 +1026,6 @@ const styles = StyleSheet.create({
   patientVideoName: { fontFamily: fonts.bold, fontSize: 22, color: 'rgba(255,255,255,0.6)' },
   patientVideoSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.3)' },
 
-  timerOverlay: { position: 'absolute', top: 16, left: 0, right: 0, alignItems: 'center', gap: 6 },
-  timerBadge: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7 },
-  timerBadgeWarning: { backgroundColor: 'rgba(251,191,36,0.2)' },
-  timerBadgeInfo: { backgroundColor: 'rgba(2,136,209,0.2)' },
-  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.error },
-  liveDotWarning: { backgroundColor: '#FBBF24' },
-  liveDotInfo: { backgroundColor: colors.information },
-  timerText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.mistWhite },
-  netQualityChip: { backgroundColor: 'rgba(34,197,94,0.2)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 3, borderWidth: 1, borderColor: 'rgba(34,197,94,0.4)' },
-  netQualityChipPoor: { backgroundColor: 'rgba(239,68,68,0.2)', borderColor: 'rgba(239,68,68,0.4)' },
-  netQualityText: { fontFamily: fonts.medium, fontSize: 11, color: colors.mistWhite },
-
   reconnectOverlay: {
     position: 'absolute', bottom: 100, left: 20, right: 20,
     backgroundColor: 'rgba(0,0,0,0.75)', borderRadius: 14,
@@ -1066,9 +1037,8 @@ const styles = StyleSheet.create({
   reconnectOverlayInfo: { backgroundColor: 'rgba(2,136,209,0.15)', borderColor: 'rgba(2,136,209,0.4)' },
   reconnectTextInfo: { color: '#7DD3FC' },
 
-  remoteMutedBadge: { position: 'absolute', top: 80, left: 0, right: 0, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 4 },
+  remoteMutedBadge: { position: 'absolute', top: 132, left: 0, right: 0, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 4 },
   remoteMutedText: { fontFamily: fonts.medium, fontSize: 12, color: '#FDE68A' },
-
 
   // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
   controls: { paddingHorizontal: 12, paddingBottom: 12, paddingTop: 20, backgroundColor: 'rgba(0,0,0,0.6)', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
@@ -1077,11 +1047,4 @@ const styles = StyleSheet.create({
   ctrlBtnActive: { backgroundColor: colors.careBlue },
   ctrlBtnDisabled: { backgroundColor: 'rgba(255,255,255,0.05)' },
   endBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center', shadowColor: colors.error, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 12, elevation: 6, transform: [{ rotate: '135deg' }] },
-  unreadBadge: {
-    position: 'absolute', top: -4, right: -4,
-    minWidth: 18, height: 18, borderRadius: 9,
-    backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center',
-    paddingHorizontal: 4, borderWidth: 1.5, borderColor: '#070E27',
-  },
-  unreadBadgeText: { fontFamily: fonts.bold, fontSize: 10, color: '#fff' },
 })

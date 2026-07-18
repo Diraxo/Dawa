@@ -100,6 +100,7 @@ export const LIMITS = {
   paymentInitiation:   { limit: 3,  windowMs: 10 * 60_000, lockDurationMs: 30 * 60_000, label: 'payment attempts' },
   fileUpload:          { limit: 10, windowMs: 10 * 60_000, lockDurationMs: 15 * 60_000, label: 'file uploads' },
   streamToken:         { limit: 30, windowMs: 60_000,       lockDurationMs:  5 * 60_000, label: 'token requests' },
+  chatFileProxy:       { limit: 60, windowMs: 60_000,       lockDurationMs:  5 * 60_000, label: 'document requests' },
   agoraToken:          { limit: 20, windowMs: 60_000,       lockDurationMs:  5 * 60_000, label: 'token requests' },
   supportRequest:      { limit: 3,  windowMs: 60 * 60_000, lockDurationMs: 60 * 60_000, label: 'support requests' },
 } as const

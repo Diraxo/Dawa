@@ -19,6 +19,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
+import { AlertButton, AlertVariant, CareHubAlert } from '@/components/ui/CareHubAlert'
 import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -75,14 +76,31 @@ class BookingConflictError extends Error {
 }
 
 const BOOKING_CONFLICT_TITLES: Record<string, string> = {
-  SLOT_TAKEN:          'Time No Longer Available',
-  DOCTOR_BUSY:         'Doctor Busy',
-  ON_DEMAND_DISABLED:  'On-Demand Unavailable',
-  PATIENT_BUSY:        'Active Consultation In Progress',
-  SCHEDULED_DISABLED:  'Scheduling Unavailable',
-  DAY_OFF:             'Doctor Unavailable',
-  DATE_BLOCKED:        'Doctor Unavailable',
-  OUTSIDE_HOURS:       'Outside Working Hours',
+  SLOT_TAKEN:            'Time No Longer Available',
+  DOCTOR_BUSY:           'Doctor Busy',
+  DOCTOR_SCHEDULED_SOON: 'Scheduled Consultation Starting Soon',
+  DOCTOR_OFFLINE:        'Doctor Unavailable',
+  DOCTOR_UNAVAILABLE:    'Doctor Unavailable',
+  SLOT_EXPIRED:          'Time No Longer Available',
+  ON_DEMAND_DISABLED:    'On-Demand Unavailable',
+  PATIENT_BUSY:          'Active Consultation In Progress',
+  SCHEDULED_DISABLED:    'Scheduling Unavailable',
+  DAY_OFF:               'Doctor Unavailable',
+  DATE_BLOCKED:          'Doctor Unavailable',
+  OUTSIDE_HOURS:         'Outside Working Hours',
+}
+
+// One conflict title reads as an error, the rest as a soft "try something
+// else" nudge — matches how CareHubAlert's variant governs icon/color.
+const BOOKING_CONFLICT_VARIANTS: Record<string, AlertVariant> = {
+  SLOT_TAKEN: 'warning',
+  DOCTOR_SCHEDULED_SOON: 'warning',
+  DOCTOR_OFFLINE: 'warning',
+  DOCTOR_UNAVAILABLE: 'warning',
+  SLOT_EXPIRED: 'warning',
+  DAY_OFF: 'warning',
+  DATE_BLOCKED: 'warning',
+  OUTSIDE_HOURS: 'warning',
 }
 
 // Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
@@ -115,6 +133,14 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   const [activeCredit, setActiveCredit] = useState<ActiveCredit | null>(null)
   const [creditLoading, setCreditLoading] = useState(false)
   const [doctorBusy, setDoctorBusy] = useState(false)
+  const [doctorScheduledSoon, setDoctorScheduledSoon] = useState(false)
+  const [conflictAlert, setConflictAlert] = useState<{
+    visible: boolean
+    variant: AlertVariant
+    title: string
+    message: string
+    buttons: AlertButton[]
+  }>({ visible: false, variant: 'warning', title: '', message: '', buttons: [] })
   const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
   // Forces a re-render every 30s so isSlotPast() (a pure function keyed off
   // Date.now() at call time) re-evaluates without the patient having to
@@ -129,7 +155,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   const days = getNextDays(14, doctor?.availability ?? undefined)
   const selectedDayValue = days[selectedDay]?.value
 
-  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy
+  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy && !doctorScheduledSoon
 
   // Doctor is BUSY when they already have an accepted/in-progress consultation.
   // Checked via RPC (not a direct table read) so a patient never needs SELECT
@@ -139,16 +165,29 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     return Boolean(data)
   }
 
-  // Poll busy state while the sheet is open — mirrors the "Start Now stopped
-  // being valid" pattern below (doctor going offline/disabling on-demand),
-  // but for the busy condition, which can only be observed via the RPC.
+  // Doctor has a scheduled consultation starting within the configurable
+  // on-demand safety buffer (platform_settings.on_demand_buffer_minutes,
+  // 5 min by default — see migration 083). Checked client-side so the
+  // "On-Demand" option greys out with the real reason *before* the patient
+  // reaches payment, instead of only discovering it from a server rejection.
+  const checkDoctorScheduledSoon = async (doctorId: string) => {
+    const { data } = await supabase.rpc('is_doctor_scheduled_soon', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
+  // Poll busy/scheduled-soon state while the sheet is open — mirrors the
+  // "Start Now stopped being valid" pattern below (doctor going offline/
+  // disabling on-demand), but for conditions that can only be observed via
+  // RPC.
   useEffect(() => {
     if (!visible || !doctor) return
     let cancelled = false
-    checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
-    const interval = setInterval(() => {
+    const refresh = () => {
       checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
-    }, 10_000)
+      checkDoctorScheduledSoon(doctor.id).then(soon => { if (!cancelled) setDoctorScheduledSoon(soon) })
+    }
+    refresh()
+    const interval = setInterval(refresh, 10_000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [visible, doctor?.id])
 
@@ -343,6 +382,14 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     return data
   }
 
+  // Branded replacement for Alert.alert on booking-conflict paths (Issue 3 —
+  // a native platform dialog for an expected business-rule rejection reads
+  // as "the app is broken"; CareHubAlert matches the rest of the app's UI).
+  const showConflictAlert = (variant: AlertVariant, title: string, message: string, buttons: AlertButton[]) => {
+    setConflictAlert({ visible: true, variant, title, message, buttons })
+  }
+  const closeConflictAlert = () => setConflictAlert(a => ({ ...a, visible: false }))
+
   const initiateChapaPayment = async () => {
     setPaying(true)
     let consultationId: string | null = null
@@ -399,19 +446,35 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       if (userErr || !userData) throw new Error('Could not find your user profile.')
       patientUserId = userData.id
 
-      // Final busy re-check right before payment — the periodic poll above
-      // could be stale by up to 10s, and the patient must never be charged
-      // for an On-Demand consultation with a doctor who became busy in that
-      // window. book_appointment_slot() also enforces this server-side
-      // (DOCTOR_BUSY below) as the authoritative last-resort guard.
+      // Final busy/scheduled-soon re-check right before payment — the
+      // periodic poll above could be stale by up to 10s, and the patient
+      // must never be charged for an On-Demand consultation with a doctor
+      // who became unavailable in that window. book_appointment_slot() also
+      // enforces both server-side (DOCTOR_BUSY / DOCTOR_SCHEDULED_SOON
+      // below) as the authoritative last-resort guard.
       if (timing === 'now' && await checkDoctorBusy(doctor.id)) {
         setDoctorBusy(true)
-        Alert.alert(
+        showConflictAlert(
+          'warning',
           'Doctor Busy',
-          'The doctor is currently busy with another patient. Please choose another available time or try again later.',
+          'This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.',
           [
-            { text: 'Choose Another Doctor', style: 'cancel', onPress: () => onClose() },
-            { text: 'Schedule for Later', onPress: () => { setTiming('schedule'); setStep(2) } },
+            { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+            { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
+          ],
+        )
+        return
+      }
+
+      if (timing === 'now' && await checkDoctorScheduledSoon(doctor.id)) {
+        setDoctorScheduledSoon(true)
+        showConflictAlert(
+          'warning',
+          'Scheduled Consultation Starting Soon',
+          'This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.',
+          [
+            { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+            { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
           ],
         )
         return
@@ -447,8 +510,20 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         if (msg.includes('ON_DEMAND_DISABLED')) {
           throw new BookingConflictError('ON_DEMAND_DISABLED', 'This doctor is not accepting on-demand consultations right now.')
         }
+        if (msg.includes('DOCTOR_SCHEDULED_SOON')) {
+          throw new BookingConflictError('DOCTOR_SCHEDULED_SOON', 'This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.')
+        }
         if (msg.includes('DOCTOR_BUSY')) {
-          throw new BookingConflictError('DOCTOR_BUSY', 'The doctor is currently busy with another patient. Please choose another available time or try again later.')
+          throw new BookingConflictError('DOCTOR_BUSY', 'This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_OFFLINE')) {
+          throw new BookingConflictError('DOCTOR_OFFLINE', 'This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_UNAVAILABLE')) {
+          throw new BookingConflictError('DOCTOR_UNAVAILABLE', 'This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('SLOT_EXPIRED')) {
+          throw new BookingConflictError('SLOT_EXPIRED', 'This time slot has already passed. Please select another available time.')
         }
         if (msg.includes('PATIENT_BUSY')) {
           throw new BookingConflictError('PATIENT_BUSY', 'You already have an active consultation. Please finish it before starting a new one.')
@@ -678,6 +753,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       // subscription to catch up.
       if (err instanceof BookingConflictError) {
         if (err.code === 'DOCTOR_BUSY') setDoctorBusy(true)
+        if (err.code === 'DOCTOR_SCHEDULED_SOON') setDoctorScheduledSoon(true)
         fetchBookedTimesRef.current()
 
         // PATIENT_BUSY also fires for a consultation that's already fully
@@ -726,10 +802,11 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
           }
         }
 
-        Alert.alert(
+        showConflictAlert(
+          BOOKING_CONFLICT_VARIANTS[err.code] ?? 'error',
           BOOKING_CONFLICT_TITLES[err.code] ?? 'Booking Unavailable',
           err.message,
-          [{ text: 'OK' }],
+          [{ text: 'OK', onPress: closeConflictAlert }],
         )
         return
       }
@@ -764,6 +841,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   }
 
   return (
+    <>
     <Modal visible={visible} transparent animationType="none" onRequestClose={paying ? undefined : onClose}>
       <Pressable style={styles.backdrop} onPress={paying ? undefined : onClose} />
       <Animated.View style={[styles.sheet, { paddingBottom: 12 + insets.bottom, transform: [{ translateY: slideAnim }] }]}>
@@ -846,7 +924,13 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
                   <Ionicons name="flash" size={22} color={timing === 'now' ? colors.mistWhite : colors.tealGreen} />
                   <Text style={[styles.timingLabel, timing === 'now' && styles.timingLabelSelected]}>On-Demand</Text>
                   <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>
-                    {!doctor.is_online ? 'Doctor Offline' : doctorBusy ? 'In Another Consultation' : 'Start Now'}
+                    {!doctor.is_online
+                      ? 'Doctor Offline'
+                      : doctorBusy
+                        ? 'In Another Consultation'
+                        : doctorScheduledSoon
+                          ? 'Scheduled Appointment Soon'
+                          : 'Start Now'}
                   </Text>
                 </Pressable>
                 <Pressable
@@ -1042,6 +1126,15 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         </View>
       </Animated.View>
     </Modal>
+    <CareHubAlert
+      visible={conflictAlert.visible}
+      variant={conflictAlert.variant}
+      title={conflictAlert.title}
+      message={conflictAlert.message}
+      buttons={conflictAlert.buttons}
+      onClose={closeConflictAlert}
+    />
+    </>
   )
 }
 

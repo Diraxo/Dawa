@@ -7,14 +7,19 @@ import { useAuth, useUser } from '@clerk/nextjs'
 import { logger } from '@/lib/logger'
 import { uidFromString, fetchAgoraToken, trackAgoraLeave, waitForPendingAgoraLeave, classifyMediaError } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
+import { getPersistedCameraOff, setPersistedCameraOff } from '@/lib/callCameraStorage'
 import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
 import { EndConsultationModal } from '@/components/doctor/EndConsultationModal'
 import { ConsultationInfoPanel } from '@/components/consultation/ConsultationInfoPanel'
 import { ConsultationChatThread } from '@/components/chat/ConsultationChatThread'
+import { DraggableSelfView } from '@/components/consultation/DraggableSelfView'
+import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { MessageCircle, Info, VideoOff, CameraOff } from 'lucide-react'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { getAuthClient } from '@/lib/supabase'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { formatCallDuration } from '@/lib/callDuration'
 import type { IAgoraRTCClient, IMicrophoneAudioTrack, ICameraVideoTrack } from 'agora-rtc-sdk-ng'
 
 interface Consultation {
@@ -37,15 +42,26 @@ export default function DoctorVideoConsultationPage() {
   const patientPhotoUrl = useUserPhotoRealtime(consultation?.patient?.id, consultation?.patient?.profile_photo_url)
   const [loading, setLoading] = useState(true)
   const [muted, setMuted] = useState(() => getPersistedMute(id))
-  const [camOff, setCamOff] = useState(false)
+  // Bare useState(false) previously meant "camera off" silently reset to
+  // "on" on every refresh/reconnect — mirror the mute-persistence pattern.
+  const [camOff, setCamOff] = useState(() => getPersistedCameraOff(id))
   const [showEndSheet, setShowEndSheet] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatUnreadCount, setChatUnreadCount] = useState(0)
 
   const [isReconnecting, setIsReconnecting] = useState(false)
+  // True once this client has actually observed the patient's peer publish
+  // media — the DB phase alone only proves each side's OWN join succeeded,
+  // not that the two are actually connected to each other.
+  const [remotePeerPresent, setRemotePeerPresent] = useState(false)
   const [, setReconnectCountdown] = useState(90)
   const [remoteMuted, setRemoteMuted] = useState(false)
   const [remoteCamOff, setRemoteCamOff] = useState(false)
+  // Driven by Agora's volume-indicator event — who's currently talking, for
+  // the speaking-indicator pulse (self view for the doctor, the patient's
+  // avatar/video area for the patient).
+  const [localSpeaking, setLocalSpeaking] = useState(false)
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
   const [retryKey, setRetryKey] = useState(0)
   const [networkQuality, setNetworkQuality] = useState(0)
@@ -69,6 +85,17 @@ export default function DoctorVideoConsultationPage() {
       return next
     })
   }
+  // Keeps the always-current camera intent so it can be re-applied the
+  // instant a new cam track is created (retry/reconnect), mirroring mutedRef.
+  const camOffRef = useRef(camOff)
+  useEffect(() => { camOffRef.current = camOff }, [camOff])
+  const toggleCamera = () => {
+    setCamOff(c => {
+      const next = !c
+      setPersistedCameraOff(id, next)
+      return next
+    })
+  }
   const endedAtMountRef = useRef(false)
 
   // Single source of truth for call phase/timer — derived from the DB row via
@@ -79,6 +106,9 @@ export default function DoctorVideoConsultationPage() {
   const markSelfConnectedRef = useRef(state.markSelfConnected)
   useEffect(() => { markSelfConnectedRef.current = state.markSelfConnected }, [state.markSelfConnected])
 
+  // `remotePeerPresent` gates 'connected' too, not just phase — the DB-driven
+  // phase only proves each side's OWN join succeeded, not that this client
+  // has actually received the patient's media (see user-published handler).
   const displayStatus: CallStatus = errorMessage
     ? 'error'
     : state.phase === 'ended'
@@ -86,10 +116,24 @@ export default function DoctorVideoConsultationPage() {
     : state.phase === 'reconnecting'
     ? 'reconnecting'
     : state.phase === 'on_call'
-    ? 'connected'
+    ? (remotePeerPresent ? 'connected' : 'connecting')
     : state.phase === 'waiting_for_patient'
     ? 'waiting'
     : 'connecting'
+
+  // The doctor's ability to complete the consultation must never depend on
+  // the patient's connection state — reconnecting, offline, backgrounded, or
+  // erroring out mid-call are all still a live, billable consultation with a
+  // summary to fill in. `state.startedAtIso` (set once both sides' own joins
+  // landed — see migration 035) distinguishes "this call genuinely started
+  // and then had trouble" from "this outgoing call never connected at all",
+  // which still just gets a plain cancel (nothing to summarize). Mirrors the
+  // doctor phone page's gate — this page previously had none, so End always
+  // opened the summary sheet even for a never-answered outgoing call.
+  const canEndWithSummary = displayStatus === 'connected'
+    || displayStatus === 'waiting'
+    || displayStatus === 'reconnecting'
+    || (displayStatus === 'error' && !!state.startedAtIso)
 
   // Leaves the current Agora session and tracks the leave so a subsequent
   // join for this channel (remount, retry) always waits for it to fully
@@ -104,18 +148,24 @@ export default function DoctorVideoConsultationPage() {
     await leaving
   }
 
-  // Once the DB-derived phase reaches 'ended', release local Agora resources
-  // exactly once.
-  const endedCleanupDoneRef = useRef(false)
-  useEffect(() => {
-    if (state.phase !== 'ended' || endedCleanupDoneRef.current) return
-    endedCleanupDoneRef.current = true
-    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
-    if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
-    micTrackRef.current?.close(); micTrackRef.current = null
-    camTrackRef.current?.close(); camTrackRef.current = null
-    leaveAgora()
-  }, [state.phase])
+  // Single source of truth for the "call ended" reaction — release local
+  // Agora resources exactly once. Doctor gets no completion modal (a
+  // deliberate, preserved asymmetry vs. the patient side) — this page keeps
+  // its own plain "Call Ended" panel, gated on completion.isCompleted below.
+  const completion = useConsultationCompletion({
+    phase: state.phase,
+    rawStatus: state.rawStatus,
+    role: 'doctor',
+    kind: 'video',
+    consultationId: id as string,
+    onTeardown: () => {
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
+      micTrackRef.current?.close(); micTrackRef.current = null
+      camTrackRef.current?.close(); camTrackRef.current = null
+      leaveAgora()
+    },
+  })
 
   // Also active during 'reconnecting' — the server-side stale-session cron
   // (mark_stale_active_consultations, migration 023) kills any in_progress
@@ -227,44 +277,31 @@ export default function DoctorVideoConsultationPage() {
         // ignored — reconnecting must never be interpreted as a real mute.
         let isReconnectingLocal = false
 
-        // Shared "show reconnecting for up to 90s" logic, used for both a
-        // remote disconnect (patient's side drops) and a local network drop
-        // (our own connection-state-change) so the two paths can't diverge.
+        // Shared "show reconnecting" logic, used for both a remote disconnect
+        // (patient's side drops) and a local network drop (our own
+        // connection-state-change) so the two paths can't diverge. Network
+        // issues must never end the consultation or block the UI with a
+        // Retry/Leave dialog — only an explicit End Consultation action may
+        // end the call. The Agora SDK keeps retrying the same session
+        // internally, so this just keeps reflecting "Reconnecting…" for as
+        // long as it takes, the same as the native app.
         function enterReconnecting() {
           if (!mounted) return
           isReconnectingLocal = true
           setRemoteMuted(false)
           setRemoteCamOff(false)
+          setRemotePeerPresent(false)
           setIsReconnecting(true)
+          startReconnectLoop()
+        }
+        function startReconnectLoop() {
           setReconnectCountdown(90)
           if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
           if (reconnectCountdownRef.current) clearInterval(reconnectCountdownRef.current)
-          reconnectTimerRef.current = setTimeout(async () => {
+          reconnectTimerRef.current = setTimeout(() => {
             if (!mounted) return
-            setIsReconnecting(false)
-            logger.error(`[Video][Doctor][${Date.now()}] 90s reconnect grace period expired — writing ended_abnormally`)
-            // Doctor is authoritative for ended_abnormally — record it now, but
-            // let the doctor decide (Retry/Leave) rather than auto-navigating away.
-            try {
-              const tok = await getToken()
-              if (tok) {
-                const { data, error } = await getAuthClient(tok)
-                  .from('consultations')
-                  .update({ status: 'ended_abnormally' })
-                  .eq('id', channelId)
-                  .eq('status', 'in_progress')
-                  .select('id')
-                if (error) {
-                  logger.error(`[Video][Doctor][${Date.now()}] ended_abnormally write failed:`, error)
-                } else {
-                  logger.log(`[Video][Doctor][${Date.now()}] ended_abnormally write — rows matched:${data?.length ?? 0}`)
-                }
-              } else {
-                logger.error(`[Video][Doctor][${Date.now()}] ended_abnormally write skipped — no Clerk token`)
-              }
-            } catch (e) { logger.error(`[Video][Doctor][${Date.now()}] ended_abnormally write threw:`, e) }
-            if (!mounted) return
-            setErrorMessage('Unable to reconnect. Please check your network and try again.')
+            logger.warn(`[Video][Doctor][${Date.now()}] 90s reconnect window elapsed — still reconnecting, not ending call`)
+            startReconnectLoop()
           }, 90000)
           reconnectCountdownRef.current = setInterval(() => {
             setReconnectCountdown(c => {
@@ -283,6 +320,44 @@ export default function DoctorVideoConsultationPage() {
           setRemoteCamOff(false)
           if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
           if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
+          // A user-published event that raced the disconnect (peerConnection
+          // already down when we tried to subscribe) is dropped rather than
+          // retried inline — sweep for any published-but-unsubscribed remote
+          // media now that the peerConnection is back up.
+          resubscribeAll()
+        }
+
+        async function resubscribeAll() {
+          for (const remoteUser of client.remoteUsers) {
+            if (remoteUser.hasAudio && !remoteUser.audioTrack) {
+              try {
+                await client.subscribe(remoteUser, 'audio')
+                // Cast breaks stale TS control-flow narrowing carried over
+                // from the `!remoteUser.audioTrack` guard above — subscribe()
+                // populates this at runtime but TS can't see that.
+                const audioTrack = (remoteUser as any).audioTrack
+                audioTrack?.play()
+                logger.log(`[Video][Doctor][${Date.now()}] resubscribed audio uid:${remoteUser.uid}`)
+              } catch (e) {
+                logger.error(`[Video][Doctor][${Date.now()}] resubscribe audio failed uid:${remoteUser.uid}:`, e)
+              }
+            }
+            if (remoteUser.hasVideo && !remoteUser.videoTrack) {
+              try {
+                await client.subscribe(remoteUser, 'video')
+                const videoTrack = (remoteUser as any).videoTrack
+                if (remoteVideoRef.current) videoTrack?.play(remoteVideoRef.current, { fit: 'contain' })
+                logger.log(`[Video][Doctor][${Date.now()}] resubscribed video uid:${remoteUser.uid}`)
+              } catch (e) {
+                logger.error(`[Video][Doctor][${Date.now()}] resubscribe video failed uid:${remoteUser.uid}:`, e)
+              }
+            }
+          }
+          // The patient is still in client.remoteUsers even if nothing needed
+          // resubscribing (e.g. only OUR connection blipped) — either way,
+          // their presence here means media is flowing again, so the
+          // timer/LIVE badge can resume.
+          if (client.remoteUsers.length > 0) setRemotePeerPresent(true)
         }
 
         // ── (21) Connection-state changes ────────────────────────────────────
@@ -320,6 +395,21 @@ export default function DoctorVideoConsultationPage() {
           setNetworkQuality(stats.uplinkNetworkQuality ?? 0)
         })
 
+        // Speaking-indicator pulse — reports both the local user's own
+        // volume and the patient's, distinguished by uid.
+        client.enableAudioVolumeIndicator()
+        client.on('volume-indicator', volumes => {
+          let local = false
+          let remote = false
+          for (const v of volumes) {
+            const speaking = v.level > 50
+            if (v.uid === uid) local = local || speaking
+            else remote = remote || speaking
+          }
+          setLocalSpeaking(local)
+          setRemoteSpeaking(remote)
+        })
+
         // ── (18) user-joined ─────────────────────────────────────────────────
         client.on('user-joined', (remoteUser) => {
           logger.log(`[Video][Doctor][${Date.now()}] user-joined uid:${remoteUser.uid}`)
@@ -328,11 +418,21 @@ export default function DoctorVideoConsultationPage() {
         // ── (19) user-published ──────────────────────────────────────────────
         client.on('user-published', async (remoteUser, mediaType) => {
           logger.log(`[Video][Doctor][${Date.now()}] user-published uid:${remoteUser.uid} type:${mediaType}`)
-          await client.subscribe(remoteUser, mediaType)
+          try {
+            await client.subscribe(remoteUser, mediaType)
+          } catch (e) {
+            // Can race a local connection drop (peerConnection already
+            // disconnected when this fires) — exitReconnecting()'s sweep
+            // picks it up once the connection is restored. Must not throw
+            // out of an event handler: an unhandled rejection here crashes
+            // the whole call screen.
+            logger.error(`[Video][Doctor][${Date.now()}] subscribe failed uid:${remoteUser.uid} type:${mediaType}:`, e)
+            return
+          }
           logger.log(`[Video][Doctor][${Date.now()}] subscribed uid:${remoteUser.uid} type:${mediaType}`)
 
           if (mediaType === 'video' && remoteVideoRef.current) {
-            remoteUser.videoTrack?.play(remoteVideoRef.current)
+            remoteUser.videoTrack?.play(remoteVideoRef.current, { fit: 'contain' })
           }
           if (mediaType === 'audio') {
             if (!remoteUser.audioTrack) {
@@ -343,11 +443,14 @@ export default function DoctorVideoConsultationPage() {
             }
           }
 
-          // This only reflects that the peer's media arrived on our own Agora
-          // connection — it no longer decides call phase or the timer. Both
-          // are derived solely from the DB row (see useConsultationState),
-          // which is written to only by each party's own publish-success.
+          // Call phase/timer come from the DB row (see useConsultationState),
+          // but that only proves each side's OWN join succeeded — not that
+          // this client has actually received the patient's media. Gate
+          // `displayStatus === 'connected'` on this too so the timer/LIVE
+          // badge never runs while the video area is still a black/placeholder
+          // screen (item 4).
           if (mounted) {
+            setRemotePeerPresent(true)
             if (reconnectDebounceRef.current) { clearTimeout(reconnectDebounceRef.current); reconnectDebounceRef.current = null }
             if (mediaType === 'audio') setRemoteMuted(false)
             if (mediaType === 'video') setRemoteCamOff(false)
@@ -367,7 +470,9 @@ export default function DoctorVideoConsultationPage() {
         // ── (20) user-left ───────────────────────────────────────────────────
         client.on('user-left', (remoteUser, reason) => {
           logger.log(`[Video][Doctor][${Date.now()}] user-left uid:${remoteUser.uid} reason:${reason}`)
-          // Keep timer running — patient may reconnect within grace period
+          // enterReconnecting() clears remotePeerPresent too — patient may
+          // reconnect within the grace period, at which point a fresh
+          // user-published sets it again.
           enterReconnecting()
         })
 
@@ -393,17 +498,22 @@ export default function DoctorVideoConsultationPage() {
 
         // ── (14-15) Local tracks ─────────────────────────────────────────────
         logger.log(`[Video][Doctor][${Date.now()}] createMicrophoneAndCameraTracks — requesting`)
-        const [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks()
+        const [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks(
+          { AEC: true, AGC: true, ANS: true, encoderConfig: 'speech_standard' },
+          { encoderConfig: { width: 960, height: 540, frameRate: 24, bitrateMin: 600, bitrateMax: 1200 } }
+        )
         logger.log(`[Video][Doctor][${Date.now()}] createMicrophoneAndCameraTracks — mic and cam tracks ready. mic.enabled:${mic.enabled} mic.muted:${mic.muted} cam.enabled:${cam.enabled}`)
         micTrackRef.current = mic
-        // Re-apply the user's chosen mute state to this (possibly brand-new,
-        // post-retry) track — a fresh track always defaults to enabled.
+        // Re-apply the user's chosen mute/camera state to this (possibly
+        // brand-new, post-retry) track — a fresh track always defaults to
+        // enabled.
         mic.setEnabled(!mutedRef.current)
         camTrackRef.current = cam
+        cam.setEnabled(!camOffRef.current)
         if (!mounted) { mic.close(); cam.close(); return }
 
         if (localVideoRef.current) {
-          cam.play(localVideoRef.current)
+          cam.play(localVideoRef.current, { fit: 'contain' })
         }
 
         // ── (16-17) Publish ──────────────────────────────────────────────────
@@ -461,15 +571,12 @@ export default function DoctorVideoConsultationPage() {
   }
 
   function handleEndDone() {
+    completion.markHandled()
     micTrackRef.current?.close()
     camTrackRef.current?.close()
     leaveAgora()
     clearPersistedMute(id)
     router.replace('/doctor/consultations')
-  }
-
-  function formatTime(s: number) {
-    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
   }
 
   if (loading) {
@@ -484,15 +591,20 @@ export default function DoctorVideoConsultationPage() {
   const elapsed = state.elapsedSeconds ?? 0
 
   if (displayStatus === 'ended') {
+    const endedCopy = state.rawStatus === 'call_declined'
+      ? { title: 'Call Declined', body: 'The patient has declined the call.' }
+      : state.rawStatus === 'missed'
+      ? { title: 'Missed Call', body: 'The patient did not answer the call.' }
+      : { title: 'Call Ended', body: 'The consultation has ended.' }
     return (
       <div className="min-h-screen bg-[#0A0A0A] flex flex-col items-center justify-center gap-6 px-6">
         <div className="w-24 h-24 rounded-full bg-white/10 flex items-center justify-center"><VideoOff className="w-10 h-10 text-white/70" /></div>
         <div className="text-center">
-          <h1 className="font-montserrat font-black text-2xl text-white mb-2">Call Ended</h1>
-          <p className="text-white/50 text-sm">The consultation has ended.</p>
+          <h1 className="font-montserrat font-black text-2xl text-white mb-2">{endedCopy.title}</h1>
+          <p className="text-white/50 text-sm">{endedCopy.body}</p>
         </div>
-        <button onClick={() => router.push('/doctor')} className="btn-primary px-8 py-3 rounded-2xl text-sm">
-          Back to Dashboard
+        <button onClick={() => router.push('/doctor/consultations')} className="btn-primary px-8 py-3 rounded-2xl text-sm">
+          Back to Consultations
         </button>
       </div>
     )
@@ -516,17 +628,23 @@ export default function DoctorVideoConsultationPage() {
         <div className="flex-1 relative bg-[#0D1A3A]">
           <div ref={remoteVideoRef} className="absolute inset-0" />
 
-          {displayStatus !== 'connected' && (
-            <div className="absolute inset-0 flex items-center justify-center">
+          {/* Avatar placeholder — shown any time live video isn't actually
+              flowing (not connected yet, reconnecting, or camera off), so
+              the patient's photo + name replaces a frozen frame or black
+              screen immediately, with no delay. */}
+          {(displayStatus !== 'connected' || remoteCamOff) && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[#0D1A3A]">
               <div className="text-center">
-                <div className="w-32 h-32 rounded-full bg-white/10 flex items-center justify-center text-white/20 text-5xl mx-auto mb-4 overflow-hidden">
-                  {patientPhotoUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={patientPhotoUrl} alt={patientName} className="w-full h-full object-cover" />
-                  ) : (
-                    '👤'
-                  )}
-                </div>
+                <SpeakingPulse active={remoteSpeaking && displayStatus === 'connected'} className="w-32 h-32 rounded-full mx-auto mb-4">
+                  <div className="w-full h-full rounded-full bg-white/10 flex items-center justify-center text-white/20 text-5xl overflow-hidden">
+                    {patientPhotoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={patientPhotoUrl} alt={patientName} className="w-full h-full object-cover" />
+                    ) : (
+                      '👤'
+                    )}
+                  </div>
+                </SpeakingPulse>
                 <p className="text-white/50 text-base font-semibold">{patientName}</p>
                 {displayStatus === 'error' ? (
                   <div className="mt-2 flex flex-col items-center gap-3 max-w-xs text-center">
@@ -548,27 +666,13 @@ export default function DoctorVideoConsultationPage() {
                       </button>
                     </div>
                   </div>
-                ) : (
+                ) : displayStatus === 'connected' ? null : (
                   <p className="text-white/30 text-sm mt-1">
                     {displayStatus === 'connecting' ? 'Connecting…' :
+                     state.patientHasLeft ? 'Patient has left the consultation' :
                      isReconnecting ? 'Reconnecting…' : 'Waiting for patient…'}
                   </p>
                 )}
-              </div>
-            </div>
-          )}
-
-          {/* Patient camera off overlay */}
-          {displayStatus === 'connected' && remoteCamOff && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[#0D1A3A]/90 pointer-events-none">
-              <div className="text-center">
-                <div className="w-20 h-20 rounded-full bg-white/10 flex items-center justify-center mx-auto mb-2">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.5">
-                    <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/>
-                    <line x1="1" y1="1" x2="23" y2="23"/>
-                  </svg>
-                </div>
-                <p className="text-white/40 text-xs">Camera off</p>
               </div>
             </div>
           )}
@@ -587,39 +691,33 @@ export default function DoctorVideoConsultationPage() {
             </div>
           )}
 
-          {/* Timer + LIVE — only once both parties are actually connected;
-              never show LIVE/00:00 while still connecting/waiting/reconnecting */}
-          <div className="absolute top-6 left-0 right-0 flex items-center justify-between px-6">
-            <div className="flex items-center gap-2 bg-black/50 rounded-full px-3 py-1.5">
-              <div className={`w-2 h-2 rounded-full animate-pulse ${displayStatus === 'connected' ? 'bg-danger' : 'bg-white/40'}`} />
-              <span className="text-white text-xs font-bold tracking-wider">
-                {displayStatus === 'connected' ? 'LIVE' : displayStatus === 'reconnecting' ? 'RECONNECTING' : 'CONNECTING'}
-              </span>
-            </div>
+          {/* Timer — only once both parties are actually connected;
+              never show 00:00 while still connecting/waiting/reconnecting */}
+          <div className="absolute top-6 left-0 right-0 flex items-center justify-end px-6">
             <div className="bg-black/50 rounded-full px-4 py-1.5">
-              <span className="text-white font-mono text-sm">{displayStatus === 'connected' || displayStatus === 'reconnecting' ? formatTime(elapsed) : '--:--'}</span>
+              <span className="text-white font-mono text-sm">
+                {displayStatus === 'connected' ? formatCallDuration(elapsed) : displayStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+              </span>
             </div>
           </div>
 
-          {/* Self view */}
-          <div className="absolute top-16 right-4 w-24 h-32 rounded-2xl overflow-hidden border-2 border-white/20 shadow-lg bg-[#1F2937]">
+          {/* Self view — draggable, WhatsApp-style floating PiP, starts top-right */}
+          <DraggableSelfView top={64} isOff={false} isSpeaking={localSpeaking}>
             <div ref={localVideoRef} className="absolute inset-0" />
             {camOff && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-white/40">
+              <div className="absolute inset-0 flex items-center justify-center text-white/40 bg-[#1F2937]">
                 <CameraOff className="w-6 h-6" />
-                <span className="text-[9px]">Camera off</span>
               </div>
             )}
-            <span className="absolute bottom-1 left-0 right-0 text-center text-white/60 text-[9px] z-10">You</span>
-          </div>
+          </DraggableSelfView>
 
         </div>
 
         {/* Controls bar */}
         <div className="px-6 py-5 bg-black/85 flex items-center justify-center gap-6">
           <div className="flex flex-col items-center gap-1">
-            <button onClick={toggleMute}
-              className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${muted ? 'bg-care-blue' : 'bg-white/15 hover:bg-white/25'}`}>
+            <button onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'}
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${muted ? 'bg-care-blue' : 'bg-white/15 hover:bg-white/25'}`}>
               {muted ? (
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="1" y1="1" x2="23" y2="23"/>
@@ -637,12 +735,11 @@ export default function DoctorVideoConsultationPage() {
                 </svg>
               )}
             </button>
-            <span className="text-white/50 text-[10px]">{muted ? 'Unmute' : 'Mute'}</span>
           </div>
 
           <div className="flex flex-col items-center gap-1">
-            <button onClick={() => setCamOff(c => !c)}
-              className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${camOff ? 'bg-care-blue' : 'bg-white/15 hover:bg-white/25'}`}>
+            <button onClick={toggleCamera} aria-label={camOff ? 'Turn camera on' : 'Turn camera off'} title={camOff ? 'Turn camera on' : 'Turn camera off'}
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${camOff ? 'bg-care-blue' : 'bg-white/15 hover:bg-white/25'}`}>
               {camOff ? (
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/>
@@ -655,24 +752,37 @@ export default function DoctorVideoConsultationPage() {
                 </svg>
               )}
             </button>
-            <span className="text-white/50 text-[10px]">{camOff ? 'Cam On' : 'Cam Off'}</span>
           </div>
 
           <div className="flex flex-col items-center gap-1">
-            <button onClick={() => setShowEndSheet(true)}
-              className="w-16 h-16 rounded-full bg-danger flex items-center justify-center text-white hover:bg-danger/80 transition-colors"
+            <button
+              onClick={() => {
+                if (canEndWithSummary) {
+                  setShowEndSheet(true)
+                } else if (displayStatus === 'connecting' || displayStatus === 'error') {
+                  if (confirm('Cancel this outgoing call?')) {
+                    micTrackRef.current?.close()
+                    camTrackRef.current?.close()
+                    leaveAgora()
+                    router.replace('/doctor/consultations')
+                  }
+                } else {
+                  setShowEndSheet(true)
+                }
+              }}
+              aria-label="End consultation" title="End consultation"
+              className="w-[72px] h-[72px] rounded-full bg-danger flex items-center justify-center text-white hover:bg-danger/80 transition-colors"
               style={{ boxShadow: '0 4px 20px rgba(211,47,47,0.5)' }}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="white" style={{ transform: 'rotate(135deg)' }}>
                 <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8z"/>
               </svg>
             </button>
-            <span className="text-white/50 text-[10px]">End</span>
           </div>
 
           <div className="flex flex-col items-center gap-1">
             <div className="relative">
-              <button onClick={chatOpen ? () => setChatOpen(false) : openChat}
-                className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${chatOpen ? 'bg-teal-green/30' : 'bg-white/15 hover:bg-white/25'}`}>
+              <button onClick={chatOpen ? () => setChatOpen(false) : openChat} aria-label={chatOpen ? 'Close chat' : 'Open chat'} title={chatOpen ? 'Close chat' : 'Open chat'}
+                className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${chatOpen ? 'bg-teal-green/30' : 'bg-white/15 hover:bg-white/25'}`}>
                 <MessageCircle className="w-6 h-6 text-white" />
               </button>
               {chatUnreadCount > 0 && !chatOpen && (
@@ -681,15 +791,13 @@ export default function DoctorVideoConsultationPage() {
                 </span>
               )}
             </div>
-            <span className="text-white/50 text-[10px]">Chat</span>
           </div>
 
           <div className="flex flex-col items-center gap-1">
-            <button onClick={() => setShowInfoPanel(true)}
-              className="w-14 h-14 rounded-full flex items-center justify-center transition-all bg-white/15 hover:bg-white/25">
+            <button onClick={() => setShowInfoPanel(true)} aria-label="Consultation info" title="Consultation info"
+              className="w-16 h-16 rounded-full flex items-center justify-center transition-all bg-white/15 hover:bg-white/25">
               <Info className="w-6 h-6 text-white" />
             </button>
-            <span className="text-white/50 text-[10px]">Info</span>
           </div>
         </div>
       </div>

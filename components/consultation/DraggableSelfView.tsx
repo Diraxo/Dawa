@@ -1,9 +1,26 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useEffect, useRef, useState } from 'react'
-import { Animated, PanResponder, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
+import { Animated, PanResponder, Platform, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'
 
 import { colors } from '@/constants/colors'
 import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
+
+// Android's SurfaceView is composited in a separate native layer outside
+// React Native's normal view hierarchy, so it does not reliably follow an
+// Animated transform (this component is dragged via PanResponder) — the
+// symptom is exactly what was reported: black/transparent/flickering,
+// duplicated-looking frames, and a preview that only renders correctly after
+// a layout is forced by moving it. TextureView is a normal compositable
+// Android view and doesn't have this problem; iOS has no such split (its
+// RtcSurfaceView is backed by a plain UIView) and has no TextureView
+// equivalent, so it keeps using RtcSurfaceView. See react-native-agora's own
+// AgoraRtcRenderView.d.ts doc comments for the RtcTextureView
+// Android-only/RtcSurfaceView call-order requirements.
+let SelfViewCanvas: any = null
+try {
+  const agora = require('react-native-agora')
+  SelfViewCanvas = Platform.OS === 'android' ? agora.RtcTextureView : agora.RtcSurfaceView
+} catch {}
 
 const EDGE_MARGIN = 20
 const PEEK_VISIBLE = 26
@@ -11,18 +28,19 @@ const PEEK_VISIBLE = 26
 interface DraggableSelfViewProps {
   width?: number
   height?: number
-  // Exactly one of top/bottom anchors the un-dragged resting position —
-  // patient screens dock bottom-right (above the control bar), doctor
-  // screens dock top-right (below the timer overlay).
+  // Exactly one of top/bottom anchors the un-dragged resting position.
   top?: number
   bottom?: number
+  // Local camera canvas — uid is always 0 (self), sourceType/renderMode are
+  // the numeric Agora enum values the caller already hardcodes to avoid a
+  // load-time native-module require.
+  canvas: { uid: number; sourceType?: number; renderMode: number }
   isOff: boolean
   isSpeaking?: boolean
   hidden?: boolean
   // Omit to disable tap-to-hide (a plain tap still pulls a peeked preview
   // back into view either way).
   onHide?: () => void
-  children: React.ReactNode
 }
 
 // Shared WhatsApp-style local camera preview — small floating PiP, rounded
@@ -32,7 +50,7 @@ interface DraggableSelfViewProps {
 // behavior can't drift between them (previously only the patient screen had
 // any drag support at all).
 export function DraggableSelfView({
-  width = 90, height = 120, top, bottom, isOff, isSpeaking = false, hidden = false, onHide, children,
+  width = 90, height = 120, top, bottom, canvas, isOff, isSpeaking = false, hidden = false, onHide,
 }: DraggableSelfViewProps) {
   const { width: screenWidth } = useWindowDimensions()
   // The PanResponder below is created once via useRef, so its handlers close
@@ -111,7 +129,9 @@ export function DraggableSelfView({
       <SpeakingPulse active={isSpeaking} borderRadius={20} style={styles.fill}>
         <View style={styles.clip}>
           <Pressable style={styles.fill} onPress={handleTap}>
-            {!isOff ? children : (
+            {!isOff && SelfViewCanvas ? (
+              <SelfViewCanvas canvas={canvas} style={styles.fill} />
+            ) : (
               <View style={styles.off}>
                 <Ionicons name="videocam-off" size={22} color="rgba(255,255,255,0.5)" />
               </View>

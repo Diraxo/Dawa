@@ -13,7 +13,7 @@ import {
   Text,
   View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
 import { GradientButton } from '@/components/ui/GradientButton'
@@ -133,6 +133,7 @@ export default function RegistrationStep3() {
   const router = useRouter()
   const store = useDoctorStore()
   const { t } = useTranslation()
+  const insets = useSafeAreaInsets()
 
   // License
   const [licenseUris, setLicenseUris] = useState<string[]>(store.regLicenseDocUris)
@@ -367,7 +368,7 @@ export default function RegistrationStep3() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      <View style={styles.footer}>
+      <View style={[styles.footer, { paddingBottom: Math.max(32, insets.bottom + 16) }]}>
         <View style={styles.footerRow}>
           <View style={styles.backBtnWrap}>
             <OutlineButton label={t('back')} onPress={() => router.back()} />
@@ -450,7 +451,7 @@ const styles = StyleSheet.create({
   reminderNote: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
   reminderText: { fontFamily: fonts.regular, fontSize: 13, color: colors.warning },
 
-  footer: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
+  footer: { paddingHorizontal: 24, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
   footerRow: { flexDirection: 'row', gap: 12 },
   backBtnWrap: { flex: 1 },
   nextBtnWrap: { flex: 2 },

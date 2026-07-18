@@ -31,12 +31,25 @@ interface FollowupReminder {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  pending:   'bg-warning/15 text-warning',
-  scheduled: 'bg-warning/15 text-warning',
-  active:    'bg-int-blue/15 text-int-blue',
-  completed: 'bg-success/15 text-success',
-  cancelled: 'bg-danger/15 text-danger',
+  pending:            'bg-warning/15 text-warning',
+  scheduled:          'bg-warning/15 text-warning',
+  waiting_for_doctor: 'bg-int-blue/15 text-int-blue',
+  active:             'bg-int-blue/15 text-int-blue',
+  accepted:           'bg-int-blue/15 text-int-blue',
+  in_progress:        'bg-int-blue/15 text-int-blue',
+  completed:          'bg-success/15 text-success',
+  cancelled:          'bg-danger/15 text-danger',
 }
+
+const STATUS_LABELS: Record<string, string> = {
+  scheduled:          'Scheduled',
+  waiting_for_doctor:  'Entering waiting room…',
+}
+
+// Consultation is live (or the doctor has accepted and is about to be) —
+// the patient can rejoin. 'active' is kept for back-compat even though no
+// current write path sets it; real rows use 'accepted'/'in_progress'.
+const JOINABLE_STATUSES = new Set(['active', 'accepted', 'in_progress'])
 
 const TYPE_ICONS: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
 
@@ -131,8 +144,12 @@ export default function AppointmentsPage() {
 
   const filtered = appointments.filter(a => {
     if (tab === 'upcoming') {
-      if (a.status === 'active') return true
+      if (JOINABLE_STATUSES.has(a.status)) return true
       if (a.status === 'scheduled') return true
+      // Server-time cron activated it (scheduled_at reached) but the doctor
+      // hasn't accepted yet — without this branch the row vanished entirely
+      // for that window instead of showing "Entering waiting room…".
+      if (a.status === 'waiting_for_doctor' && !isOnDemand(a.scheduled_at)) return true
       // Legacy: paid-pending scheduled future slots
       if (a.status === 'pending' && a.payment_status === 'paid' && !isOnDemand(a.scheduled_at)) {
         return a.scheduled_at ? new Date(a.scheduled_at) > now : false
@@ -248,36 +265,42 @@ export default function AppointmentsPage() {
             const photoUrl = a.doctor?.user?.profile_photo_url
             const TypeIcon = TYPE_ICONS[a.type]
 
+            const doctorHref = a.doctor?.id ? `/patient/doctors/${a.doctor.id}` : undefined
+
             return (
               <div key={a.id} className="card p-5 flex items-center gap-4">
-                {/* Doctor avatar */}
-                <div className="w-12 h-12 rounded-2xl flex-shrink-0 overflow-hidden">
-                  {photoUrl ? (
-                    <img src={photoUrl} alt={doctorName} className="w-12 h-12 object-cover" />
-                  ) : (
-                    <div className="w-12 h-12 rounded-2xl bg-gradient-hero flex items-center justify-center text-white font-black text-base">
-                      {stripDrPrefix(doctorName).charAt(0) || '?'}
-                    </div>
-                  )}
-                </div>
+                {/* Doctor avatar + info — clickable through to the doctor's profile */}
+                <Link
+                  href={doctorHref ?? '#'}
+                  className={`flex items-center gap-4 flex-1 min-w-0 ${doctorHref ? '' : 'pointer-events-none'}`}
+                >
+                  <div className="w-12 h-12 rounded-2xl flex-shrink-0 overflow-hidden">
+                    {photoUrl ? (
+                      <img src={photoUrl} alt={doctorName} className="w-12 h-12 object-cover" />
+                    ) : (
+                      <div className="w-12 h-12 rounded-2xl bg-gradient-hero flex items-center justify-center text-white font-black text-base">
+                        {stripDrPrefix(doctorName).charAt(0) || '?'}
+                      </div>
+                    )}
+                  </div>
 
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <p className="font-montserrat font-bold text-sm text-ink-black">
-                    Dr. {stripDrPrefix(doctorName || '—')}
-                  </p>
-                  <p className="text-ink-black/50 text-xs">{a.doctor?.specialty}</p>
-                  <p className="text-ink-black/40 text-xs mt-0.5">
-                    {formatDateTime(a.started_at ?? a.scheduled_at ?? a.created_at)}
-                  </p>
-                </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-montserrat font-bold text-sm text-ink-black">
+                      Dr. {stripDrPrefix(doctorName || '—')}
+                    </p>
+                    <p className="text-ink-black/50 text-xs">{a.doctor?.specialty}</p>
+                    <p className="text-ink-black/40 text-xs mt-0.5">
+                      {formatDateTime(a.started_at ?? a.scheduled_at ?? a.created_at)}
+                    </p>
+                  </div>
+                </Link>
 
                 {/* Right side */}
                 <div className="flex flex-col items-end gap-2 flex-shrink-0">
                   <div className="flex items-center gap-2">
                     {TypeIcon && <TypeIcon size={16} className="text-ink-black/50" />}
                     <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full capitalize ${STATUS_COLORS[a.status] ?? ''}`}>
-                      {a.status}
+                      {STATUS_LABELS[a.status] ?? a.status}
                     </span>
                   </div>
                   {a.patient_amount > 0 && (
@@ -285,9 +308,14 @@ export default function AppointmentsPage() {
                   )}
 
                   {/* Action buttons */}
-                  {a.status === 'active' && (
+                  {JOINABLE_STATUSES.has(a.status) && (
                     <Link href={joinHref(a)} className="btn-primary h-8 px-4 text-xs rounded-xl">
                       Join Now →
+                    </Link>
+                  )}
+                  {a.status === 'waiting_for_doctor' && !isOnDemand(a.scheduled_at) && (
+                    <Link href={`/patient/waiting/${a.id}`} className="btn-outline h-8 px-4 text-xs rounded-xl">
+                      Waiting Room
                     </Link>
                   )}
                   {a.status === 'pending' && !isOnDemand(a.scheduled_at) && (

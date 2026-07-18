@@ -18,7 +18,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
@@ -108,6 +108,7 @@ function DatePickerModal({
   visible: boolean; value: DateValue; onConfirm: (v: DateValue) => void; onCancel: () => void
 }) {
   const { t } = useTranslation()
+  const insets = useSafeAreaInsets()
   const [day, setDay] = useState(value.day)
   const [month, setMonth] = useState(value.month)
   const [year, setYear] = useState(value.year)
@@ -119,7 +120,7 @@ function DatePickerModal({
   return (
     <Modal visible={visible} transparent animationType="slide">
       <View style={dpStyles.overlay}>
-        <View style={dpStyles.sheet}>
+        <View style={[dpStyles.sheet, { paddingBottom: Math.max(32, insets.bottom + 16) }]}>
           <View style={dpStyles.header}>
             <Text style={dpStyles.title}>{t('dateOfBirth')}</Text>
             <Pressable onPress={onCancel} hitSlop={10}>
@@ -149,7 +150,7 @@ function DatePickerModal({
 
 const dpStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 24, paddingBottom: 32, paddingTop: 20 },
+  sheet: { backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 24, paddingTop: 20 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   title: { fontFamily: fonts.bold, fontSize: 18, color: colors.inkBlack },
   colLabel: { fontFamily: fonts.semiBold, fontSize: 12, color: '#9CA3AF', textAlign: 'center', textTransform: 'uppercase', letterSpacing: 0.5 },
@@ -162,6 +163,7 @@ const dpStyles = StyleSheet.create({
 export default function RegistrationStep1() {
   const { t } = useTranslation()
   const router = useRouter()
+  const insets = useSafeAreaInsets()
   const { user } = useUser()
   const { updateReg, regFullName, regPhone, regDateOfBirth, regGender, regProfilePhotoUri } = useDoctorStore()
 
@@ -320,7 +322,7 @@ export default function RegistrationStep1() {
         {/* Country code picker modal */}
         <Modal visible={showCodePicker} transparent animationType="slide" onRequestClose={() => setShowCodePicker(false)}>
           <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' }} onPress={() => setShowCodePicker(false)} />
-          <View style={{ backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24 }}>
+          <View style={{ backgroundColor: colors.mistWhite, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 24, paddingTop: 24, paddingBottom: Math.max(24, insets.bottom + 16) }}>
             <Text style={{ fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack, marginBottom: 12 }}>Select Country Code</Text>
             {COUNTRY_CODES.map(c => (
               <Pressable key={c.code} onPress={() => { setCountryCode(c.code); setShowCodePicker(false) }}
@@ -366,7 +368,7 @@ export default function RegistrationStep1() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      <View style={styles.footer}>
+      <View style={[styles.footer, { paddingBottom: Math.max(32, insets.bottom + 16) }]}>
         <GradientButton label={t('next')} onPress={handleNext} disabled={!isValid} />
       </View>
 
@@ -440,5 +442,5 @@ const styles = StyleSheet.create({
   genderText: { fontFamily: fonts.semiBold, fontSize: 14, color: '#6B7280' },
   genderTextSelected: { color: colors.mistWhite },
 
-  footer: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
+  footer: { paddingHorizontal: 24, paddingTop: 12, backgroundColor: colors.mistWhite, borderTopWidth: 1, borderTopColor: colors.cloudGrey },
 })

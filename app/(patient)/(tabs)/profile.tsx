@@ -145,6 +145,12 @@ export default function ProfileScreen() {
       onPress: () => router.push('/(patient)/payment-methods'),
     },
     {
+      icon: 'time-outline',
+      label: t('notificationHistory', { defaultValue: 'Notification History' }),
+      subtitle: t('notificationHistorySub', { defaultValue: 'View past alerts and updates' }),
+      onPress: () => router.push('/(patient)/notifications' as never),
+    },
+    {
       icon: 'notifications-outline',
       label: t('notifications'),
       subtitle: t('configureAlerts'),

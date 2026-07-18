@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   Alert,
   Image,
-  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -30,6 +29,7 @@ import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { validatePickedFile, safeFilename } from '@/lib/fileValidation'
+import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,6 +84,7 @@ export default function MedicalRecordsScreen() {
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string } | null>(null)
 
   useEffect(() => {
     if (!user?.id) return
@@ -262,7 +263,7 @@ export default function MedicalRecordsScreen() {
         setPreviewRecord(record)
         setPreviewImageUrl(data.signedUrl)
       } else {
-        await Linking.openURL(data.signedUrl)
+        setPdfViewer({ url: data.signedUrl, title: record.title })
       }
     } catch {
       Alert.alert(t('error'), t('couldNotOpenFile'))
@@ -353,6 +354,13 @@ export default function MedicalRecordsScreen() {
         )}
       </SafeAreaView>
     </Modal>
+
+    <PdfViewerModal
+      visible={!!pdfViewer}
+      url={pdfViewer?.url ?? null}
+      title={pdfViewer?.title}
+      onClose={() => setPdfViewer(null)}
+    />
 
     <SafeAreaView style={styles.safe} edges={['top']}>
       {/* Header */}

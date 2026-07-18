@@ -29,7 +29,9 @@ import { callkeep } from '@/lib/callkeep'
 import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { useNotificationCenter } from '@/hooks/useNotificationCenter'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
+import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -91,6 +93,8 @@ export default function DoctorHomeScreen() {
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
   const { photoUrl: doctorPhotoUrl } = useOwnProfilePhoto()
+  const dbUserId = useAuthStore((s) => s.userId)
+  const { unreadCount } = useNotificationCenter(dbUserId)
 
   const rawFirstName = user?.firstName ?? user?.fullName?.split(' ')[0] ?? 'Doctor'
   const firstName = rawFirstName.replace(/^Dr\.?\s*/i, '').trim() || 'Doctor'
@@ -421,9 +425,9 @@ export default function DoctorHomeScreen() {
             <Text style={styles.dateText}>{getFormattedDate()}</Text>
           </View>
           <View style={styles.headerRight}>
-            <Pressable style={styles.bellBtn} hitSlop={8} onPress={() => router.push('/(doctor)/(tabs)/messages')}>
+            <Pressable style={styles.bellBtn} hitSlop={8} onPress={() => router.push('/(doctor)/notifications' as never)}>
               <Ionicons name="notifications-outline" size={24} color={colors.mistWhite} />
-              {queueList.length > 0 && <View style={styles.bellBadge} />}
+              {unreadCount > 0 && <View style={styles.bellBadge} />}
             </Pressable>
             <Pressable
               onPress={() => router.push('/(doctor)/(tabs)/profile')}

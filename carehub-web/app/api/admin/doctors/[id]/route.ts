@@ -40,11 +40,56 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
 
   const body = await req.json()
-  const { action } = body as { action: 'suspend' | 'reinstate' }
+  const { action } = body as {
+    action: 'suspend' | 'reinstate' | 'enable_document_update' | 'disable_document_update' | 'approve_document_update' | 'reject_document_update'
+  }
   const id = params.id
 
-  if (action !== 'suspend' && action !== 'reinstate') {
+  const validActions = ['suspend', 'reinstate', 'enable_document_update', 'disable_document_update', 'approve_document_update', 'reject_document_update']
+  if (!validActions.includes(action)) {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+  }
+
+  if (action === 'enable_document_update' || action === 'disable_document_update') {
+    const { error } = await supabaseAdmin
+      .from('doctor_profiles')
+      .update({ documents_update_allowed: action === 'enable_document_update' })
+      .eq('id', id)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    await logAdminAction(userId, action, { doctorProfileId: id }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
+    return NextResponse.json({ success: true, documentsUpdateAllowed: action === 'enable_document_update' })
+  }
+
+  if (action === 'approve_document_update' || action === 'reject_document_update') {
+    const newReviewStatus = action === 'approve_document_update' ? 'approved' : 'rejected'
+    const { error } = await supabaseAdmin
+      .from('doctor_profiles')
+      .update({ document_review_status: newReviewStatus, document_reviewed_at: new Date().toISOString() })
+      .eq('id', id)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+    const { data: profile } = await supabaseAdmin
+      .from('doctor_profiles')
+      .select('user_id')
+      .eq('id', id)
+      .single()
+    if (profile?.user_id) {
+      const title = newReviewStatus === 'approved' ? 'Document Update Approved' : 'Document Update Rejected'
+      const notifBody = newReviewStatus === 'approved'
+        ? 'Your updated documents have been reviewed and approved.'
+        : 'Your updated documents were reviewed and rejected. Please contact support for details.'
+      await supabaseAdmin.from('notifications').insert({
+        user_id: profile.user_id,
+        title,
+        body: notifBody,
+        type: 'document_update_reviewed',
+        data_json: { doctorProfileId: id },
+      })
+      await sendDoctorStatusPush(profile.user_id, title, notifBody)
+    }
+
+    await logAdminAction(userId, action, { doctorProfileId: id }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
+    return NextResponse.json({ success: true, documentReviewStatus: newReviewStatus })
   }
 
   const newStatus = action === 'suspend' ? 'suspended' : 'approved'

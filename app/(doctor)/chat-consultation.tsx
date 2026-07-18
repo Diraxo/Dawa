@@ -64,6 +64,7 @@ import { waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
 import { streamClient, preloadImages, getMessageImageUrls } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
 import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
@@ -190,6 +191,16 @@ export default function DoctorChatConsultationScreen() {
   const displayName = livePatientName ?? patientName ?? 'Patient'
   const nameInitial = displayName.charAt(0).toUpperCase()
   const effectiveChannelId = channelId ?? consultationId
+
+  // Auto-clear: reaching this chat directly (tab nav, deep link, resume)
+  // rather than by tapping the notification still means it's been "handled"
+  // — mark any unread notification for this consultation read so it doesn't
+  // sit stale in the tray/badge/Notification Center.
+  const dbUserId = useAuthStore((s) => s.userId)
+  useEffect(() => {
+    if (!effectiveChannelId || !dbUserId) return
+    markNotificationsReadForConsultation(supabase, dbUserId, effectiveChannelId)
+  }, [effectiveChannelId, dbUserId])
 
   // ── Background notification ────────────────────────────────────────────────
   // Mirrors the phone/video screens' "Ongoing Consultation" notification so

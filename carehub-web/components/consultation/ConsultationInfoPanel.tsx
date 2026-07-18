@@ -2,6 +2,7 @@
 
 import type { ReactNode } from 'react'
 import { Lock, User, X, Phone, Video } from 'lucide-react'
+import { formatCallDuration } from '@/lib/callDuration'
 
 interface ConsultationInfoPanelProps {
   open: boolean
@@ -14,12 +15,6 @@ interface ConsultationInfoPanelProps {
   startedAt: string | null
   elapsedSeconds: number
   networkQuality: number // Agora 0-6 scale — 0-2 good, 3-4 fair, 5-6 poor
-}
-
-function formatElapsed(seconds: number) {
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
 function formatStartedAt(iso: string | null) {
@@ -85,7 +80,7 @@ export function ConsultationInfoPanel({
               }
             />
             <InfoRow label="Started" value={formatStartedAt(startedAt)} />
-            <InfoRow label="Duration" value={formatElapsed(elapsedSeconds)} mono />
+            <InfoRow label="Duration" value={formatCallDuration(elapsedSeconds)} mono />
             <div className="flex items-center justify-between px-4 py-3">
               <span className="text-xs text-white/50">Connection</span>
               <div className="flex items-center gap-2">

@@ -10,10 +10,13 @@ import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/ca
 import { stripDrPrefix } from '@/lib/utils'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { formatCallDuration } from '@/lib/callDuration'
 import { ConsultationChatThread } from '@/components/chat/ConsultationChatThread'
 import { ConsultationInfoPanel } from '@/components/consultation/ConsultationInfoPanel'
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
-import { MessageCircle, Info, Phone, PhoneOff } from 'lucide-react'
+import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
+import { MessageCircle, Info, Phone } from 'lucide-react'
 import type { IAgoraRTCClient, IMicrophoneAudioTrack } from 'agora-rtc-sdk-ng'
 
 interface Consultation {
@@ -50,6 +53,10 @@ export default function PhoneConsultationPage() {
   const [chatUnreadCount, setChatUnreadCount] = useState(0)
 
   const [isReconnecting, setIsReconnecting] = useState(false)
+  // True once this client has actually observed the doctor's peer publish
+  // audio — the DB phase alone only proves each side's OWN join succeeded,
+  // not that the two are actually connected to each other.
+  const [remotePeerPresent, setRemotePeerPresent] = useState(false)
   const [, setReconnectCountdown] = useState(90)
   const [ringCountdown, setRingCountdown] = useState(60)
   // Dismissed the instant we start (or resume) joining Agora — either the
@@ -97,6 +104,9 @@ export default function PhoneConsultationPage() {
     }
   }, [state.phase])
 
+  // `remotePeerPresent` gates 'connected' too, not just phase — the DB-driven
+  // phase only proves each side's OWN join succeeded, not that this client
+  // has actually received the doctor's audio (see user-published handler).
   const displayStatus: CallStatus = !ringingDismissed
     ? 'ringing'
     : errorMessage
@@ -106,21 +116,27 @@ export default function PhoneConsultationPage() {
     : state.phase === 'reconnecting'
     ? 'reconnecting'
     : state.phase === 'on_call'
-    ? 'connected'
+    ? (remotePeerPresent ? 'connected' : 'connecting')
     : state.phase === 'waiting_for_doctor'
     ? 'waiting'
     : 'connecting'
 
-  // Once the DB-derived phase reaches 'ended', release local Agora resources
-  // exactly once.
-  const endedCleanupDoneRef = useRef(false)
-  useEffect(() => {
-    if (state.phase !== 'ended' || endedCleanupDoneRef.current) return
-    endedCleanupDoneRef.current = true
-    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
-    if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
-    cleanupAgora()
-  }, [state.phase])
+  // Single source of truth for the "call ended" reaction — release Agora
+  // resources exactly once, then surface the completion dialog, whether the
+  // doctor ended the call or it completed/ended abnormally on some other
+  // device/session.
+  const completion = useConsultationCompletion({
+    phase: state.phase,
+    rawStatus: state.rawStatus,
+    role: 'patient',
+    kind: 'phone',
+    consultationId: id as string,
+    onTeardown: () => {
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
+      cleanupAgora()
+    },
+  })
 
   // Also active during 'reconnecting' — see doctor video page for why: the
   // server-side stale-session cron kills any in_progress call whose
@@ -317,6 +333,7 @@ export default function PhoneConsultationPage() {
       function enterReconnecting() {
         isReconnectingLocal = true
         setRemoteMuted(false)
+        setRemotePeerPresent(false)
         setIsReconnecting(true)
         setReconnectCountdown(90)
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
@@ -339,6 +356,34 @@ export default function PhoneConsultationPage() {
         setRemoteMuted(false)
         if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
         if (reconnectCountdownRef.current) { clearInterval(reconnectCountdownRef.current); reconnectCountdownRef.current = null }
+        // A user-published event that raced the disconnect (peerConnection
+        // already down when we tried to subscribe) is dropped rather than
+        // retried inline — sweep for any published-but-unsubscribed remote
+        // audio now that the peerConnection is back up.
+        resubscribeAll()
+      }
+
+      async function resubscribeAll() {
+        for (const remoteUser of client.remoteUsers) {
+          if (remoteUser.hasAudio && !remoteUser.audioTrack) {
+            try {
+              await client.subscribe(remoteUser, 'audio')
+              // Cast breaks stale TS control-flow narrowing carried over from
+              // the `!remoteUser.audioTrack` guard above — subscribe()
+              // populates this at runtime but TS can't see that.
+              const audioTrack = (remoteUser as any).audioTrack
+              audioTrack?.play()
+              logger.log(`[Phone][Patient][${Date.now()}] resubscribed audio uid:${remoteUser.uid}`)
+            } catch (e) {
+              logger.error(`[Phone][Patient][${Date.now()}] resubscribe audio failed uid:${remoteUser.uid}:`, e)
+            }
+          }
+        }
+        // The doctor is still in client.remoteUsers even if nothing needed
+        // resubscribing (e.g. only OUR connection blipped) — either way,
+        // their presence here means audio is flowing again, so the
+        // timer/LIVE badge can resume.
+        if (client.remoteUsers.length > 0) setRemotePeerPresent(true)
       }
 
       // ── (21) Connection-state changes ────────────────────────────────────
@@ -384,19 +429,30 @@ export default function PhoneConsultationPage() {
       // ── (19) user-published ──────────────────────────────────────────────
       client.on('user-published', async (remoteUser, mediaType) => {
         logger.log(`[Phone][Patient][${Date.now()}] user-published uid:${remoteUser.uid} type:${mediaType}`)
-        await client.subscribe(remoteUser, mediaType)
+        try {
+          await client.subscribe(remoteUser, mediaType)
+        } catch (e) {
+          // Can race a local connection drop (peerConnection already
+          // disconnected when this fires) — exitReconnecting()'s sweep picks
+          // it up once the connection is restored. Must not throw out of an
+          // event handler: an unhandled rejection here crashes the call screen.
+          logger.error(`[Phone][Patient][${Date.now()}] subscribe failed uid:${remoteUser.uid} type:${mediaType}:`, e)
+          return
+        }
         logger.log(`[Phone][Patient][${Date.now()}] subscribed uid:${remoteUser.uid} type:${mediaType}`)
         if (mediaType === 'audio') {
-          // This only reflects that the doctor's audio arrived on our own
-          // Agora connection — it no longer decides call phase or the timer.
-          // Both are derived solely from the DB row (see useConsultationState),
-          // which is written to only by each party's own publish-success.
+          // Call phase/timer come from the DB row (see useConsultationState),
+          // but that only proves each side's OWN join succeeded — not that
+          // this client has actually received the doctor's audio. Gate
+          // `displayStatus === 'connected'` on this too so the timer/LIVE
+          // badge never runs before audio is actually flowing.
           if (!remoteUser.audioTrack) {
             logger.error(`[Phone][Patient][${Date.now()}] user-published audio but remoteUser.audioTrack is missing after subscribe — nothing to play`)
           } else {
             remoteUser.audioTrack.play()
             logger.log(`[Phone][Patient][${Date.now()}] playing remote audio — track exists`)
           }
+          setRemotePeerPresent(true)
           setRemoteMuted(false)
           setIsReconnecting(false)
           // Clear any pending "connection lost" state — the call is
@@ -445,7 +501,7 @@ export default function PhoneConsultationPage() {
 
       // ── (14-15) Local tracks ─────────────────────────────────────────────
       logger.log(`[Phone][Patient][${Date.now()}] createMicrophoneAudioTrack — requesting`)
-      const mic = await AgoraRTC.createMicrophoneAudioTrack()
+      const mic = await AgoraRTC.createMicrophoneAudioTrack({ AEC: true, AGC: true, ANS: true, encoderConfig: 'speech_standard' })
       logger.log(`[Phone][Patient][${Date.now()}] createMicrophoneAudioTrack — mic track ready. mic.enabled:${mic.enabled} mic.muted:${mic.muted}`)
       micTrackRef.current = mic
       // Re-apply the user's chosen mute state to this (possibly brand-new,
@@ -460,6 +516,10 @@ export default function PhoneConsultationPage() {
       // DB trigger flips status/started_at once the doctor's own write lands
       // too; both clients learn of it from the same row update.
       state.markSelfConnected()
+      // Clears any stale patient_left_at from a previous "Leave Call" —
+      // this fires on every successful (re)join, so the doctor's "Patient
+      // has left" banner drops the instant we're actually back.
+      state.clearPatientLeft()
     } catch (err) {
       logger.error(`[Phone][Patient][${Date.now()}] Fatal join error:`, err)
       const msg = err instanceof Error && err.message.includes('timeout')
@@ -492,7 +552,21 @@ export default function PhoneConsultationPage() {
     router.replace('/patient')
   }
 
-  function leaveCall() {
+  async function leaveCall() {
+    const isActive = displayStatus === 'connected' || displayStatus === 'waiting'
+    if (isActive && !window.confirm('Leave the call? You can rejoin — the doctor will remain in the consultation.')) return
+    // Best-effort — lets the doctor's UI show "Patient has left" instead of a
+    // generic reconnecting/dropped state. Never blocks the actual leave.
+    try {
+      const tok = await getToken()
+      if (tok) {
+        await getAuthClient(tok)
+          .from('consultations')
+          .update({ patient_left_at: new Date().toISOString() })
+          .eq('id', id as string)
+          .eq('status', 'in_progress')
+      }
+    } catch {}
     cleanupAgora()
     router.push('/patient')
   }
@@ -500,10 +574,6 @@ export default function PhoneConsultationPage() {
   function openChat() {
     setChatOpen(true)
     setChatUnreadCount(0)
-  }
-
-  function formatTime(s: number) {
-    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
   }
 
   if (loading) {
@@ -557,20 +627,17 @@ export default function PhoneConsultationPage() {
   }
 
   // ── Ended screen ────────────────────────────────────────────────────────────
+  // The consultation is over the instant this renders (Agora already torn
+  // down by the cleanup effect above) — the completion dialog is the only UI,
+  // matching the shared modal used by chat/phone/video across mobile+web.
   if (displayStatus === 'ended') {
     return (
-      <div className="min-h-screen bg-[#070E27] flex flex-col items-center justify-center gap-6 px-6">
-        <div className="w-24 h-24 rounded-full bg-white/10 flex items-center justify-center"><PhoneOff className="w-10 h-10 text-white/70" /></div>
-        <div className="text-center">
-          <h1 className="font-montserrat font-black text-2xl text-white mb-2">Call Ended</h1>
-          <p className="text-white/50 text-sm">The doctor has ended the consultation.</p>
-        </div>
-        <button
-          onClick={() => router.push('/patient')}
-          className="btn-primary px-8 py-3 rounded-2xl text-sm"
-        >
-          Back to Dashboard
-        </button>
+      <div className="min-h-screen bg-[#070E27]">
+        <ConsultationCompletedModal
+          open
+          onViewSummary={completion.goToSummary}
+          onClose={completion.dismissModal}
+        />
       </div>
     )
   }
@@ -622,7 +689,7 @@ export default function PhoneConsultationPage() {
               </div>
             )}
             <p className="font-mono text-white/70 text-xl">
-              {displayStatus === 'connected' ? formatTime(elapsed) : '--:--'}
+              {displayStatus === 'connected' ? formatCallDuration(elapsed) : '--:--'}
             </p>
           </div>
 
@@ -689,62 +756,50 @@ export default function PhoneConsultationPage() {
         {/* Controls */}
         <div className="w-full max-w-xs">
           <div className="flex items-center justify-between">
-            <div className="flex flex-col items-center gap-2">
-              <button onClick={toggleMute}
-                className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${muted ? 'bg-care-blue' : 'bg-white/10 hover:bg-white/20'}`}>
-                {muted ? (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="1" y1="1" x2="23" y2="23"/>
-                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
-                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
-                    <line x1="12" y1="19" x2="12" y2="23"/>
-                    <line x1="8" y1="23" x2="16" y2="23"/>
-                  </svg>
-                ) : (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                    <line x1="12" y1="19" x2="12" y2="23"/>
-                    <line x1="8" y1="23" x2="16" y2="23"/>
-                  </svg>
-                )}
-              </button>
-              <span className="text-white/50 text-[10px]">{muted ? 'Unmute' : 'Mute'}</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-2">
-              <button onClick={leaveCall}
-                className="w-20 h-20 rounded-full bg-danger flex items-center justify-center text-white hover:bg-danger/80 transition-colors"
-                style={{ boxShadow: '0 4px 20px rgba(211,47,47,0.5)' }}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="white" style={{ transform: 'rotate(135deg)' }}>
-                  <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8z"/>
+            <button onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'}
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${muted ? 'bg-care-blue' : 'bg-white/10 hover:bg-white/20'}`}>
+              {muted ? (
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="1" y1="1" x2="23" y2="23"/>
+                  <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+                  <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
                 </svg>
+              ) : (
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+              )}
+            </button>
+
+            <button onClick={leaveCall} aria-label="Leave Call" title="Leave Call"
+              className="w-24 h-24 rounded-full bg-danger flex items-center justify-center text-white hover:bg-danger/80 transition-colors"
+              style={{ boxShadow: '0 4px 20px rgba(211,47,47,0.5)' }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="white" style={{ transform: 'rotate(135deg)' }}>
+                <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8z"/>
+              </svg>
+            </button>
+
+            <div className="relative">
+              <button onClick={chatOpen ? () => setChatOpen(false) : openChat} aria-label={chatOpen ? 'Close chat' : 'Chat'} title={chatOpen ? 'Close chat' : 'Chat'}
+                className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${chatOpen ? 'bg-teal-green/30' : 'bg-white/10 hover:bg-white/20'}`}>
+                <MessageCircle className="w-6 h-6 text-white" />
               </button>
-              <span className="text-white/50 text-[10px]">Leave</span>
+              {chatUnreadCount > 0 && !chatOpen && (
+                <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-danger text-white text-[10px] font-bold flex items-center justify-center border-2 border-[#070E27]">
+                  {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                </span>
+              )}
             </div>
 
-            <div className="flex flex-col items-center gap-2">
-              <div className="relative">
-                <button onClick={chatOpen ? () => setChatOpen(false) : openChat}
-                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${chatOpen ? 'bg-teal-green/30' : 'bg-white/10 hover:bg-white/20'}`}>
-                  <MessageCircle className="w-6 h-6 text-white" />
-                </button>
-                {chatUnreadCount > 0 && !chatOpen && (
-                  <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-danger text-white text-[10px] font-bold flex items-center justify-center border-2 border-[#070E27]">
-                    {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
-                  </span>
-                )}
-              </div>
-              <span className="text-white/50 text-[10px]">Chat</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-2">
-              <button onClick={() => setShowInfoPanel(true)}
-                className="w-14 h-14 rounded-full flex items-center justify-center transition-all bg-white/10 hover:bg-white/20">
-                <Info className="w-6 h-6 text-white" />
-              </button>
-              <span className="text-white/50 text-[10px]">Info</span>
-            </div>
+            <button onClick={() => setShowInfoPanel(true)} aria-label="Info" title="Info"
+              className="w-16 h-16 rounded-full flex items-center justify-center transition-all bg-white/10 hover:bg-white/20">
+              <Info className="w-6 h-6 text-white" />
+            </button>
           </div>
         </div>
       </div>

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import { getAuthClient } from '@/lib/supabase'
+import { submitConsultationCompletion } from '@/lib/consultationCompletion'
 
 interface Prescription {
   medicine: string
@@ -56,37 +57,29 @@ export function EndConsultationModal({ consultationId, patientName, elapsedSecon
       ? JSON.stringify(validRx)
       : null
 
-    const { error: summaryError } = await client.from('consultation_summaries').upsert({
-      consultation_id: consultationId,
-      chief_complaint: chiefComplaint.trim(),
-      diagnosis: diagnosis.trim(),
-      prescription: prescriptionText,
-      followup_recommendation: followUp.trim() || null,
-      referral_needed: referralNeeded,
-      referral_specialty: referralNeeded && referralSpecialty.trim() ? referralSpecialty.trim() : null,
-    }, { onConflict: 'consultation_id' })
+    const result = await submitConsultationCompletion({
+      client,
+      consultationId,
+      data: {
+        chiefComplaint: chiefComplaint.trim(),
+        diagnosis: diagnosis.trim(),
+        prescription: prescriptionText,
+        followUp: followUp.trim(),
+        referralNeeded,
+        referralSpecialty: referralSpecialty.trim(),
+      },
+      durationMinutes: elapsedSeconds ? Math.ceil(elapsedSeconds / 60) : null,
+    })
 
-    if (summaryError) {
+    if (!result.ok) {
       setSubmitting(false)
-      setError('Could not save the consultation summary. Please try again.')
+      setError(
+        result.failedAt === 'summary'
+          ? 'Could not save the consultation summary. Please try again.'
+          : 'Summary saved, but could not close out the consultation. Please try again.'
+      )
       return
     }
-
-    const { error: statusError } = await client.from('consultations').update({
-      status: 'completed',
-      ended_at: new Date().toISOString(),
-      duration_minutes: elapsedSeconds ? Math.ceil(elapsedSeconds / 60) : null,
-    }).eq('id', consultationId)
-
-    if (statusError) {
-      setSubmitting(false)
-      setError('Summary saved, but could not close out the consultation. Please try again.')
-      return
-    }
-
-    // Stream channel locking is now handled server-side by a DB trigger
-    // (on_consultation_change → freeze-consultation-channel Edge Function)
-    // the instant status flips to 'completed' above — no client call needed.
 
     setSubmitting(false)
     onDone()

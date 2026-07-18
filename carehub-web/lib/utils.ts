@@ -25,6 +25,23 @@ export function formatDateTime(dateString: string) {
   return `${formatDate(dateString)} at ${formatTime(dateString)}`
 }
 
+// "Today at 10:40 AM" / "Tomorrow at 10:40 AM" / "Monday, July 13 at 10:40 AM"
+// — the friendly form used for scheduled-appointment confirmations, in the
+// viewer's local timezone. Distinct from formatDateTime, which always shows
+// a bare weekday/month/day regardless of how close the date is.
+export function formatFriendlyDateTime(dateString: string) {
+  const d = new Date(dateString)
+  const today = new Date()
+  const tomorrow = new Date(today)
+  tomorrow.setDate(today.getDate() + 1)
+
+  const time = formatTime(dateString)
+  if (d.toDateString() === today.toDateString()) return `Today at ${time}`
+  if (d.toDateString() === tomorrow.toDateString()) return `Tomorrow at ${time}`
+  const dateLabel = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+  return `${dateLabel} at ${time}`
+}
+
 export function getInitials(name: string) {
   return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
 }

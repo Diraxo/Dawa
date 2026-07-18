@@ -475,6 +475,8 @@ export default function DoctorProfileScreen() {
           {/* ── App Settings ── */}
           <Text style={styles.sectionTitle}>{t('appSettings')}</Text>
           <View style={styles.menuCard}>
+            <MenuRow icon="time-outline" label={t('notificationHistory', { defaultValue: 'Notification History' })} onPress={() => router.push('/(doctor)/notifications' as never)} />
+            <View style={styles.menuDivider} />
             <MenuRow icon="notifications-outline" label={t('notifications')} onPress={() => router.push('/(doctor)/notification-settings' as never)} />
             <View style={styles.menuDivider} />
             <MenuRow icon="language-outline" label={t('language')} onPress={() => router.push('/(doctor)/language-settings' as never)} />

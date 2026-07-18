@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { useServerNow } from '@/lib/serverClock'
 import {
   isSlotPast,
   getAvailableSlots,
@@ -51,6 +52,10 @@ export function RescheduleModal({ appointment, onClose, onRescheduled }: Props) 
   const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState('')
 
+  // Device-clock-independent "now", synced against Postgres' own now() —
+  // mirrors the identical fix in the booking page (see lib/serverClock.ts).
+  const nowMs = useServerNow()
+
   useEffect(() => {
     if (!appointment) return
     setSelectedDay(0)
@@ -70,7 +75,7 @@ export function RescheduleModal({ appointment, onClose, onRescheduled }: Props) 
       })
   }, [appointment?.doctorId])
 
-  const days = getNextDays(14, availability ?? undefined)
+  const days = getNextDays(14, availability ?? undefined, nowMs)
   const dayValue = days[selectedDay]?.value ?? ''
   const slots = availability ? getAvailableSlots(availability, dayValue) : []
 
@@ -78,23 +83,43 @@ export function RescheduleModal({ appointment, onClose, onRescheduled }: Props) 
     if (!appointment || !dayValue) { setBookedSlots(new Set()); return }
     const dayStart = new Date(`${dayValue}T00:00:00`)
     const dayEnd = new Date(`${dayValue}T23:59:59.999`)
-    supabase
-      .from('slot_locks')
-      .select('slot_start')
-      .eq('doctor_id', appointment.doctorId)
-      .gte('slot_start', dayStart.toISOString())
-      .lte('slot_start', dayEnd.toISOString())
-      .gt('expires_at', new Date().toISOString())
-      .then(({ data }) => {
-        if (!data) { setBookedSlots(new Set()); return }
-        setBookedSlots(new Set(data.map((row: any) => {
-          const d = new Date(row.slot_start)
-          const h = d.getHours(), m = d.getMinutes()
-          const meridiem = h >= 12 ? 'PM' : 'AM'
-          const h12 = h % 12 === 0 ? 12 : h % 12
-          return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
-        })))
-      })
+
+    const fetchBookedSlots = () => {
+      supabase
+        .from('slot_locks')
+        .select('slot_start')
+        .eq('doctor_id', appointment.doctorId)
+        .gte('slot_start', dayStart.toISOString())
+        .lte('slot_start', dayEnd.toISOString())
+        .gt('expires_at', new Date().toISOString())
+        .then(({ data }) => {
+          if (!data) { setBookedSlots(new Set()); return }
+          setBookedSlots(new Set(data.map((row: any) => {
+            const d = new Date(row.slot_start)
+            const h = d.getHours(), m = d.getMinutes()
+            const meridiem = h >= 12 ? 'PM' : 'AM'
+            const h12 = h % 12 === 0 ? 12 : h % 12
+            return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${meridiem}`
+          })))
+        })
+    }
+
+    fetchBookedSlots()
+
+    // Another patient booking/cancelling the same day while this sheet is
+    // open must flip that slot's availability live — mirrors the booking
+    // page's identical subscription (this modal previously fetched once and
+    // never updated until re-opened).
+    const channel = supabase
+      .channel(`reschedule-slot-locks-${appointment.doctorId}-${dayValue}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${appointment.doctorId}` },
+        () => fetchBookedSlots()
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
   }, [appointment?.doctorId, dayValue])
 
   async function submitReschedule() {
@@ -215,7 +240,7 @@ export function RescheduleModal({ appointment, onClose, onRescheduled }: Props) 
                 <div className="flex flex-wrap gap-2 mb-6">
                   {slots.map(slot => {
                     const isBooked = bookedSlots.has(slot)
-                    const isPast = !isBooked && isSlotPast(dayValue, slot)
+                    const isPast = !isBooked && isSlotPast(dayValue, slot, nowMs)
                     const isDisabled = isBooked || isPast
                     return (
                       <button

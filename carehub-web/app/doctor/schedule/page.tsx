@@ -6,6 +6,7 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 import { formatDateTime } from '@/lib/utils'
 import Link from 'next/link'
 import { MessageCircle, Phone, Video, CalendarDays, XCircle, Clock, Ban } from 'lucide-react'
+import { AppointmentDetailsModal, type AppointmentDetails } from '@/components/doctor/AppointmentDetailsModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,7 +26,7 @@ interface ScheduledConsultation {
   scheduled_at: string | null
   created_at: string
   patient_amount: number
-  patient: { full_name: string } | null
+  patient: { full_name: string; profile_photo_url: string | null } | null
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -107,6 +108,7 @@ export default function DoctorSchedulePage() {
 
   const [consultations, setConsultations] = useState<ScheduledConsultation[]>([])
   const [selectedDay, setSelectedDay] = useState(toMonIndex(new Date())) // 0=Mon
+  const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
 
   // Load consultations: all active/pending/scheduled + completed within this
   // week. Re-run on Realtime changes (below) so a newly-paid or rescheduled
@@ -121,13 +123,13 @@ export default function DoctorSchedulePage() {
     const [{ data: activePending }, { data: weekCompleted }] = await Promise.all([
       client
         .from('consultations')
-        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
+        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name, profile_photo_url)')
         .eq('doctor_id', doctorProfileId)
         .in('status', ['pending', 'active', 'scheduled'])
         .order('scheduled_at', { ascending: true }),
       client
         .from('consultations')
-        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name)')
+        .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name, profile_photo_url)')
         .eq('doctor_id', doctorProfileId)
         .in('status', ['completed', 'cancelled'])
         .gte('created_at', weekStart.toISOString())
@@ -482,10 +484,23 @@ export default function DoctorSchedulePage() {
         <div className="flex flex-col gap-2 mb-6">
           {upcoming.map(appt => {
             const TypeIcon = TYPE_ICONS[appt.type] ?? MessageCircle
+            const photoUrl = appt.patient?.profile_photo_url
             return (
-            <div key={appt.id} className="card p-4 flex items-center gap-3">
-              <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0">
-                <TypeIcon size={20} className="text-ink-black/60" />
+            <button
+              key={appt.id}
+              onClick={() => setDetailsAppt({
+                id: appt.id, type: appt.type, status: appt.status,
+                patientName: appt.patient?.full_name ?? 'Patient', patientPhotoUrl: photoUrl,
+                whenLabel: formatApptDate(appt.scheduled_at ?? appt.created_at),
+              })}
+              className="card p-4 flex items-center gap-3 text-left w-full hover:bg-cloud-grey/40 transition-colors"
+            >
+              <div className="w-11 h-11 rounded-xl bg-cloud-grey flex items-center justify-center flex-shrink-0 overflow-hidden">
+                {photoUrl ? (
+                  <img src={photoUrl} alt={appt.patient?.full_name ?? 'Patient'} className="w-11 h-11 object-cover" />
+                ) : (
+                  <TypeIcon size={20} className="text-ink-black/60" />
+                )}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-montserrat font-semibold text-sm text-ink-black">{appt.patient?.full_name ?? 'Patient'}</p>
@@ -494,7 +509,7 @@ export default function DoctorSchedulePage() {
               <span className="text-[11px] font-bold px-3 py-1 rounded-full bg-[#EFF6FF] text-int-blue flex-shrink-0">
                 Upcoming
               </span>
-            </div>
+            </button>
             )
           })}
         </div>
@@ -517,9 +532,25 @@ export default function DoctorSchedulePage() {
           <div className="flex flex-col divide-y divide-cloud-grey">
             {consultations.map(c => {
               const TypeIcon = TYPE_ICONS[c.type] ?? MessageCircle
+              const photoUrl = c.patient?.profile_photo_url
               return (
-              <div key={c.id} className="py-3 flex items-center gap-3">
-                <TypeIcon size={20} className="flex-shrink-0 text-ink-black/60" />
+              <div
+                key={c.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setDetailsAppt({
+                  id: c.id, type: c.type, status: c.status,
+                  patientName: c.patient?.full_name ?? 'Patient', patientPhotoUrl: photoUrl,
+                  whenLabel: formatDateTime((c.started_at ?? c.created_at) as string),
+                })}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') (e.currentTarget as HTMLElement).click() }}
+                className="py-3 flex items-center gap-3 text-left w-full cursor-pointer hover:bg-cloud-grey/40 transition-colors"
+              >
+                {photoUrl ? (
+                  <img src={photoUrl} alt={c.patient?.full_name ?? 'Patient'} className="w-7 h-7 rounded-full object-cover flex-shrink-0" />
+                ) : (
+                  <TypeIcon size={20} className="flex-shrink-0 text-ink-black/60" />
+                )}
                 <div className="flex-1 min-w-0">
                   <p className="font-montserrat font-bold text-sm text-ink-black">{c.patient?.full_name ?? 'Patient'}</p>
                   <p className="text-ink-black/40 text-xs">{formatDateTime((c.started_at ?? c.created_at) as string)}</p>
@@ -532,7 +563,11 @@ export default function DoctorSchedulePage() {
                     <span className="text-xs text-teal-green font-bold">ETB {c.patient_amount}</span>
                   )}
                   {c.status === 'active' && (
-                    <Link href={`/doctor/consultation/${c.type}/${c.id}`} className="text-xs font-bold text-int-blue hover:underline">
+                    <Link
+                      href={`/doctor/consultation/${c.type}/${c.id}`}
+                      onClick={e => e.stopPropagation()}
+                      className="text-xs font-bold text-int-blue hover:underline"
+                    >
                       Resume →
                     </Link>
                   )}
@@ -594,6 +629,8 @@ export default function DoctorSchedulePage() {
           </button>
         </div>
       </div>
+
+      <AppointmentDetailsModal appt={detailsAppt} onClose={() => setDetailsAppt(null)} />
     </div>
   )
 }

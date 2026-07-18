@@ -105,8 +105,13 @@ Deno.serve(async (req: Request) => {
 
   const chapaKey = Deno.env.get('CHAPA_SECRET_KEY')
   if (!chapaKey) {
+    console.error('[chapa-webhook] CHAPA_SECRET_KEY is not set in this environment')
     return new Response('Payment service not configured', { status: 500 })
   }
+  const maskedKey = chapaKey.length > 12
+    ? `${chapaKey.slice(0, 12)}${'*'.repeat(chapaKey.length - 12)}`
+    : '***'
+  console.log(`[chapa-webhook] Chapa key loaded=${maskedKey} verifying tx_ref=${trx_ref}`)
 
   // Verify with Chapa — never trust the webhook alone without verification
   let verifyData: ChapaVerifyResponse
@@ -115,6 +120,8 @@ Deno.serve(async (req: Request) => {
       headers: { 'Authorization': `Bearer ${chapaKey}` },
     })
     verifyData = await resp.json() as ChapaVerifyResponse
+    console.log('[chapa-webhook] Chapa verify HTTP status:', resp.status)
+    console.log('[chapa-webhook] Chapa verify response body:', JSON.stringify(verifyData))
   } catch (err) {
     console.error('[chapa-webhook] Verify error:', err)
     if (req.method === 'GET') {
@@ -127,6 +134,35 @@ Deno.serve(async (req: Request) => {
 
   if (!paid) {
     console.warn('[chapa-webhook] Payment not successful:', verifyData)
+
+    // Release the reserved slot immediately instead of leaving it locked
+    // until the 10-minute slot_locks TTL / 30-minute stale-payment cron
+    // sweep gets to it — a failed payment must free the slot for other
+    // patients right away, per the "release slot automatically" requirement.
+    try {
+      const supabase = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+      )
+      const { data: failedRow } = await supabase
+        .from('consultations')
+        .select('id')
+        .eq('chapa_tx_ref', trx_ref)
+        .eq('status', 'pending_payment')
+        .maybeSingle()
+
+      if (failedRow?.id) {
+        await supabase.from('slot_locks').delete().eq('consultation_id', failedRow.id)
+        await supabase
+          .from('consultations')
+          .update({ status: 'cancelled', payment_status: 'failed' })
+          .eq('id', failedRow.id)
+          .eq('status', 'pending_payment')
+      }
+    } catch (err) {
+      console.error('[chapa-webhook] immediate slot release on payment failure failed:', err)
+    }
+
     if (req.method === 'GET') {
       return new Response(FAILED_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } })
     }
@@ -168,20 +204,20 @@ Deno.serve(async (req: Request) => {
   try {
     const { data: pendingRow } = await supabase
       .from('consultations')
-      .select('id, created_at, scheduled_at')
+      .select('id, created_at, scheduled_at, is_on_demand')
       .eq('chapa_tx_ref', trx_ref)
       .eq('status', 'pending_payment')
       .maybeSingle()
 
     if (pendingRow?.scheduled_at && pendingRow?.created_at) {
-      // "Now" bookings are inserted with scheduled_at == the booking moment
-      // (see BookingModal: p_slot_start = new Date().toISOString() when
-      // timing === 'now'), so scheduled_at sitting within ~1 minute of
-      // created_at reliably identifies an on-demand booking without needing
-      // a dedicated column.
-      const isOnDemand = Math.abs(
-        new Date(pendingRow.scheduled_at).getTime() - new Date(pendingRow.created_at).getTime()
-      ) < 60_000
+      // is_on_demand is set once, authoritatively, by book_appointment_slot()
+      // at booking time — read directly. Falls back to the proximity
+      // heuristic only for rows booked before that column existed.
+      const isOnDemand = pendingRow.is_on_demand != null
+        ? pendingRow.is_on_demand
+        : Math.abs(
+            new Date(pendingRow.scheduled_at).getTime() - new Date(pendingRow.created_at).getTime()
+          ) < 60_000
 
       await supabase
         .from('consultations')

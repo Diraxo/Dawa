@@ -33,6 +33,7 @@ import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } fr
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { formatCallDuration } from '@/lib/callDuration'
@@ -129,6 +130,14 @@ export default function DoctorPhoneConsultationScreen() {
   const { userId, isStreamConnected } = useAuthStore()
   const { getToken } = useAuth()
   const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
+
+  // Auto-clear: reaching this call screen at all — whether via the
+  // notification, the OS call UI, or the in-app queue — means the
+  // corresponding notification has been handled; mark it read.
+  useEffect(() => {
+    if (!consultationId || !userId) return
+    markNotificationsReadForConsultation(supabase, userId, consultationId)
+  }, [consultationId, userId])
 
   const [muted, setMuted] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(false)

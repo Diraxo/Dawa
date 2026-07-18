@@ -31,8 +31,12 @@ interface Review {
   rating: number
   comment: string
   created_at: string
-  patient: { full_name: string } | null
+  consultation_type: string | null
+  patient_name: string
+  patient_photo_url: string | null
 }
+
+const REVIEWS_PAGE_SIZE = 5
 
 const CONSULT_TYPES = [
   { key: 'chat', icon: MessageCircle, label: 'Chat Consultation', desc: 'Text messaging, images, voice notes', priceKey: 'chat_price' as const, iconBg: 'bg-teal-green/10', iconColor: 'text-teal-green' },
@@ -48,6 +52,9 @@ export default function DoctorProfilePage() {
   const [loading, setLoading] = useState(true)
   const [selectedType, setSelectedType] = useState<string | null>(null)
   const [imageFullscreen, setImageFullscreen] = useState(false)
+  const [reviewsOffset, setReviewsOffset] = useState(0)
+  const [hasMoreReviews, setHasMoreReviews] = useState(true)
+  const [loadingMoreReviews, setLoadingMoreReviews] = useState(false)
 
   // Called on mount, then once more when the realtime channel below reaches
   // SUBSCRIBED — reconciles a toggle that fired during the join-latency
@@ -62,17 +69,36 @@ export default function DoctorProfilePage() {
         .eq('id', id)
         .eq('status', 'approved')
         .single(),
-      supabase
-        .from('reviews')
-        .select('id, rating, comment, created_at, patient:users!patient_id(full_name)')
-        .eq('doctor_id', id)
-        .order('created_at', { ascending: false })
-        .limit(10),
+      // One review per patient (their latest), live-joined to the current
+      // name/photo, bypassing users RLS via a SECURITY DEFINER RPC.
+      supabase.rpc('get_doctor_reviews', {
+        p_doctor_id: id as string,
+        p_limit: REVIEWS_PAGE_SIZE,
+        p_offset: 0,
+      }),
     ]).then(([{ data: doc }, { data: revs }]) => {
       setDoctor(doc ? reconcile(doc as unknown as DoctorProfile) : null)
-      setReviews((revs ?? []) as unknown as Review[])
+      const rows = (revs ?? []) as unknown as Review[]
+      setReviews(rows)
+      setHasMoreReviews(rows.length === REVIEWS_PAGE_SIZE)
+      setReviewsOffset(rows.length)
       setLoading(false)
     })
+  }
+
+  async function loadMoreReviews() {
+    if (loadingMoreReviews || !hasMoreReviews) return
+    setLoadingMoreReviews(true)
+    const { data } = await supabase.rpc('get_doctor_reviews', {
+      p_doctor_id: id as string,
+      p_limit: REVIEWS_PAGE_SIZE,
+      p_offset: reviewsOffset,
+    })
+    const rows = (data ?? []) as unknown as Review[]
+    setReviews(prev => [...prev, ...rows])
+    setHasMoreReviews(rows.length === REVIEWS_PAGE_SIZE)
+    setReviewsOffset(prev => prev + rows.length)
+    setLoadingMoreReviews(false)
   }
 
   useEffect(() => {
@@ -306,34 +332,53 @@ export default function DoctorProfilePage() {
         {reviews.length === 0 ? (
           <div className="text-center py-8">
             <MessageCircle size={28} className="mx-auto mb-2 text-steel-grey" />
-            <p className="text-ink-black/50 text-sm">No reviews yet. Be the first!</p>
+            <p className="text-ink-black/50 text-sm">No reviews yet. Be the first patient to review this doctor.</p>
           </div>
         ) : (
-          <div className="flex flex-col divide-y divide-steel-grey">
-            {reviews.map(r => (
-              <div key={r.id} className="py-4">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-gradient-interactive flex items-center justify-center text-white text-xs font-bold">
-                      {r.patient?.full_name?.charAt(0) ?? 'P'}
+          <>
+            <div className="flex flex-col divide-y divide-steel-grey">
+              {reviews.map(r => (
+                <div key={r.id} className="py-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      {r.patient_photo_url ? (
+                        <img src={r.patient_photo_url} alt={r.patient_name} className="w-8 h-8 rounded-full object-cover" />
+                      ) : (
+                        <div className="w-8 h-8 rounded-full bg-gradient-interactive flex items-center justify-center text-white text-xs font-bold">
+                          {r.patient_name.charAt(0)}
+                        </div>
+                      )}
+                      <span className="font-montserrat font-semibold text-sm text-ink-black">
+                        {r.patient_name}
+                      </span>
                     </div>
-                    <span className="font-montserrat font-semibold text-sm text-ink-black">
-                      {r.patient?.full_name ?? 'Patient'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <div className="flex text-sm">{starsDisplay(r.rating)}</div>
+                      <span className="text-ink-black/40 text-xs">
+                        {new Date(r.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex text-sm">{starsDisplay(r.rating)}</div>
-                    <span className="text-ink-black/40 text-xs">
-                      {new Date(r.created_at).toLocaleDateString()}
-                    </span>
+                  {r.comment && (
+                    <p className="text-ink-black/60 text-sm leading-relaxed ml-10">{r.comment}</p>
+                  )}
+                  <div className="flex items-center gap-1 ml-10 mt-1.5">
+                    <span className="text-success text-xs">✓</span>
+                    <span className="text-xs font-semibold text-teal-green">Verified Consultation</span>
                   </div>
                 </div>
-                {r.comment && (
-                  <p className="text-ink-black/60 text-sm leading-relaxed ml-10">{r.comment}</p>
-                )}
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+            {hasMoreReviews && (
+              <button
+                onClick={loadMoreReviews}
+                disabled={loadingMoreReviews}
+                className="btn-outline w-full mt-4 h-11 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {loadingMoreReviews ? 'Loading…' : 'Show More'}
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

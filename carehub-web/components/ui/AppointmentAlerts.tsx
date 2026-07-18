@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useUser } from '@clerk/nextjs'
 import { useRouter, usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Bell, CheckCircle2, XCircle, ClipboardList, FileEdit, Star, Clock, Building2 } from 'lucide-react'
+import { useWebPushSubscription } from '@/hooks/useWebPushSubscription'
+import { Bell, CheckCircle2, XCircle, ClipboardList, FileEdit, Star, Clock, Building2, LogIn, LogOut } from 'lucide-react'
 
 interface NotificationRow {
   id: string
@@ -25,6 +26,9 @@ const TYPE_ICONS: Record<string, typeof Bell> = {
   review_received: Star,
   appointment_reminder: Clock,
   appointment_start: Building2,
+  completed: CheckCircle2,
+  patient_joined: LogIn,
+  patient_left: LogOut,
 }
 
 function resolveUrl(n: NotificationRow, role: string): string {
@@ -49,6 +53,8 @@ function resolveUrl(n: NotificationRow, role: string): string {
       return consultationId
         ? `/patient/consultation/${consultationType}/${consultationId}`
         : '/patient/appointments'
+    case 'waiting':
+      return consultationId ? `/patient/waiting/${consultationId}` : '/patient/appointments'
     case 'consultation_summary':
       return consultationId ? `/patient/summary/${consultationId}` : '/patient/appointments'
     case 'profile':
@@ -60,6 +66,7 @@ function resolveUrl(n: NotificationRow, role: string): string {
 
 export default function AppointmentAlerts() {
   const { user, isSignedIn } = useUser()
+  useWebPushSubscription()
   const router = useRouter()
   const pathname = usePathname()
   const [alerts, setAlerts] = useState<NotificationRow[]>([])
@@ -104,8 +111,28 @@ export default function AppointmentAlerts() {
 
         if (cancelled || !rows || rows.length === 0) return
 
-        for (const n of rows) {
-          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        // 'new_request' (doctor recipient) already gets a full, single-source-of-truth
+        // presentation from IncomingRequestOverlay — its own modal, ring sound, and
+        // browser notification. Showing this toast/browser-notification too would be a
+        // second, redundant incoming-request UI for the exact same event (see Issue 1
+        // of the incoming-consultation-notification stabilization spec). Still mark
+        // these rows read below so they don't linger as unread.
+        const displayRows = userRoleRef.current === 'doctor'
+          ? (rows as NotificationRow[]).filter(r => r.type !== 'new_request')
+          : (rows as NotificationRow[])
+
+        // Browser (system) notifications are for when the tab isn't in front of the
+        // user — a focused, visible tab already gets the in-page toast below, so a
+        // system notification on top of that would just be a redundant duplicate.
+        const tabIsBackgrounded = typeof document !== 'undefined'
+          && (document.hidden || !document.hasFocus())
+
+        for (const n of displayRows) {
+          // Never show "Tap to join"/etc. for the exact consultation the user is
+          // already on — a backgrounded tab can still be sitting on that page
+          // (e.g. a second monitor, or the OS just took focus away momentarily).
+          const alreadyOnTarget = pathnameRef.current.startsWith(resolveUrl(n as NotificationRow, userRoleRef.current))
+          if (tabIsBackgrounded && !alreadyOnTarget && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
             try {
               const doctorPhotoUrl = ((n.data_json as Record<string, string> | null) ?? {}).doctorPhotoUrl
               const browserNotif = new Notification(n.title, { body: n.body, icon: doctorPhotoUrl || '/favicon.ico' })
@@ -122,7 +149,7 @@ export default function AppointmentAlerts() {
         }
 
         setAlerts(prev =>
-          [...(rows as NotificationRow[]).filter(r => {
+          [...displayRows.filter(r => {
             if (prev.some(p => p.id === r.id)) return false
             // Suppress if the patient is already on the target page
             const url = resolveUrl(r, userRoleRef.current)
@@ -152,7 +179,11 @@ export default function AppointmentAlerts() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn, user?.id])
 
-  if (alerts.length === 0) return null
+  // Never interrupt a live consultation screen with an unrelated toast
+  // (e.g. a different patient's new request) — matches the suppression
+  // IncomingRequestOverlay already applies to its own modal/badge.
+  const onConsultationScreen = pathname.startsWith('/doctor/consultation/') || pathname.startsWith('/patient/consultation/')
+  if (onConsultationScreen || alerts.length === 0) return null
 
   return (
     <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-[calc(100vw-2rem)] sm:max-w-sm">

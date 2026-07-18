@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
-import { getAuthClient } from '@/lib/supabase'
+import { getAuthClient, supabase } from '@/lib/supabase'
 import { formatDateTime } from '@/lib/utils'
 import Link from 'next/link'
 import { MessageCircle, Phone, Video, ClipboardList } from 'lucide-react'
+import { AppointmentDetailsModal, type AppointmentDetails } from '@/components/doctor/AppointmentDetailsModal'
 
 interface Consultation {
   id: string
@@ -18,7 +19,20 @@ interface Consultation {
   patient_amount: number
   doctor_amount: number
   patient_id: string | null
-  patient: { full_name: string } | null
+  patient: { full_name: string; profile_photo_url: string | null } | null
+  status_changed_at: string
+  doctor_viewed_at: string | null
+}
+
+const CONSULTATIONS_SELECT =
+  'id, type, status, started_at, scheduled_at, ended_at, created_at, patient_amount, doctor_amount, patient_id, patient:users!patient_id(full_name, profile_photo_url), status_changed_at, doctor_viewed_at'
+
+// Unread = the doctor has never opened the tab this row currently lives in
+// since it last changed status. Source of truth: consultations.doctor_viewed_at
+// vs. consultations.status_changed_at (see migration 071) — kept identical to
+// mobile's isUnread() in app/(doctor)/(tabs)/consultations.tsx.
+function isUnread(c: Consultation): boolean {
+  return !c.doctor_viewed_at || new Date(c.doctor_viewed_at) < new Date(c.status_changed_at)
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -57,6 +71,10 @@ function toFilterBucket(status: string): string {
   return 'other'
 }
 
+function filterMatches(c: Consultation, filter: string): boolean {
+  return filter === 'all' || toFilterBucket(c.status) === filter
+}
+
 export default function DoctorConsultationsPage() {
   const { user } = useUser()
   const { getToken } = useAuth()
@@ -64,6 +82,23 @@ export default function DoctorConsultationsPage() {
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
+  const [profileId, setProfileId] = useState<string | null>(null)
+  const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
+
+  // Marks every currently-unread consultation visible under `f` as viewed —
+  // clears that filter's badge immediately (locally, and in the DB so
+  // mobile and any other session see the same read state without a refresh).
+  const markFilterRead = useCallback((f: string, items: Consultation[]) => {
+    const unreadIds = items.filter(c => filterMatches(c, f) && isUnread(c)).map(c => c.id)
+    if (unreadIds.length === 0) return
+    const now = new Date().toISOString()
+    setConsultations(prev => prev.map(c => (unreadIds.includes(c.id) ? { ...c, doctor_viewed_at: now } : c)))
+    getToken().then(token => {
+      if (!token) return
+      getAuthClient(token).from('consultations').update({ doctor_viewed_at: now }).in('id', unreadIds).then(() => {})
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getToken])
 
   useEffect(() => {
     if (!user) return
@@ -75,19 +110,56 @@ export default function DoctorConsultationsPage() {
       if (!ud) return
       const { data: dp } = await client.from('doctor_profiles').select('id').eq('user_id', ud.id).single()
       if (!dp) return
+      setProfileId(dp.id)
       const { data } = await client
         .from('consultations')
-        .select('id, type, status, started_at, scheduled_at, ended_at, created_at, patient_amount, doctor_amount, patient_id, patient:users!patient_id(full_name)')
+        .select(CONSULTATIONS_SELECT)
         .eq('doctor_id', dp.id)
         .order('created_at', { ascending: false })
-      setConsultations((data ?? []) as unknown as Consultation[])
+      const items = (data ?? []) as unknown as Consultation[]
+      setConsultations(items)
       setLoading(false)
+      // The page always mounts fresh on "All" (Issue 1) — opening it means
+      // the doctor is now looking at every row, so clear every badge.
+      markFilterRead('all', items)
     }
     load()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  const filtered = (filter === 'all' ? consultations : consultations.filter(c => toFilterBucket(c.status) === filter))
+  // Live-refresh whenever any of this doctor's consultations change (new
+  // incoming request, status change, etc.) so filter badges update instantly
+  // while the doctor is sitting on this page — no refresh or reopen needed.
+  useEffect(() => {
+    if (!profileId) return
+    const channel = supabase
+      .channel(`doctor-consultations-${profileId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
+        async () => {
+          const token = await getToken()
+          if (!token) return
+          const { data } = await getAuthClient(token)
+            .from('consultations')
+            .select(CONSULTATIONS_SELECT)
+            .eq('doctor_id', profileId)
+            .order('created_at', { ascending: false })
+          if (data) setConsultations(data as unknown as Consultation[])
+        }
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId])
+
+  const handleFilterClick = (f: string) => {
+    setFilter(f)
+    markFilterRead(f, consultations)
+  }
+
+  const filtered = consultations
+    .filter(c => filterMatches(c, filter))
     .filter(c => !search.trim() || (c.patient?.full_name ?? '').toLowerCase().includes(search.trim().toLowerCase()))
 
   return (
@@ -107,14 +179,24 @@ export default function DoctorConsultationsPage() {
       </div>
 
       <div className="flex gap-2 flex-wrap mb-5">
-        {['all', 'pending', 'active', 'completed', 'cancelled'].map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`h-9 px-4 rounded-2xl text-sm font-semibold capitalize transition-colors ${
-              filter === f ? 'bg-gradient-interactive text-white' : 'bg-white border border-steel-grey text-ink-black/60 hover:border-int-blue'
-            }`}>
-            {f}
-          </button>
-        ))}
+        {['all', 'pending', 'active', 'completed', 'cancelled'].map(f => {
+          const unreadCount = consultations.filter(c => filterMatches(c, f) && isUnread(c)).length
+          return (
+            <button key={f} onClick={() => handleFilterClick(f)}
+              className={`h-9 px-4 rounded-2xl text-sm font-semibold capitalize transition-colors flex items-center gap-2 ${
+                filter === f ? 'bg-gradient-interactive text-white' : 'bg-white border border-steel-grey text-ink-black/60 hover:border-int-blue'
+              }`}>
+              {f}
+              {unreadCount > 0 && (
+                <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${
+                  filter === f ? 'bg-white/30 text-white' : 'bg-steel-grey text-ink-black/60'
+                }`}>
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+          )
+        })}
       </div>
 
       {loading ? (
@@ -128,8 +210,23 @@ export default function DoctorConsultationsPage() {
         <div className="flex flex-col gap-3">
           {filtered.map(c => {
             const TypeIcon = TYPE_ICONS[c.type] ?? ClipboardList
+            const openDetails = () => setDetailsAppt({
+              id: c.id, type: c.type, status: c.status,
+              patientName: c.patient?.full_name ?? 'Patient', patientPhotoUrl: c.patient?.profile_photo_url,
+              whenLabel: formatDateTime(c.started_at ?? c.scheduled_at ?? c.created_at),
+              durationMinutes: c.started_at && c.ended_at
+                ? Math.max(1, Math.round((new Date(c.ended_at).getTime() - new Date(c.started_at).getTime()) / 60000))
+                : undefined,
+            })
             return (
-            <div key={c.id} className="card p-5 flex items-center gap-4">
+            <div
+              key={c.id}
+              role="button"
+              tabIndex={0}
+              onClick={openDetails}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') openDetails() }}
+              className="card p-5 flex items-center gap-4 cursor-pointer hover:bg-cloud-grey/40 transition-colors"
+            >
               <div className="w-12 h-12 rounded-2xl bg-gradient-interactive flex items-center justify-center flex-shrink-0">
                 <TypeIcon size={22} className="text-white" />
               </div>
@@ -140,7 +237,7 @@ export default function DoctorConsultationsPage() {
                   {formatDateTime(c.started_at ?? c.scheduled_at ?? c.created_at)}
                 </p>
               </div>
-              <div className="flex flex-col items-end gap-2 flex-shrink-0">
+              <div className="flex flex-col items-end gap-2 flex-shrink-0" onClick={e => e.stopPropagation()}>
                 <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full capitalize ${STATUS_COLORS[c.status] ?? ''}`}>
                   {c.status}
                 </span>
@@ -180,6 +277,7 @@ export default function DoctorConsultationsPage() {
           })}
         </div>
       )}
+      <AppointmentDetailsModal appt={detailsAppt} onClose={() => setDetailsAppt(null)} />
     </div>
   )
 }

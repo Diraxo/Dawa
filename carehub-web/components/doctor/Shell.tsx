@@ -24,12 +24,13 @@ export default function DoctorShell({ children }: { children: React.ReactNode })
         <>
           <NetworkBanner />
           <StatusAckNotice />
-          <DoctorConsultationRecovery />
-          <ResponsiveShell sidebar={<DoctorSidebar />}>
-            <IncomingRequestOverlay />
-            <AppointmentAlerts />
-            {children}
-          </ResponsiveShell>
+          <DoctorConsultationRecovery>
+            <ResponsiveShell sidebar={<DoctorSidebar />}>
+              <IncomingRequestOverlay />
+              <AppointmentAlerts />
+              {children}
+            </ResponsiveShell>
+          </DoctorConsultationRecovery>
         </>
       )}
     </RoleGuard>

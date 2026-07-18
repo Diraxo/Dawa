@@ -10,11 +10,12 @@ export default function PatientLayout({ children }: { children: React.ReactNode 
   return (
     <RoleGuard allow="patient">
       <NetworkBanner />
-      <ActiveConsultationRecovery />
-      <ResponsiveShell sidebar={<PatientSidebar />}>
-        <AppointmentAlerts />
-        {children}
-      </ResponsiveShell>
+      <ActiveConsultationRecovery>
+        <ResponsiveShell sidebar={<PatientSidebar />}>
+          <AppointmentAlerts />
+          {children}
+        </ResponsiveShell>
+      </ActiveConsultationRecovery>
     </RoleGuard>
   )
 }

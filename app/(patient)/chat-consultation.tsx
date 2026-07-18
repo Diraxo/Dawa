@@ -62,6 +62,7 @@ import { waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
 import { streamClient, preloadImages, getMessageImageUrls } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
 import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
@@ -155,6 +156,16 @@ export default function ChatConsultationScreen() {
     setActiveChannelId(channelId)
     return () => setActiveChannelId(null)
   }, [channelId, setActiveChannelId])
+
+  // Auto-clear: reaching this chat directly (tab nav, deep link, resume)
+  // rather than by tapping the notification still means it's been "handled"
+  // — mark any unread notification for this consultation read so it doesn't
+  // sit stale in the tray/badge/Notification Center.
+  const dbUserId = useAuthStore((s) => s.userId)
+  useEffect(() => {
+    if (!channelId || !dbUserId) return
+    markNotificationsReadForConsultation(supabase, dbUserId, channelId)
+  }, [channelId, dbUserId])
 
   const setActiveConsultationId = useActiveConsultationScreenStore((s) => s.setActiveConsultationId)
   // Tracked so usePushNotifications.ts's foreground handler can suppress a

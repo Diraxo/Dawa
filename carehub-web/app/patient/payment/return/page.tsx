@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { formatFriendlyDateTime } from '@/lib/utils'
 import { CheckCircle2, Clock } from 'lucide-react'
 
 // Chapa redirects here after checkout.
@@ -17,16 +18,6 @@ interface ConfirmedDetails {
   typeLabel:  string
   amount:     number | null
   scheduledAt: string | null
-}
-
-// Mirrors the date/time formatting used on the mobile confirmation screen
-// (payment-return.tsx's formatScheduledAt) so the copy reads the same way
-// across platforms.
-function formatScheduledAt(iso: string): string {
-  const d = new Date(iso)
-  const dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-  const timeStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-  return `${dateStr} at ${timeStr}`
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -47,6 +38,7 @@ export default function PaymentReturnPage() {
   const [bookingTiming, setBookingTiming] = useState<'now' | 'schedule'>('now')
   const [confirmedDetails, setConfirmedDetails] = useState<ConfirmedDetails | null>(null)
   const cancelledRef = useRef(false)
+  const navigatedRef = useRef(false)
   const timingRef = useRef<'now' | 'schedule'>('now')
 
   const cancelConsultation = async (cid: string) => {
@@ -120,7 +112,7 @@ export default function PaymentReturnPage() {
 
         const { data } = await supabase
           .from('consultations')
-          .select('id, payment_status, doctor_id, scheduled_at')
+          .select('id, payment_status, doctor_id, scheduled_at, is_on_demand')
           .eq('id', cid!)
           .single()
 
@@ -128,9 +120,14 @@ export default function PaymentReturnPage() {
 
         if (data?.doctor_id) setDoctorId(data.doctor_id)
 
-        if (data?.scheduled_at) {
-          const scheduledTime = new Date(data.scheduled_at)
-          timingRef.current = scheduledTime > new Date(Date.now() + 60 * 60 * 1000) ? 'schedule' : 'now'
+        // is_on_demand is set once, authoritatively, by book_appointment_slot()
+        // at booking time — never re-derived from scheduled_at here. A prior
+        // `scheduled_at > now + 1h` heuristic misclassified any scheduled slot
+        // booked less than an hour ahead (common with 20-minute slots) as
+        // on-demand, which flipped status to 'waiting_for_doctor' below and
+        // stranded the patient in the on-demand waiting room.
+        if (data?.is_on_demand != null) {
+          timingRef.current = data.is_on_demand ? 'now' : 'schedule'
         }
 
         if (data?.payment_status === 'paid') {
@@ -143,6 +140,17 @@ export default function PaymentReturnPage() {
           // waiting_started_at must be stamped here too, same as the credit path
           // in apply-credit/index.ts — it's the sort key doctor clients queue on
           // and what the patient waiting room displays as "waiting since".
+          //
+          // Guarded to only flip a row still at 'pending_payment': this poll
+          // loop can take up to three minutes, and the chapa-webhook function
+          // runs the same flip (guarded the same way) the moment it verifies
+          // payment — usually seconds before this client-side poll even
+          // notices payment_status is 'paid'. If the doctor accepts in that
+          // window, this write would otherwise land after them and silently
+          // overwrite 'accepted'/'in_progress' back to 'waiting_for_doctor' —
+          // resurrecting the doctor's incoming-request modal for a call
+          // they've already answered and sending the patient to a waiting
+          // room for a consultation that's actually already live.
           await supabase
             .from('consultations')
             .update({
@@ -150,31 +158,100 @@ export default function PaymentReturnPage() {
               ...(timingRef.current === 'now' ? { waiting_started_at: new Date().toISOString() } : {}),
             })
             .eq('id', cid!)
+            .eq('status', 'pending_payment')
             .eq('payment_status', 'paid')
 
           // Fetch the doctor/type/amount so the confirmation screen can show
           // them together — the fields above (`select`) only cover polling.
           const { data: fullRow } = await supabase
             .from('consultations')
-            .select('type, patient_amount, doctor_profiles!doctor_id(users!inner(full_name))')
+            .select('type, status, patient_amount, doctor_profiles!doctor_id(users!inner(full_name))')
             .eq('id', cid!)
             .maybeSingle()
           const doctorName = (fullRow as any)?.doctor_profiles?.users?.full_name ?? 'your doctor'
           const typeLabel = TYPE_LABEL[(fullRow as any)?.type ?? 'chat'] ?? 'Consultation'
           const amount = (fullRow as any)?.patient_amount != null ? Number((fullRow as any).patient_amount) : null
+          const liveStatus = (fullRow as any)?.status ?? null
+          const liveType = (fullRow as any)?.type ?? 'chat'
 
           setConfirmedDetails({ doctorName, typeLabel, amount, scheduledAt: data.scheduled_at ?? null })
           setBookingTiming(timingRef.current)
           setStatus('paid')
 
-          // "Now" bookings auto-redirect to the waiting room. Scheduled
-          // bookings stay on this screen — the patient explicitly continues
-          // to their upcoming appointment instead of being auto-redirected,
-          // matching the mobile confirmation screen.
+          // "Now" bookings auto-redirect. If the doctor already accepted
+          // while this screen was polling for payment confirmation, go
+          // straight into the live consultation instead of the waiting room.
+          // Scheduled bookings stay on this screen — the patient explicitly
+          // continues to their upcoming appointment instead of being
+          // auto-redirected, matching the mobile confirmation screen.
           if (timingRef.current === 'now') {
-            setTimeout(() => {
-              router.replace(`/patient/waiting/${cid}`)
-            }, 1500)
+            // Routes off whatever status is passed in — never off state
+            // captured earlier — so a decision made after a delay (realtime
+            // event, the fallback timer below) always reflects what's
+            // actually in the DB right now, not what it was when this
+            // screen started waiting.
+            const navigateForStatus = (navStatus: string | null, navType?: string | null) => {
+              if (navigatedRef.current || cancelledRef.current) return
+              const t = navType ?? liveType
+              if (navStatus === 'accepted' || navStatus === 'in_progress' || navStatus === 'active') {
+                navigatedRef.current = true
+                router.replace(`/patient/consultation/${t}/${cid}`)
+              } else if (navStatus === 'completed') {
+                navigatedRef.current = true
+                router.replace(`/patient/summary/${cid}`)
+              } else if (navStatus && navStatus !== 'pending_payment') {
+                // waiting_for_doctor, declined, cancelled, missed,
+                // call_declined, ended_abnormally — /patient/waiting already
+                // owns the correct UI (including the credit screen) for
+                // every one of these, so route there rather than
+                // duplicating that logic here.
+                navigatedRef.current = true
+                router.replace(`/patient/waiting/${cid}`)
+              }
+            }
+
+            // The doctor may accept (or decline) while this screen is
+            // showing "Payment Confirmed!" — subscribe so that transition is
+            // caught the instant it happens instead of only being noticed by
+            // the fixed-delay fallback below, which would otherwise still be
+            // able to send the patient into the waiting room for a call
+            // already answered.
+            const channel = supabase
+              .channel(`payment-return-${cid}-${Date.now()}`)
+              .on(
+                'postgres_changes',
+                { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${cid}` },
+                (payload) => {
+                  const row = payload.new as { status?: string; type?: string }
+                  navigateForStatus(row?.status ?? null, row?.type ?? null)
+                },
+              )
+              .subscribe()
+
+            // Navigate immediately if the doctor already acted before we
+            // even finished payment verification.
+            navigateForStatus(liveStatus, liveType)
+
+            if (!navigatedRef.current) {
+              setTimeout(async () => {
+                if (cancelledRef.current || navigatedRef.current) {
+                  supabase.removeChannel(channel)
+                  return
+                }
+                // Re-fetch rather than reusing `liveStatus` — it was
+                // captured before this wait, and the doctor may have
+                // accepted since.
+                const { data: freshRow } = await supabase
+                  .from('consultations')
+                  .select('status, type')
+                  .eq('id', cid!)
+                  .single()
+                navigateForStatus(freshRow?.status ?? 'waiting_for_doctor', freshRow?.type ?? liveType)
+                supabase.removeChannel(channel)
+              }, 1500)
+            } else {
+              supabase.removeChannel(channel)
+            }
           }
           return
         }
@@ -231,7 +308,7 @@ export default function PaymentReturnPage() {
     // appointment rather than being auto-redirected. Matches the mobile
     // confirmation screen (app/(patient)/payment-return.tsx).
     if (bookingTiming === 'schedule') {
-      const formattedWhen = confirmedDetails?.scheduledAt ? formatScheduledAt(confirmedDetails.scheduledAt) : null
+      const formattedWhen = confirmedDetails?.scheduledAt ? formatFriendlyDateTime(confirmedDetails.scheduledAt) : null
       return (
         <div className="min-h-screen flex items-center justify-center bg-cloud-grey px-4">
           <div className="card max-w-sm w-full p-8 text-center">

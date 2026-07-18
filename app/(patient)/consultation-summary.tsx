@@ -35,6 +35,8 @@ import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
+import { useAuthStore } from '@/store/authStore'
 import { useTranslation } from 'react-i18next'
 
 interface SummaryData {
@@ -87,6 +89,16 @@ export default function ConsultationSummaryScreen() {
     doctorInitialName ?? doctorName ?? null,
     doctorInitialPhotoUrl
   )
+  // Auto-clear: reaching this screen directly (Appointments tab, deep link)
+  // rather than by tapping the summary_ready/summary_updated notification
+  // still means it's been handled — mark it read so it doesn't sit stale in
+  // the tray/badge/Notification Center.
+  const dbUserId = useAuthStore((s) => s.userId)
+  useEffect(() => {
+    if (!consultationId || !dbUserId) return
+    markNotificationsReadForConsultation(supabase, dbUserId, consultationId)
+  }, [consultationId, dbUserId])
+
   const rawDoctorName = liveDoctorName ?? doctorInitialName ?? doctorName ?? null
   const displayDoctorName = rawDoctorName ? formatDoctorName(normalizeNameCase(rawDoctorName)) : t('doctorLabel')
   const displayDoctorPhotoUrl = liveDoctorPhotoUrl ?? doctorInitialPhotoUrl ?? null

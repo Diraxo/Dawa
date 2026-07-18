@@ -13,6 +13,8 @@ interface Doctor {
   rating_average: number
   total_consultations: number
   is_online: boolean
+  documents_update_allowed: boolean
+  document_review_status: string
   user: { full_name: string; email: string; profile_photo_url: string | null } | null
 }
 
@@ -78,6 +80,48 @@ export default function AdminDoctorsPage() {
         action === 'suspend' ? 'Doctor suspended and notified.' : 'Doctor reinstated and notified.',
         'success'
       )
+    } finally {
+      setProcessing(null)
+    }
+  }
+
+  async function toggleDocumentUpdate(id: string, currentlyAllowed: boolean) {
+    const action = currentlyAllowed ? 'disable_document_update' : 'enable_document_update'
+    setProcessing(id)
+    try {
+      const res = await fetch(`/api/admin/doctors/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        showToast(`Failed: ${data.error ?? res.statusText}`, 'error')
+        return
+      }
+      setDoctors(prev => prev.map(d => d.id === id ? { ...d, documents_update_allowed: data.documentsUpdateAllowed } : d))
+      showToast(data.documentsUpdateAllowed ? 'Document updates enabled for this doctor.' : 'Document updates disabled.', 'success')
+    } finally {
+      setProcessing(null)
+    }
+  }
+
+  async function reviewDocumentUpdate(id: string, approve: boolean) {
+    const action = approve ? 'approve_document_update' : 'reject_document_update'
+    setProcessing(id)
+    try {
+      const res = await fetch(`/api/admin/doctors/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        showToast(`Failed: ${data.error ?? res.statusText}`, 'error')
+        return
+      }
+      setDoctors(prev => prev.map(d => d.id === id ? { ...d, document_review_status: data.documentReviewStatus } : d))
+      showToast(approve ? 'Document update approved. Doctor notified.' : 'Document update rejected. Doctor notified.', 'success')
     } finally {
       setProcessing(null)
     }
@@ -162,7 +206,7 @@ export default function AdminDoctorsPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-steel-grey">
-                {['Photo', 'Doctor', 'Specialty', 'Exp', 'Rating', 'Consultations', 'Status', 'Online', 'Action'].map(h => (
+                {['Photo', 'Doctor', 'Specialty', 'Exp', 'Rating', 'Consultations', 'Status', 'Online', 'Docs', 'Action'].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-[11px] font-bold text-ink-black/40 uppercase tracking-wider">
                     {h}
                   </th>
@@ -171,9 +215,9 @@ export default function AdminDoctorsPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={9} className="px-4 py-8 text-center text-ink-black/40 text-sm">Loading…</td></tr>
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-ink-black/40 text-sm">Loading…</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={9} className="px-4 py-8 text-center text-ink-black/40 text-sm">No doctors found.</td></tr>
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-ink-black/40 text-sm">No doctors found.</td></tr>
               ) : filtered.map((d, i) => {
                 const name = d.user?.full_name ?? '—'
                 const photoUrl = d.user?.profile_photo_url ?? null
@@ -214,6 +258,38 @@ export default function AdminDoctorsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className={`w-2.5 h-2.5 rounded-full ${d.is_online ? 'bg-success' : 'bg-steel-grey'}`} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1.5">
+                        <button
+                          onClick={() => toggleDocumentUpdate(d.id, d.documents_update_allowed)}
+                          disabled={processing === d.id}
+                          className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors disabled:opacity-50 ${
+                            d.documents_update_allowed ? 'bg-success/15 text-success' : 'bg-steel-grey text-ink-black/50'
+                          }`}
+                          title="Toggle whether this doctor can re-upload documents"
+                        >
+                          Update: {d.documents_update_allowed ? 'On' : 'Off'}
+                        </button>
+                        {d.document_review_status === 'pending' && (
+                          <div className="flex gap-1">
+                            <button
+                              onClick={() => reviewDocumentUpdate(d.id, true)}
+                              disabled={processing === d.id}
+                              className="text-[11px] font-semibold px-2 py-1 rounded-lg bg-success/10 text-success hover:bg-success/20 disabled:opacity-50"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => reviewDocumentUpdate(d.id, false)}
+                              disabled={processing === d.id}
+                              className="text-[11px] font-semibold px-2 py-1 rounded-lg bg-danger/10 text-danger hover:bg-danger/20 disabled:opacity-50"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       {(d.status === 'approved' || d.status === 'suspended') && (

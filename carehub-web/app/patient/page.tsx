@@ -89,9 +89,28 @@ export default function PatientHomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Real post-booking statuses are 'scheduled' (paid scheduled booking) and
+  // 'waiting_for_doctor' (on-demand/activated) — 'pending'/'active' were
+  // never actually written by book_appointment_slot(), so this card could
+  // never show a freshly booked appointment. Kept live via a `consultations`
+  // realtime subscription (below) so booking/rescheduling/cancelling updates
+  // this card immediately, matching app/patient/appointments/page.tsx.
   useEffect(() => {
     if (!user) return
-    async function loadAppt() {
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
+    async function loadUpcomingAppointment(client: ReturnType<typeof getAuthClient>, patientId: string) {
+      const { data } = await client
+        .from('consultations')
+        .select('id, type, status, scheduled_at, doctor:doctor_profiles!doctor_id(specialty, user:users(full_name))')
+        .eq('patient_id', patientId)
+        .in('status', ['scheduled', 'waiting_for_doctor', 'accepted', 'in_progress', 'active'])
+        .order('scheduled_at', { ascending: true })
+        .limit(1)
+      setUpcomingAppointment(data?.length ? (data[0] as unknown as UpcomingAppointment) : null)
+    }
+
+    async function init() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
@@ -99,16 +118,28 @@ export default function PatientHomePage() {
       if (!ud) return
       setOwnPhotoUrl((ud as any).profile_photo_url ?? null)
       setOwnUserId((ud as any).id)
-      const { data } = await client
-        .from('consultations')
-        .select('id, type, status, scheduled_at, doctor:doctor_profiles!doctor_id(specialty, user:users(full_name))')
-        .eq('patient_id', (ud as any).id)
-        .in('status', ['pending', 'active'])
-        .order('scheduled_at', { ascending: true })
-        .limit(1)
-      if (data?.length) setUpcomingAppointment((data[0]) as unknown as UpcomingAppointment)
+
+      await loadUpcomingAppointment(client, (ud as any).id)
+
+      const topic = `patient-home-upcoming-${(ud as any).id}`
+      const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
+      if (stale) supabase.removeChannel(stale)
+
+      channel = supabase
+        .channel(topic)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${(ud as any).id}` },
+          async () => {
+            const freshToken = await getToken()
+            if (!freshToken) return
+            await loadUpcomingAppointment(getAuthClient(freshToken), (ud as any).id)
+          }
+        )
+        .subscribe()
     }
-    loadAppt()
+    init()
+    return () => { if (channel) supabase.removeChannel(channel) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
@@ -118,8 +149,11 @@ export default function PatientHomePage() {
   // loadAppt() above once the users row is fetched.
   useEffect(() => {
     if (!ownUserId) return
+    const topic = `own-photo-${ownUserId}`
+    const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
+    if (stale) supabase.removeChannel(stale)
     const channel = supabase
-      .channel(`own-photo-${ownUserId}`)
+      .channel(topic)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${ownUserId}` },

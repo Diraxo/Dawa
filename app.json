@@ -23,11 +23,6 @@
           "fetch",
           "processing",
           "remote-notification",
-          "voip",
-          "audio",
-          "fetch",
-          "processing",
-          "remote-notification",
           "voip"
         ],
         "NSMicrophoneUsageDescription": "Dawa needs microphone access for voice and video consultations.",

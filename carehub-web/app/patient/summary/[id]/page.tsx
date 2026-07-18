@@ -406,6 +406,7 @@ export default function ConsultationSummaryPage() {
           <textarea
             value={comment}
             onChange={e => setComment(e.target.value)}
+            onFocus={e => e.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })}
             placeholder="Leave a comment (optional)…"
             rows={3}
             className="w-full rounded-2xl border border-steel-grey bg-cloud-grey px-4 py-3 text-sm text-ink-black font-montserrat placeholder:text-ink-black/40 focus:outline-none focus:border-int-blue mb-4 resize-none"

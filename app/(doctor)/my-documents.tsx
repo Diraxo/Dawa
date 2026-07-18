@@ -23,6 +23,8 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
+import { isPdfAttachment } from '@/lib/pdfAttachment'
 
 interface DocFile {
   label: string
@@ -74,6 +76,7 @@ export default function MyDocumentsScreen() {
   const [loading, setLoading] = useState(true)
   const [openingDoc, setOpeningDoc] = useState<string | null>(null)
   const [viewerUrl, setViewerUrl] = useState<string | null>(null)
+  const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string } | null>(null)
   const [uploading, setUploading] = useState(false)
 
   const loadInfo = () => {
@@ -168,7 +171,16 @@ export default function MyDocumentsScreen() {
         .from('doctor-documents')
         .createSignedUrl(file.path, 3600)
       if (error || !data?.signedUrl) throw new Error('Could not generate document URL')
-      setViewerUrl(data.signedUrl)
+      // Android's system WebView has no built-in PDF renderer — it either
+      // shows a blank page or hands the file off to a download/viewer
+      // intent, the exact "opens outside the app" bug this is meant to
+      // avoid. Route PDFs through the native react-native-pdf viewer and
+      // keep WebView only for images, which it renders natively.
+      if (isPdfAttachment({ title: file.path })) {
+        setPdfViewer({ url: data.signedUrl, title: file.label })
+      } else {
+        setViewerUrl(data.signedUrl)
+      }
     } catch {
       Alert.alert('Error', 'Could not open the document. Please try again.')
     } finally {
@@ -394,6 +406,13 @@ export default function MyDocumentsScreen() {
           )}
         </View>
       </Modal>
+
+      <PdfViewerModal
+        visible={!!pdfViewer}
+        url={pdfViewer?.url ?? null}
+        title={pdfViewer?.title}
+        onClose={() => setPdfViewer(null)}
+      />
     </SafeAreaView>
   )
 }

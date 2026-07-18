@@ -139,6 +139,7 @@ Deno.serve(async (req: Request) => {
       patient_amount,
       payment_status,
       scheduled_at,
+      is_on_demand,
       patient:users!patient_id ( clerk_id )
     `)
     .eq('id', new_consultation_id)
@@ -177,15 +178,14 @@ Deno.serve(async (req: Request) => {
   if (newFee <= creditAmount) {
     // Full coverage — mark credit used, mark new consultation paid.
     //
-    // Same "now" vs "scheduled" distinction the Chapa path applies in
-    // payment-return.tsx / patient/payment/return: a booking more than an
-    // hour out must become 'scheduled', not 'waiting_for_doctor', or it
-    // fires the doctor's immediate new_request notification and drops the
-    // patient into the waiting room for an appointment that's tomorrow.
-    const scheduledAtMs = (newConsult as any).scheduled_at
-      ? new Date((newConsult as any).scheduled_at).getTime()
-      : Date.now()
-    const isScheduled = scheduledAtMs > Date.now() + 60 * 60 * 1000
+    // is_on_demand is set once, authoritatively, by book_appointment_slot()
+    // at booking time — read directly rather than re-deriving it from
+    // scheduled_at. A prior `scheduled_at > now + 1h` heuristic misclassified
+    // any scheduled slot booked less than an hour ahead (common with
+    // 20-minute slots) as on-demand, firing the doctor's immediate
+    // new_request notification and dropping the patient into the waiting
+    // room for an appointment that hadn't started yet.
+    const isScheduled = !(newConsult as any).is_on_demand
 
     // Guard the write with credit_used=false so two near-simultaneous calls
     // for the same credit can't both succeed — only the first claims it.

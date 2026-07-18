@@ -46,6 +46,7 @@ import { ConsultationActionButtons } from '@/components/ui/ConsultationActionBut
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
+import { CallHeader, ConnectionStatus } from '@/components/consultation/CallHeader'
 import { DraggableSelfView } from '@/components/consultation/DraggableSelfView'
 import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { colors } from '@/constants/colors'
@@ -55,6 +56,7 @@ import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } fr
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
 import { getPersistedCameraOff, setPersistedCameraOff, clearPersistedCameraOff } from '@/lib/callCameraStorage'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
@@ -64,7 +66,6 @@ import { logger } from '@/lib/logger'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
-import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
@@ -127,6 +128,14 @@ export default function VideoConsultationScreen() {
   const { getToken } = useAuth()
   const { setActive, updateElapsed, updateIdentity, updateCallStartedAt, setConnectionStatus } = useActiveConsultationStore()
 
+  // Auto-clear: reaching this call screen at all — whether via the
+  // notification, the OS call UI, or waiting-room recovery — means the
+  // corresponding notification has been handled; mark it read.
+  useEffect(() => {
+    if (!consultationId || !userId) return
+    markNotificationsReadForConsultation(supabase, userId, consultationId)
+  }, [consultationId, userId])
+
   // fromCallkeep='1' → patient answered via OS call screen, skip ringing UI
   const answeredViaCallkeep = fromCallkeep === '1'
   const skipRinging = answeredViaCallkeep || !!resumeElapsed
@@ -134,7 +143,6 @@ export default function VideoConsultationScreen() {
   const [muted, setMuted] = useState(false)
   const [cameraOff, setCameraOff] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(true)
-  const [selfViewHidden, setSelfViewHidden] = useState(false)
   // Driven by Agora's audio volume indication — who's currently talking, for
   // the speaking-indicator pulse (self view when it's the patient, the
   // doctor's avatar/video area when it's the doctor).
@@ -303,6 +311,26 @@ export default function VideoConsultationScreen() {
     ? 'waiting'
     : 'connecting'
 
+  // Header/timer connection status — deliberately driven ONLY by the
+  // DB-derived `state.phase` (identical on both clients via the same
+  // Realtime row), not by this device's local `remoteUid`/video-arrival
+  // signal used above for `callStatus`. That local gate is correct for
+  // deciding what the video area renders (placeholder vs. live stream) but
+  // is inherently asymmetric between the two clients — each side learns of
+  // the other's video at a slightly different time — which is exactly what
+  // caused the doctor and patient screens to disagree on "Connecting" vs
+  // "Connected" and run out-of-sync timers. `localError` is the one
+  // legitimate local-only override: it reflects this device's own Agora
+  // session having genuinely failed, not a difference in how the same
+  // reality is being reported.
+  const connectionStatus: ConnectionStatus = localError
+    ? 'disconnected'
+    : state.phase === 'reconnecting'
+    ? 'reconnecting'
+    : state.phase === 'on_call'
+    ? 'connected'
+    : 'connecting'
+
   const remoteUidRef = useRef<number | null>(null)
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const gracePeriodRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -458,8 +486,8 @@ export default function VideoConsultationScreen() {
   useEffect(() => { updateCallStartedAt(state.callStartedAtMs ?? null) }, [state.callStartedAtMs])
 
   useEffect(() => {
-    setConnectionStatus(callStatus === 'reconnecting' ? 'reconnecting' : callStatus === 'connected' ? 'active' : 'connecting')
-  }, [callStatus])
+    setConnectionStatus(connectionStatus === 'reconnecting' ? 'reconnecting' : connectionStatus === 'connected' ? 'active' : 'connecting')
+  }, [connectionStatus])
 
   // ── Background/foreground: notification + camera lifecycle ───────────────
   // Camera keeps publishing if left untouched while backgrounded, which
@@ -1044,28 +1072,21 @@ export default function VideoConsultationScreen() {
           </View>
         )}
 
-        {/* Top overlay: network quality + timer */}
-        <View style={styles.topOverlay}>
-          {callStatus === 'connected' && networkQuality > 0 && (
-            <View style={styles.netQualityChip}>
-              <Ionicons
-                name="wifi"
-                size={12}
-                color={networkQuality <= 2 ? '#4ADE80' : networkQuality <= 4 ? '#FBBF24' : '#F87171'}
-              />
-              <Text style={[styles.netQualityText, {
-                color: networkQuality <= 2 ? '#4ADE80' : networkQuality <= 4 ? '#FBBF24' : '#F87171'
-              }]}>
-                {networkQuality <= 2 ? 'Excellent' : networkQuality <= 4 ? 'Good' : 'Poor'}
-              </Text>
-            </View>
-          )}
-          <Text style={styles.timerOverlay}>
-            {callStatus === 'connected' ? formatCallDuration(seconds) :
-             callStatus === 'reconnecting' ? 'Reconnecting…' :
-             callStatus === 'connecting' ? 'Connecting…' : '--:--'}
-          </Text>
-        </View>
+        {/* Shared header: timer/status (row 1, driven by the DB-derived
+            connectionStatus, identical on both clients) + chat/switch-camera
+            below it, participant chip centered, info button below status. */}
+        <CallHeader
+          elapsedSeconds={seconds}
+          connectionStatus={connectionStatus}
+          counterpartName={formatDoctorName(doctorName)}
+          counterpartPhotoUrl={doctorPhotoUrl}
+          onChatPress={chatOpen ? closeChat : openChat}
+          chatActive={chatOpen}
+          unreadCount={unreadCount}
+          onSwitchCamera={handleSwitchCamera}
+          onInfoPress={() => setShowInfoSheet(v => !v)}
+          disabled={isConnecting}
+        />
 
         {/* Reconnect countdown */}
         {callStatus === 'reconnecting' && (
@@ -1083,27 +1104,16 @@ export default function VideoConsultationScreen() {
           </View>
         )}
 
-        {/* Self view — draggable, WhatsApp-style floating PiP, starts bottom right */}
+        {/* Self view — draggable, WhatsApp-style floating PiP, starts
+            top-right below the header (chat/switch-camera row), matching the
+            doctor screen's position exactly. Never hidden — a self-view that
+            can disappear entirely was one of the reported bugs. */}
         <DraggableSelfView
-          bottom={20}
+          top={118}
+          canvas={{ uid: 0, sourceType: VideoSourceCamera, renderMode: RenderModeFit }}
           isOff={!(agoraReady && !cameraOff && RtcSurfaceView)}
           isSpeaking={localSpeaking}
-          hidden={selfViewHidden}
-          onHide={() => setSelfViewHidden(true)}
-        >
-          {RtcSurfaceView ? (
-            <RtcSurfaceView
-              canvas={{ uid: 0, sourceType: VideoSourceCamera, renderMode: RenderModeFit }}
-              style={styles.fullFill}
-            />
-          ) : null}
-        </DraggableSelfView>
-
-        {selfViewHidden && (
-          <Pressable style={styles.showSelfBtn} onPress={() => setSelfViewHidden(false)}>
-            <Ionicons name="person-circle-outline" size={20} color={colors.mistWhite} />
-          </Pressable>
-        )}
+        />
       </View>
 
       {/* Controls */}
@@ -1112,16 +1122,6 @@ export default function VideoConsultationScreen() {
           <ControlButton icon={muted ? 'mic-off' : 'mic'} label={muted ? 'Unmute' : 'Mute'} active={muted} disabled={isConnecting} onPress={toggleMute} />
           <ControlButton icon={speakerOn ? 'volume-high' : 'volume-medium'} label="Speaker" active={speakerOn} disabled={isConnecting} onPress={() => setSpeakerOn(s => !s)} />
           <ControlButton icon={cameraOff ? 'videocam-off' : 'videocam'} label={cameraOff ? 'Cam Off' : 'Camera'} active={cameraOff} disabled={isConnecting} onPress={toggleCamera} />
-          <ControlButton icon="camera-reverse" label="Switch" disabled={isConnecting} onPress={handleSwitchCamera} />
-          <View>
-            <ControlButton icon="chatbubble-ellipses" label="Chat" active={chatOpen} disabled={isConnecting} onPress={chatOpen ? closeChat : openChat} />
-            {unreadCount > 0 && !chatOpen && (
-              <View style={styles.unreadBadge}>
-                <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
-              </View>
-            )}
-          </View>
-          <ControlButton icon="information-circle" label="Info" active={showInfoSheet} disabled={isConnecting} onPress={() => setShowInfoSheet(v => !v)} />
           <Pressable style={styles.endBtn} onPress={handleEnd} accessibilityLabel="Leave call" hitSlop={8}>
             <Ionicons name="call" size={28} color={colors.mistWhite} style={{ transform: [{ rotate: '135deg' }] }} />
           </Pressable>
@@ -1261,21 +1261,6 @@ const styles = StyleSheet.create({
   videoPlaceholderText: { fontFamily: fonts.bold, fontSize: 22, color: 'rgba(255,255,255,0.6)' },
   videoNote: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.3)' },
 
-  topOverlay: {
-    position: 'absolute', top: 50, left: 0, right: 0,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20,
-  },
-  timerOverlay: {
-    fontFamily: fonts.medium, fontSize: 16, color: colors.mistWhite,
-    backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6,
-  },
-
-  netQualityChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 6,
-  },
-  netQualityText: { fontFamily: fonts.medium, fontSize: 11 },
-
   remoteMutedBadge: {
     position: 'absolute', bottom: 110, left: 0, right: 0,
     alignItems: 'center', justifyContent: 'center',
@@ -1296,12 +1281,6 @@ const styles = StyleSheet.create({
   },
   reconnectText: { fontFamily: fonts.medium, fontSize: 13, color: '#FDE68A' },
 
-  showSelfBtn: {
-    position: 'absolute', bottom: 20, right: 20,
-    width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.15)',
-  },
-
   // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
   controls: { paddingHorizontal: 12, paddingTop: 16, paddingBottom: 16, backgroundColor: 'rgba(0,0,0,0.85)' },
   controlsRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
@@ -1309,12 +1288,4 @@ const styles = StyleSheet.create({
   ctrlBtnActive: { backgroundColor: '#374151' },
   ctrlBtnDisabled: { backgroundColor: 'rgba(255,255,255,0.05)' },
   endBtn: { alignItems: 'center', justifyContent: 'center', width: 60, height: 60, borderRadius: 30, backgroundColor: colors.error, shadowColor: colors.error, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 10, elevation: 6 },
-
-  unreadBadge: {
-    position: 'absolute', top: -4, right: -4,
-    minWidth: 18, height: 18, borderRadius: 9,
-    backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center',
-    paddingHorizontal: 4, borderWidth: 1.5, borderColor: '#0A0A0A',
-  },
-  unreadBadgeText: { fontFamily: fonts.bold, fontSize: 10, color: '#fff' },
 })

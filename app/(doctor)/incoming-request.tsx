@@ -20,6 +20,7 @@ import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { shadow } from '@/lib/shadow'
 import { createConsultationChannel } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
 import { logger } from '@/lib/logger'
@@ -60,6 +61,15 @@ export default function IncomingRequestScreen() {
     consultationId?:   string
     waitingStartedAt?: string // kept for backwards compat, no longer used
   }>()
+
+  // Auto-clear: reaching this screen directly (Home tab tap, realtime
+  // detection) rather than by tapping the "Incoming Consultation"
+  // notification still means it's been handled — mark it read so it
+  // doesn't sit stale in the tray/badge/Notification Center.
+  useEffect(() => {
+    if (!consultationId || !userId) return
+    markNotificationsReadForConsultation(supabase, userId, consultationId)
+  }, [consultationId, userId])
 
   // Photo may arrive via route param (push-notification path); fall back to
   // a DB fetch when it doesn't (e.g. direct deep-link with a stale param set).

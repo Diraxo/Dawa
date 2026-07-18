@@ -282,7 +282,7 @@ export default function WaitingRoomPage() {
               <Search size={16} /> Choose Another Doctor
             </Link>
             {consultation?.doctor?.id && (
-              <Link href={`/patient/doctors/${consultation.doctor.id}`} className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey">
+              <Link href={`/patient/booking/${consultation.doctor.id}?type=${consultation.type}&step=2`} className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey">
                 <RefreshCw size={16} /> Try Again
               </Link>
             )}
@@ -338,7 +338,7 @@ export default function WaitingRoomPage() {
             </Link>
             {consultation?.doctor?.id && (
               <Link
-                href={`/patient/doctors/${consultation.doctor.id}`}
+                href={`/patient/booking/${consultation.doctor.id}?type=${consultation.type}&step=2`}
                 className="btn-outline w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl text-ink-black border-steel-grey"
               >
                 <CalendarClock size={16} /> Reschedule
@@ -390,7 +390,7 @@ export default function WaitingRoomPage() {
           <div className="flex flex-col gap-3">
             {consultation?.doctor?.id && (
               <Link
-                href={`/patient/doctors/${consultation.doctor.id}`}
+                href={`/patient/booking/${consultation.doctor.id}?type=${consultation.type}&step=2`}
                 className="btn-primary w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl"
               >
                 <CalendarClock size={16} /> Reschedule

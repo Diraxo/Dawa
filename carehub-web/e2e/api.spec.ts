@@ -60,6 +60,20 @@ test.describe('API route protection', () => {
     expect([401, 403]).toContain(res.status())
   })
 
+  // Release item #1/#5: a consultation row (status, summary) must never be
+  // readable or writable by an unauthenticated caller — that's the same data
+  // the doctor End Consultation / ghost-consultation guards rely on being
+  // authoritative.
+  test('GET /api/consultations/fake-id without auth returns 401', async ({ page }) => {
+    const res = await page.request.get('/api/consultations/fake-id')
+    expect(res.status()).toBe(401)
+  })
+
+  test('GET /api/admin/consultations/fake-id without auth returns 401/403', async ({ page }) => {
+    const res = await page.request.get('/api/admin/consultations/fake-id')
+    expect([401, 403]).toContain(res.status())
+  })
+
   test('stream-token rate limit: 30+ requests returns 429', async ({ page }) => {
     // This test checks the rate limiter fires — it requires the server to be running
     // with a rate limit lower than 30 per minute. In CI we adjust windowMs via env.
