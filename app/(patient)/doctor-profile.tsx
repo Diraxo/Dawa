@@ -26,6 +26,13 @@ import { supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
 
 
+// Postgres jsonb doesn't preserve original key-insertion order — it's
+// undefined here, not Mon-first (day 0 in the underlying availability jsonb
+// is 'Sun', but jsonb reorders keys internally regardless). Iterating with
+// Object.entries() directly made the weekly-availability list's day order
+// drift between edits; always walk this fixed order instead.
+const WEEK_DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
+
 interface DoctorData {
   id: string; name: string; subtitle?: string; specialty: string
   rating_average: number; review_count: number; years_experience?: number
@@ -387,19 +394,22 @@ export default function DoctorProfileScreen() {
         {/* ── Availability ── */}
         <Section title={t('weeklyAvailability')}>
           {doctor?.availability ? (
-            Object.entries(doctor.availability)
-              .filter(([, v]) => v.enabled)
+            WEEK_DAY_ORDER
+              .filter(day => (doctor.availability as any)?.[day]?.enabled)
               .length === 0 ? (
               <Text style={styles.availInfoText}>No availability set</Text>
             ) : (
-              Object.entries(doctor.availability)
-                .filter(([, v]) => v.enabled)
-                .map(([day, v]) => (
-                  <View key={day} style={styles.availInfoRow}>
-                    <Ionicons name="calendar-outline" size={16} color={colors.tealGreen} />
-                    <Text style={styles.availInfoText}>{day}: {v.startTime} – {v.endTime}</Text>
-                  </View>
-                ))
+              WEEK_DAY_ORDER
+                .filter(day => (doctor.availability as any)?.[day]?.enabled)
+                .map(day => {
+                  const v = (doctor.availability as any)[day]
+                  return (
+                    <View key={day} style={styles.availInfoRow}>
+                      <Ionicons name="calendar-outline" size={16} color={colors.tealGreen} />
+                      <Text style={styles.availInfoText}>{day}: {v.startTime} – {v.endTime}</Text>
+                    </View>
+                  )
+                })
             )
           ) : (
             <View style={styles.availInfoRow}>

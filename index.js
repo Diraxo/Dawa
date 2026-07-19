@@ -22,6 +22,8 @@ if (Platform.OS === 'android') {
 
     messaging().setBackgroundMessageHandler(async (remoteMessage) => {
       const callType = remoteMessage?.data?.callType
+      console.log('[FCM] Headless background handler invoked, callType=', callType,
+        'consultationId=', remoteMessage?.data?.consultationId ?? remoteMessage?.data?.uuid)
 
       // A doctor/patient-side cancel that arrived while the app was
       // backgrounded/killed — dismiss any ConnectionService call screen for
@@ -83,14 +85,34 @@ if (Platform.OS === 'android') {
           const typeTitle = data.consultationType === 'phone'
             ? 'Voice Consultation' : data.consultationType === 'video' ? 'Video Consultation' : 'Chat'
 
+          // Importance MUST match the 'incoming_requests_v2' channel created
+          // by expo-notifications in hooks/usePushNotifications.ts (MAX) —
+          // once a channel id exists on-device its settings are immutable,
+          // so whichever code path creates it first "wins" permanently.
+          // Whichever runs first on a given device (this background handler
+          // can run before the JS app ever mounted, e.g. an incoming push
+          // arriving right after a fresh install/before first foreground
+          // launch) must create it identically, or the channel could get
+          // silently pinned at the weaker level.
+          //
+          // The '_v2' suffix is deliberate: this channel used to be plain
+          // 'incoming_requests' at HIGH importance. Bumping the *importance*
+          // value in code does nothing for any device that already created
+          // that channel — Android ignores importance changes to an existing
+          // channel id — so the id itself was changed to force every device
+          // to create a brand-new MAX-importance channel regardless of what
+          // it already had. Do the same (bump the suffix again) for any
+          // future importance/sound/vibration change to this channel.
           await notifee.createChannel({
-            id: 'incoming_requests',
+            id: 'incoming_requests_v2',
             name: 'Incoming Patient Requests',
-            importance: AndroidImportance.HIGH,
+            importance: AndroidImportance.MAX,
             visibility: AndroidVisibility.PUBLIC,
             sound: 'default',
             vibrationPattern: [0, 500, 300, 500, 300, 500],
           })
+
+          console.log('[IncomingRequest] Notifee channel ready, displaying notification for', consultationId)
 
           await notifee.displayNotification({
             // Deterministic id — a repeated 'new_request' notification for
@@ -102,14 +124,59 @@ if (Platform.OS === 'android') {
             body: `${patientName} has paid and is waiting for your response.`,
             data: { screen: 'incoming_request', ...data },
             android: {
-              channelId: 'incoming_requests',
-              importance: AndroidImportance.HIGH,
+              channelId: 'incoming_requests_v2',
+              importance: AndroidImportance.MAX,
               category: 'call',
               fullScreenAction: { id: 'default', launchActivity: 'default' },
               pressAction: { id: 'default', launchActivity: 'default' },
               autoCancel: true,
+              // Best-effort cross-transport dedup: the server's Expo push
+              // fallback for this same event (handle-consultation-notification's
+              // 'new_request' case) now sets its own Android `tag` to this
+              // same string via Expo's push API `tag` field, which maps to
+              // FCM's notification.tag and instructs Android to replace an
+              // already-displayed notification sharing that tag instead of
+              // stacking a new one.
+              //
+              // This is NOT a guaranteed collapse: Android's NotificationManager
+              // identifies a notification by the (tag, id) PAIR, not tag
+              // alone. FCM's own auto-display for a tagged notification-type
+              // message is publicly documented as replacing an existing
+              // notification with the same tag, which is only possible if
+              // FCM's SDK pins a fixed internal id for tagged notifications
+              // (its API exposes no separate id control, so this is the only
+              // way "same tag replaces" can work as documented) — but
+              // Notifee's own id-to-(tag,id) mapping for its `id` field is
+              // NOT publicly documented, and could hash to a different
+              // numeric id than whatever fixed id FCM's SDK uses internally.
+              // If the numeric ids don't line up, this still displays
+              // correctly (unaffected) but simply won't collapse against the
+              // Expo-relayed one — this can only be confirmed by inspecting
+              // `adb shell dumpsys notification` on a physical device after
+              // both this build and the tagged edge function are live. Worst
+              // case if it doesn't collapse: identical to today's behavior
+              // (two tray entries), not a regression.
+              tag: `incoming-request-${consultationId}`,
             },
           })
+
+          console.log('[IncomingRequest] Notifee displayNotification resolved for', consultationId)
+
+          // Mark this consultation as already-displayed so the separate,
+          // unconditionally-sent Expo push fallback (server always sends
+          // both — see handle-consultation-notification's 'new_request'
+          // case) doesn't stack a second tray notification for the same
+          // request when it arrives moments later. Short TTL, read by
+          // usePushNotifications.ts's setNotificationHandler; if this write
+          // never happens (Doze/OEM dropped this data message entirely),
+          // the marker stays absent and the fallback still displays
+          // normally — reliability is unaffected either way.
+          try {
+            const AsyncStorage = require('@react-native-async-storage/async-storage').default
+            await AsyncStorage.setItem(`@incoming_request_displayed_${consultationId}`, String(Date.now()))
+          } catch (e) {
+            // best effort
+          }
         } catch (e) {
           console.error('[IncomingRequest] Background display failed:', e)
         }
@@ -206,6 +273,7 @@ if (Platform.OS === 'android') {
         }
 
         // Display the native Android ConnectionService call screen
+        console.log('[Callkeep] Calling displayIncomingCall for', uuid, 'direction=', direction)
         RNCallKeep.displayIncomingCall(
           uuid,
           callerHandle,       // handle (shown under the name)
@@ -213,6 +281,7 @@ if (Platform.OS === 'android') {
           'generic',          // handleType
           hasVideo,           // hasVideo
         )
+        console.log('[Callkeep] displayIncomingCall returned for', uuid)
       } catch (e) {
         console.error('[Callkeep] Background display failed:', e)
       }

@@ -31,7 +31,6 @@ import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useNotificationCenter } from '@/hooks/useNotificationCenter'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
-import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -44,7 +43,7 @@ const CONSULTATION_ICONS: Record<'chat' | 'phone' | 'video', keyof typeof Ionico
 // weren't already on the screen, unlike the web overlay's audible chime.
 // Vibration.vibrate's `repeat` flag rings continuously until cancelled or
 // the pattern is superseded, matching a phone-call-style alert; the local
-// notification (through the 'incoming_requests' Android channel, already
+// notification (through the 'incoming_requests_v2' Android channel, already
 // configured with sound: 'default' — see hooks/usePushNotifications.ts)
 // plays the actual ringtone-equivalent sound and is what a silenced device
 // automatically downgrades to vibrate-only for, so a single call here
@@ -63,7 +62,7 @@ function ringIncomingRequest(title: string, body: string, consultationId: string
       body,
       sound: 'default',
       data: { screen: 'incoming_request', consultationId },
-      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests' } : {}),
+      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests_v2' } : {}),
     },
     trigger: null,
   }).catch(() => {})
@@ -93,7 +92,7 @@ export default function DoctorHomeScreen() {
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
   const { photoUrl: doctorPhotoUrl } = useOwnProfilePhoto()
-  const dbUserId = useAuthStore((s) => s.userId)
+  const [dbUserId, setDbUserId] = useState<string | null>(null)
   const { unreadCount } = useNotificationCenter(dbUserId)
 
   const rawFirstName = user?.firstName ?? user?.fullName?.split(' ')[0] ?? 'Doctor'
@@ -164,6 +163,7 @@ export default function DoctorHomeScreen() {
       // own row or .single() throws once any other approved doctor exists.
       const { data: me, error: meError } = await client.from('users').select('id').eq('clerk_id', user?.id ?? '').single()
       if (meError || !me) throw meError ?? new Error('Could not load your account')
+      setDbUserId((me as any).id)
 
       const [profileRes, todayStatsRes, allEarningsRes] = await Promise.all([
         client.from('doctor_profiles').select('id, user_id, rating_average, total_consultations, is_online').eq('user_id', (me as any).id).single(),

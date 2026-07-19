@@ -82,6 +82,11 @@ function pushMessage(
   data: Record<string, unknown>,
   imageUrl?: string,
   badge: number = 1,
+  // See handle-consultation-notification's sendPushNotification() dedupeKey
+  // doc comment — same Expo `tag`/`collapseId` mechanism, applied here so a
+  // redelivered/retried cron push for the same reminder tier replaces its
+  // prior tray entry instead of stacking a second one.
+  dedupeKey?: string,
 ) {
   return {
     to: pushToken,
@@ -95,6 +100,7 @@ function pushMessage(
     // Rich notification image (Android large icon / iOS attachment) — shows
     // the doctor's profile photo instead of the static app icon when set.
     ...(imageUrl ? { mutableContent: true, richContent: { image: imageUrl } } : {}),
+    ...(dedupeKey ? { tag: dedupeKey, collapseId: dedupeKey } : {}),
   }
 }
 
@@ -237,8 +243,14 @@ async function sendFCMDataMessage(
   supabase?: ReturnType<typeof createClient>,
   recipient?: { userId: string; column: 'fcm_token' },
 ): Promise<boolean> {
+  const tag = `[FCM:${data.consultationId ?? data.uuid ?? '?'}]`
   const auth = await _getFCMAccessToken()
-  if (!auth) return false
+  if (!auth) {
+    console.error(`${tag} No FCM access token (missing/invalid FCM_SERVICE_ACCOUNT_JSON) — send aborted`)
+    return false
+  }
+
+  console.log(`${tag} Sending data message, callType=${data.callType}, token=...${fcmToken.slice(-8)}`)
 
   const res = await fetch(
     `https://fcm.googleapis.com/v1/projects/${auth.projectId}/messages:send`,
@@ -260,16 +272,18 @@ async function sendFCMDataMessage(
 
   if (!res.ok) {
     const txt = await res.text()
-    console.error('[FCM] Data message failed:', res.status, txt)
+    console.error(`${tag} Data message failed:`, res.status, txt)
     if (supabase && recipient) {
       const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
       if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
+        console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing ${recipient.column} on user ${recipient.userId}`)
         await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
       }
     }
     return false
   }
-  console.log('[FCM] Data message sent successfully')
+  const json = await res.json().catch(() => null)
+  console.log(`${tag} Firebase accepted the message:`, json?.name ?? '(no message id in response)')
   return true
 }
 
@@ -531,6 +545,7 @@ Deno.serve(async (req: Request) => {
       messages.push(pushMessage(
         patient.push_token, title, body, { ...data, notificationId: notificationId ?? '' }, doctorPhoto,
         await getUnreadBadgeCount(supabase, patient.id),
+        `followup-${reminder_id}`,
       ))
       recipients.push({ userId: patient.id })
     }
@@ -679,6 +694,7 @@ Deno.serve(async (req: Request) => {
       { ...patientDeepLinkData, notificationId: patientNotificationId ?? '' },
       doctorPhoto,
       await getUnreadBadgeCount(supabase, patient.id),
+      `appt-${appointment_id}-${kind}-patient`,
     ))
     recipients.push({ userId: patient.id })
   }
@@ -688,8 +704,20 @@ Deno.serve(async (req: Request) => {
   // CallKit ring exactly: callType 'incoming_call' + direction 'doctor' (not
   // 'incoming_request', which only raises a one-shot Notifee alert, not the
   // continuous native ring the spec requires for phone/video). Android via
-  // FCM data message, iOS via APNs VoIP; falls back to the plain Expo push
-  // below only if neither delivered.
+  // FCM data message, iOS via APNs VoIP. The plain Expo push below always
+  // fires too, regardless of whether the ring "delivered" — doctorFcmDelivered
+  // only means FCM/APNs accepted the HTTP request, not that the phone
+  // actually displayed the ring (Android can silently drop a data-only
+  // message under Doze/OEM battery restrictions with no way to report that
+  // back here), so it isn't a safe signal to skip the one alert guaranteed
+  // to reach the tray without any app code running.
+  console.log(
+    `[Notify:${appointment_id}] Server stage (start-ring) — doctor=${doctorUser.id}`,
+    `kind=${kind}, type=${consult.type}`,
+    `fcm_token=${doctorUser.fcm_token ? 'present' : 'MISSING'}`,
+    `voip_token=${doctorUser.voip_token ? 'present' : 'MISSING'}`,
+    `push_token=${doctorUser.push_token ? 'present' : 'MISSING'}`,
+  )
   const isCallStart = kind === 'start' && (consult.type === 'phone' || consult.type === 'video')
   const callStartData = {
     callType:         'incoming_call',
@@ -712,12 +740,13 @@ Deno.serve(async (req: Request) => {
     doctorFcmDelivered = await sendAPNsVoIPPush(doctorUser.voip_token, callStartData, supabase, { userId: doctorUser.id, column: 'voip_token' })
   }
 
-  if (!doctorFcmDelivered && doctorUser.push_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
+  if (doctorUser.push_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
     messages.push(pushMessage(
       doctorUser.push_token, doctorTitle, doctorBody,
       { screen: 'consultations', consultationId: appointment_id, notificationId: doctorNotificationId ?? '' },
       undefined,
       await getUnreadBadgeCount(supabase, doctorUser.id),
+      `appt-${appointment_id}-${kind}-doctor`,
     ))
     recipients.push({ userId: doctorUser.id })
   }

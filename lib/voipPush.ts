@@ -16,6 +16,7 @@ import { Platform } from 'react-native'
 import * as Notifications from 'expo-notifications'
 import { supabase } from './supabase'
 import { callkeep, type IncomingCallPayload } from './callkeep'
+import { reclaimTokenFromOtherUsers } from './pushTokens'
 import { logger } from './logger'
 
 // ── Lazy-load native modules ──────────────────────────────────────────────────
@@ -102,6 +103,7 @@ async function _registerVoIPToken(
     logger.log('[VoIP] iOS VoIP token received (len:', token.length, ')')
     if (!currentVoipClerkUserId) return
     try {
+      await reclaimTokenFromOtherUsers('voip_token', token, currentVoipClerkUserId)
       const { error } = await supabase
         .from('users')
         .update({ voip_token: token })
@@ -142,6 +144,7 @@ async function _registerFCMToken(
   try {
     const token = await messaging.getToken()
     logger.log('[FCM] Android FCM token received (len:', token.length, ')')
+    await reclaimTokenFromOtherUsers('fcm_token', token, clerkUserId)
     const { error } = await supabase
       .from('users')
       .update({ fcm_token: token })
@@ -160,6 +163,7 @@ async function _registerFCMToken(
     logger.log('[FCM] Token refreshed')
     if (!currentFcmClerkUserId) return
     try {
+      await reclaimTokenFromOtherUsers('fcm_token', newToken, currentFcmClerkUserId)
       await supabase
         .from('users')
         .update({ fcm_token: newToken })
@@ -170,6 +174,8 @@ async function _registerFCMToken(
   // ③ Foreground FCM data message — app is in foreground
   messaging.onMessage(async (remoteMessage: any) => {
     const callType = remoteMessage?.data?.callType
+    logger.log('[FCM] onMessage (foreground) received, callType=', callType,
+      'consultationId=', remoteMessage?.data?.consultationId ?? remoteMessage?.data?.uuid)
     if (callType === 'cancel_call') return _handleCallCancelData(remoteMessage.data)
     if (callType === 'incoming_request') return _handleIncomingRequestData(remoteMessage.data)
     if (callType !== 'incoming_call') return
@@ -180,6 +186,8 @@ async function _registerFCMToken(
   // ④ App-opened-from-background FCM data message
   messaging.onNotificationOpenedApp((remoteMessage: any) => {
     const callType = remoteMessage?.data?.callType
+    logger.log('[FCM] onNotificationOpenedApp received, callType=', callType,
+      'consultationId=', remoteMessage?.data?.consultationId ?? remoteMessage?.data?.uuid)
     if (callType === 'cancel_call') return _handleCallCancelData(remoteMessage.data)
     if (callType !== 'incoming_call') return
     logger.log('[FCM] Background→foreground incoming-call message')
@@ -220,10 +228,23 @@ function _handleIncomingRequestData(data: Record<string, string>) {
       body: `${patientName} has paid and is waiting for your response.`,
       sound: 'default',
       data: { screen: 'incoming_request', ...data },
-      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests' } : {}),
+      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests_v2' } : {}),
     },
     trigger: null,
   }).catch(() => {})
+
+  // See the matching marker write in index.js's background handler — same
+  // dedup contract, foreground side. The server's Expo push fallback for
+  // this event carries the same consultationId and now the same callType,
+  // so usePushNotifications.ts's setNotificationHandler can recognize this
+  // one already displayed and skip stacking a second banner for it.
+  const consultationId = data.consultationId
+  if (consultationId) {
+    import('@react-native-async-storage/async-storage')
+      .then(({ default: AsyncStorage }) =>
+        AsyncStorage.setItem(`@incoming_request_displayed_${consultationId}`, String(Date.now())))
+      .catch(() => {})
+  }
 }
 
 // ── Shared incoming-call data handler ────────────────────────────────────────
@@ -261,6 +282,8 @@ export function handleIncomingCallData(
     logger.warn('[VoIPPush] Missing uuid or consultationId in call data')
     return
   }
+
+  logger.log('[VoIPPush] handleIncomingCallData stage — consultationId=', consultationId, 'direction=', direction)
 
   const payload: IncomingCallPayload = {
     uuid,

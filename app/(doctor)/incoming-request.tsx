@@ -62,6 +62,10 @@ export default function IncomingRequestScreen() {
     waitingStartedAt?: string // kept for backwards compat, no longer used
   }>()
 
+  useEffect(() => {
+    logger.log('[IncomingRequestScreen] Mounted — final pipeline stage reached, consultationId=', consultationId)
+  }, [consultationId])
+
   // Auto-clear: reaching this screen directly (Home tab tap, realtime
   // detection) rather than by tapping the "Incoming Consultation"
   // notification still means it's been handled — mark it read so it

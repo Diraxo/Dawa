@@ -98,17 +98,35 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
     if (!visible || !appointment) return
     let cancelled = false
     setLoadingAvail(true)
+    const doctorId = appointment.doctorId
     supabase
       .from('doctor_profiles')
       .select('availability')
-      .eq('id', appointment.doctorId)
+      .eq('id', doctorId)
       .maybeSingle()
       .then(({ data }) => {
         if (cancelled) return
         setAvailability((data as any)?.availability ?? null)
         setLoadingAvail(false)
       })
-    return () => { cancelled = true }
+
+    // Doctor editing working hours/blocked dates while this sheet is open
+    // must update the offered dates/slots live — this modal previously
+    // fetched availability once and never picked up a schedule change until
+    // re-opened, unlike BookingModal's parent-fed live doctor prop.
+    const channel = supabase
+      .channel(`reschedule-doctor-availability-${doctorId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorId}` },
+        (payload) => {
+          if (cancelled) return
+          setAvailability((payload.new as any)?.availability ?? null)
+        }
+      )
+      .subscribe()
+
+    return () => { cancelled = true; supabase.removeChannel(channel) }
   }, [visible, appointment?.doctorId])
 
   // Which generated time slots for the selected day are already booked —

@@ -47,8 +47,14 @@ export function useNotificationCenter(userId: string | null | undefined) {
   // reflect here too.
   useEffect(() => {
     if (!userId) return
+    // Suffixed with Date.now() because this hook mounts on multiple
+    // concurrently-live screens for the same user (e.g. doctor Home's bell
+    // badge and the pushed Notifications screen, which stays mounted
+    // underneath it) — without it, two instances share one channel topic
+    // and the second `.on()` call throws ("cannot add postgres_changes
+    // callbacks ... after subscribe()"). Same fix as useOwnProfilePhoto.ts.
     const channel = supabase
-      .channel(`notification-center-${userId}`)
+      .channel(`notification-center-${userId}-${Date.now()}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },

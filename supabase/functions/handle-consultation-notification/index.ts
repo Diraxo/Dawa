@@ -251,7 +251,27 @@ async function sendPushNotification(
   supabase?:  ReturnType<typeof createClient>,
   recipient?: { userId: string; column: 'push_token' },
   badge:      number = 1,
+  // `dedupeKey`, when given, is sent as both Expo's `tag` (Android — replaces
+  // an already-displayed notification with the same tag; maps to FCM
+  // notification.tag) and `collapseId` (Android: collapses same-key messages
+  // still in transit via FCM collapse_key; iOS: ALSO replaces an
+  // already-displayed notification via apns-collapse-id). Callers pass the
+  // same key used by the client-side notification this push might duplicate
+  // (e.g. Notifee's deterministic id for the same consultation event) so a
+  // repeat send (migration 067's 3-min re-notify cron, FCM/Expo redelivery)
+  // replaces the prior tray entry in place instead of stacking a second one.
+  // This does not eliminate a duplicate between two independently-posted
+  // notifications from different delivery transports (Notifee's own
+  // background display vs this Expo-relayed one) — Android's tag/id identity
+  // requires both the tag AND an internal numeric id to match, and Notifee's
+  // id-hashing scheme for that numeric id is undocumented and unverified
+  // without a physical device — see the dedup investigation notes in
+  // index.js's 'incoming_request' branch for the full explanation.
+  dedupeKey?: string,
 ) {
+  const tag = `[ExpoPush:${(data as Record<string, unknown>)?.consultationId ?? '?'}]`
+  console.log(`${tag} Sending, channel=${channel}, priority=${priority}, token=...${token.slice(-8)}`)
+
   const res = await fetch('https://exp.host/--/api/v2/push/send', {
     method:  'POST',
     headers: {
@@ -271,21 +291,29 @@ async function sendPushNotification(
       // Rich notification image (Android large icon / iOS attachment) — shows
       // the doctor's profile photo instead of the static app icon when set.
       ...(imageUrl ? { mutableContent: true, richContent: { image: imageUrl } } : {}),
+      ...(dedupeKey ? { tag: dedupeKey, collapseId: dedupeKey } : {}),
     }),
   })
 
   if (!res.ok) {
-    console.error('[ExpoPush] Send request failed:', res.status, await res.text().catch(() => ''))
+    console.error(`${tag} Send request failed:`, res.status, await res.text().catch(() => ''))
     return
   }
 
   const json = await res.json().catch(() => null)
   const ticket = json?.data
   if (ticket?.status === 'error') {
-    console.error('[ExpoPush] Delivery error:', ticket.message, ticket.details)
+    console.error(`${tag} Delivery error:`, ticket.message, ticket.details)
     if (ticket.details?.error === 'DeviceNotRegistered' && supabase && recipient) {
+      console.warn(`${tag} Token is DeviceNotRegistered — clearing ${recipient.column} on user ${recipient.userId}`)
       await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
     }
+  } else {
+    // Expo's ticket id lets you look up the actual receipt (delivered/error)
+    // later via https://exp.host/--/api/v2/push/getReceipts — this ticket
+    // being 'ok' only means Expo accepted the request, not that FCM/APNs
+    // delivered it.
+    console.log(`${tag} Expo accepted the push, ticket id:`, ticket?.id ?? '(none)')
   }
 }
 
@@ -380,8 +408,15 @@ async function sendFCMDataMessage(
   supabase?: ReturnType<typeof createClient>,
   recipient?: { userId: string; column: 'fcm_token' },
 ): Promise<boolean> {
+  const tag = `[FCM:${data.consultationId ?? data.uuid ?? '?'}]`
+
   const auth = await _getFCMAccessToken()
-  if (!auth) return false
+  if (!auth) {
+    console.error(`${tag} No FCM access token (missing/invalid FCM_SERVICE_ACCOUNT_JSON) — send aborted`)
+    return false
+  }
+
+  console.log(`${tag} Sending data message, callType=${data.callType}, token=...${fcmToken.slice(-8)}`)
 
   const res = await fetch(
     `https://fcm.googleapis.com/v1/projects/${auth.projectId}/messages:send`,
@@ -406,16 +441,23 @@ async function sendFCMDataMessage(
 
   if (!res.ok) {
     const txt = await res.text()
-    console.error('[FCM] Data message failed:', res.status, txt)
+    console.error(`${tag} Data message failed:`, res.status, txt)
     if (supabase && recipient) {
       const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
       if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
+        console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing ${recipient.column} on user ${recipient.userId}`)
         await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
       }
     }
     return false
   }
-  console.log('[FCM] Data message sent successfully')
+  // Firebase's v1 send response body is just `{ name: "projects/.../messages/<id>" }`
+  // on success — logging it gives a concrete FCM message id to correlate against
+  // Firebase console delivery logs when a push is accepted here but never shows
+  // up on the device (the most common "silent notification" failure mode, which
+  // happens entirely outside anything this server can observe).
+  const json = await res.json().catch(() => null)
+  console.log(`${tag} Firebase accepted the message:`, json?.name ?? '(no message id in response)')
   return true
 }
 
@@ -466,8 +508,10 @@ async function sendAPNsVoIPPush(
     return false
   }
 
+  const tag = `[APNs:${payload.consultationId ?? '?'}]`
   try {
     const jwt = await _generateAPNsJWT(keyId, teamId, privateKey)
+    console.log(`${tag} Sending VoIP push, token=...${voipToken.slice(-8)}`)
 
     const res = await fetch(
       `https://api.push.apple.com/3/device/${voipToken}`,
@@ -487,19 +531,20 @@ async function sendAPNsVoIPPush(
 
     if (!res.ok) {
       const txt = await res.text()
-      console.error('[APNs] VoIP push failed:', res.status, txt)
+      console.error(`${tag} VoIP push failed:`, res.status, txt)
       if (supabase && recipient) {
         const reason = (() => { try { return JSON.parse(txt)?.reason } catch { return null } })()
         if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
+          console.warn(`${tag} Token is BadDeviceToken/Unregistered — clearing ${recipient.column} on user ${recipient.userId}`)
           await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
         }
       }
       return false
     }
-    console.log('[APNs] VoIP push sent successfully')
+    console.log(`${tag} Apple accepted the VoIP push, apns-id:`, res.headers.get('apns-id') ?? '(none)')
     return true
   } catch (e) {
-    console.error('[APNs] VoIP push error:', e)
+    console.error(`${tag} VoIP push error:`, e)
     return false
   }
 }
@@ -738,10 +783,25 @@ Deno.serve(async (req: Request) => {
       // decline-reason flow) instead of jumping straight into the call.
       // Neither data-only push displays anything if delivery itself fails
       // (bad/missing credentials, expired token, network error) — track
-      // actual delivery and fall back to the plain Expo push through the
-      // high-priority 'incoming_requests' channel whenever neither channel
-      // got through, so there's always at least one real alert, never a
-      // silent no-op.
+      // actual delivery so the VoIP attempt below only fires when FCM
+      // didn't take. callRingDelivered only reflects "Google/Apple accepted
+      // the HTTP request", never "the phone actually displayed something" —
+      // Android silently defers or drops data-only FCM messages under Doze/
+      // OEM battery managers even after a 200 response, with nothing left
+      // client-side to report the miss back to the server. So unlike that
+      // gate, the plain Expo push below (a real `notification`-type payload
+      // FCM/APNs deliver to the tray unconditionally, no app code required)
+      // always fires regardless of callRingDelivered — this is the doctor's
+      // only alert for the single highest-stakes event in the app, and a
+      // redundant heads-up notification alongside a working ring is a far
+      // smaller cost than silence when the ring didn't actually show.
+      console.log(
+        `[Notify:${consultation_id}] Server stage — doctor=${doctorId}`,
+        `fcm_token=${doctorUser.fcm_token ? 'present' : 'MISSING'}`,
+        `voip_token=${doctorUser.voip_token ? 'present' : 'MISSING'}`,
+        `push_token=${doctorToken ? 'present' : 'MISSING'}`,
+        `isCallType=${isCallType}`,
+      )
       let callRingDelivered = false
       if (doctorUser.fcm_token && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
         callRingDelivered = isCallType
@@ -787,13 +847,30 @@ Deno.serve(async (req: Request) => {
           waitingStartedAt: (consult as any).waiting_started_at ?? '',
         }, supabase, doctorId ? { userId: doctorId, column: 'voip_token' } : undefined)
       }
-      if (!callRingDelivered && doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
+      const requestPushEnabled = await isPushEnabled(supabase, doctorId, 'consultation_request')
+      if (doctorToken && requestPushEnabled) {
+        console.log(`[Notify:${consultation_id}] Sending fallback Expo push (callRingDelivered=${callRingDelivered})`)
         await sendPushNotification(doctorToken, title, body, {
           screen: 'incoming_request',
+          // Lets the client's setNotificationHandler apply the same dedup
+          // treatment this event's FCM data message already gets — without
+          // this, a chat request's local/Notifee display and this fallback
+          // stack as two separate tray notifications, and a phone/video
+          // request's full-screen ConnectionService ring gets a redundant
+          // heads-up banner on top of it (unlike the 'accepted' event's call
+          // push, which has always set this).
+          callType: isCallType ? 'incoming_call' : 'incoming_request',
           notificationId: notificationId ?? '',
           ...sharedData,
           waitingStartedAt: (consult as any).waiting_started_at ?? '',
-        }, 'incoming_requests', 'high', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        }, 'incoming_requests_v2', 'high', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId),
+          // Matches Notifee's `id: incoming-request-${consultationId}` (see
+          // index.js) and index.js's `android.tag` set on that same call —
+          // best-effort cross-transport collapse (see sendPushNotification's
+          // dedupeKey doc comment for why this isn't a guaranteed collapse).
+          `incoming-request-${consultation_id}`)
+      } else {
+        console.log(`[Notify:${consultation_id}] Fallback Expo push SKIPPED — token=${!!doctorToken} prefEnabled=${requestPushEnabled}`)
       }
 
       await supabase
@@ -866,7 +943,8 @@ Deno.serve(async (req: Request) => {
           callType:        isCallType ? 'incoming_call' : '',
           notificationId:  notificationId ?? '',
           ...sharedData,
-        }, 'consultations', 'high', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+        }, 'consultations', 'high', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId),
+          `accepted-${consultation_id}`)
       }
       if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
         await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('consultation', consultation_id, String(consult.type)) })

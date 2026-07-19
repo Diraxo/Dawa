@@ -19,6 +19,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import Constants from 'expo-constants'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
+import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
@@ -82,6 +83,7 @@ export default function ProfileScreen() {
 
   const confirmDeactivate = async () => {
     setShowDeactivateAlert(false)
+    if (user?.id) await clearPushTokens(user.id)
     await disconnectStream()
     await supabaseEmailAuth.auth.signOut()
     clearAuth()
@@ -192,6 +194,7 @@ export default function ProfileScreen() {
             style: 'danger',
             onPress: async () => {
               setShowLogoutAlert(false)
+              if (user?.id) await clearPushTokens(user.id)
               await disconnectStream()
               await supabaseEmailAuth.auth.signOut()
               clearAuth()

@@ -19,6 +19,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
+import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
@@ -213,6 +214,7 @@ export default function DoctorProfileScreen() {
               } catch {
                 // best-effort; the heartbeat TTL cleanup is the safety net
               }
+              if (user?.id) await clearPushTokens(user.id)
               await disconnectStream()
               await supabaseEmailAuth.auth.signOut()
               clearAuth()
