@@ -634,6 +634,11 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       const controller = new AbortController()
       const timeoutId  = setTimeout(() => controller.abort(), 30_000)
 
+      // initialize-payment verifies this Clerk session server-side and
+      // re-derives the charge amount from the DB itself — the anon key alone
+      // used to be sent here, which let any caller act on any consultation.
+      const paymentClerkToken = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+
       let payResp: Response
       try {
         payResp = await fetch(`${supabaseUrl}/functions/v1/initialize-payment`, {
@@ -641,7 +646,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
           signal: controller.signal,
           headers: {
             'Content-Type':  'application/json',
-            'Authorization': `Bearer ${supabaseAnonKey}`,
+            'Authorization': `Bearer ${paymentClerkToken}`,
             'apikey':        supabaseAnonKey,
           },
           body: JSON.stringify({

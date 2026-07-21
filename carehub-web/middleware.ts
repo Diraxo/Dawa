@@ -89,7 +89,11 @@ export default clerkMiddleware(async (auth, req) => {
         return NextResponse.redirect(new URL(HOME[role] ?? '/role', req.url))
       }
     } catch {
-      // DB temporarily unavailable — client-side RoleGuard will enforce on render
+      // DB temporarily unavailable — fail closed rather than falling through
+      // on nothing but the client-side RoleGuard, which a modified client
+      // could skip. The underlying API routes independently re-check role
+      // regardless, so this only ever changes behavior during an outage.
+      return NextResponse.redirect(new URL('/role', req.url))
     }
   }
 

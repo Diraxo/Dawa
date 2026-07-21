@@ -9,13 +9,18 @@ const WINDOW_MS = 15 * 60 * 1000
 const DEFAULT_MAX_ATTEMPTS = 5
 const DEFAULT_LOCK_DURATION = 30 * 60 * 1000
 
-const cors = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, content-type, apikey',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+const ALLOWED_ORIGINS = new Set(['https://dawa.com', 'http://localhost:3000', 'http://localhost:19006'])
+function buildCorsHeaders(req: Request) {
+  const origin = req.headers.get('Origin') ?? ''
+  return {
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.has(origin) ? origin : 'https://dawa.com',
+    'Access-Control-Allow-Headers': 'authorization, content-type, apikey',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  }
 }
 
 Deno.serve(async (req: Request) => {
+  const cors = buildCorsHeaders(req)
   if (req.method === 'OPTIONS') return new Response(null, { headers: cors })
 
   const body = await req.json().catch(() => null)

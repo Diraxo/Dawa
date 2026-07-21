@@ -58,10 +58,16 @@ export async function GET(req: NextRequest) {
     query = query.lte('timestamp', `${to}T23:59:59.999Z`)
   }
   if (search) {
-    // Full-text search across action, entity_type, entity_id, and metadata
-    query = query.or(
-      `action.ilike.%${search}%,entity_type.ilike.%${search}%,entity_id.ilike.%${search}%`
-    )
+    // Full-text search across action, entity_type, entity_id, and metadata.
+    // Strip PostgREST filter-syntax characters before interpolating into the
+    // .or() string — a raw comma/paren/wildcard in `search` could otherwise
+    // inject additional filter clauses.
+    const safeSearch = search.replace(/[,()%*]/g, '')
+    if (safeSearch) {
+      query = query.or(
+        `action.ilike.%${safeSearch}%,entity_type.ilike.%${safeSearch}%,entity_id.ilike.%${safeSearch}%`
+      )
+    }
   }
 
   if (!csv) {
