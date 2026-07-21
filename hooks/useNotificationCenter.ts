@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import {
   fetchNotificationsPage,
   getUnreadCount,
@@ -47,32 +48,27 @@ export function useNotificationCenter(userId: string | null | undefined) {
   // reflect here too.
   useEffect(() => {
     if (!userId) return
-    // Suffixed with Date.now() because this hook mounts on multiple
+    // Shared, ref-counted channel: this hook mounts on multiple
     // concurrently-live screens for the same user (e.g. doctor Home's bell
     // badge and the pushed Notifications screen, which stays mounted
-    // underneath it) — without it, two instances share one channel topic
-    // and the second `.on()` call throws ("cannot add postgres_changes
-    // callbacks ... after subscribe()"). Same fix as useOwnProfilePhoto.ts.
-    const channel = supabase
-      .channel(`notification-center-${userId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
+    // underneath it) — they all reuse one subscription instead of each
+    // opening a duplicate.
+    return subscribeRealtime(
+      `notifications:user_id=eq.${userId}`,
+      [
         { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
-        (payload) => {
+        { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+      ],
+      (event, payload) => {
+        if (event === 'INSERT') {
           setItems((prev) => [payload.new as NotificationRow, ...prev])
           setUnreadCount((c) => c + 1)
-        },
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
-        (payload) => {
+        } else if (event === 'UPDATE') {
           const updated = payload.new as NotificationRow
           setItems((prev) => prev.map((n) => (n.id === updated.id ? updated : n)))
-        },
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+        }
+      },
+    )
   }, [userId])
 
   const refresh = useCallback(async () => {

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Alert, AppState } from 'react-native'
 
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 
 /**
  * Single write path + realtime subscription for `doctor_profiles.is_online`,
@@ -20,22 +21,17 @@ export function useDoctorOnlineToggle(doctorProfileId: string | null, opts?: { r
   // another device, or this same doctor's other mobile tab).
   useEffect(() => {
     if (!doctorProfileId) return
-    // Suffixed with Date.now() because this hook mounts on multiple sibling
-    // tabs at once (Home, Schedule) — without it, two instances would share
-    // one topic and the second `.on()` call would throw ("cannot add
-    // postgres_changes callbacks ... after subscribe()").
-    const channel = supabase
-      .channel(`doctor-online-${doctorProfileId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorProfileId}` },
-        (payload) => {
-          const newOnline = (payload.new as any)?.is_online
-          if (typeof newOnline === 'boolean') setIsOnline(newOnline)
-        }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Shared, ref-counted channel: this hook mounts on multiple sibling tabs
+    // at once (Home, Schedule) but they all reuse one subscription for this
+    // doctor's row instead of opening a duplicate each.
+    return subscribeRealtime(
+      `doctor_profiles:id=eq.${doctorProfileId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorProfileId}` }],
+      (_event, payload) => {
+        const newOnline = (payload.new as any)?.is_online
+        if (typeof newOnline === 'boolean') setIsOnline(newOnline)
+      },
+    )
   }, [doctorProfileId])
 
   // Re-sync from the DB when the app returns to the foreground — the

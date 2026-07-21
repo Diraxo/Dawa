@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 
 /**
  * Keeps a user's (doctor or patient) photo live on screens that already
@@ -21,21 +21,14 @@ export function useUserPhotoRealtime(userRowId: string | null | undefined, initi
 
   useEffect(() => {
     if (!userRowId) return
-    // Suffixed with Date.now() because `supabase.channel()` dedupes by topic
-    // string and returns any existing channel for the same topic — if a
-    // prior mount's `removeChannel()` (async unsubscribe, then teardown)
-    // hasn't finished when this effect re-runs, we'd otherwise get handed
-    // back the old, already-subscribed channel and `.on()` would throw
-    // ("cannot add postgres_changes callbacks ... after subscribe()").
-    const channel = supabase
-      .channel(`user-photo-${userRowId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userRowId}` },
-        (payload) => setPhotoUrl((payload.new as any)?.profile_photo_url ?? null)
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Shared, ref-counted channel: any other hook watching this same `users`
+    // row (useOwnProfilePhoto, useUserProfileRealtime) reuses the same
+    // subscription instead of opening a duplicate.
+    return subscribeRealtime(
+      `users:id=eq.${userRowId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userRowId}` }],
+      (_event, payload) => setPhotoUrl((payload.new as any)?.profile_photo_url ?? null),
+    )
   }, [userRowId])
 
   return photoUrl

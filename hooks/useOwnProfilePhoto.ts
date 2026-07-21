@@ -3,6 +3,7 @@ import { useAuth } from '@clerk/clerk-expo'
 import { useCallback, useEffect, useState } from 'react'
 
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 
 const cacheKey = (clerkUserId: string) => `own-profile-photo:${clerkUserId}`
 
@@ -71,27 +72,23 @@ export function useOwnProfilePhoto() {
 
   useEffect(() => {
     if (!userRowId) return
-    // Suffixed with Date.now() because this hook mounts on multiple sibling
-    // tabs at once (Home, Profile) — without it, two instances would share
-    // one topic and the second `.on()` call would throw ("cannot add
-    // postgres_changes callbacks ... after subscribe()").
-    const channel = supabase
-      .channel(`own-profile-photo-${userRowId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userRowId}` },
-        (payload) => {
-          const next = (payload.new as any)?.profile_photo_url ?? null
-          setPhotoUrl(next)
-          if (clerkUserId) {
-            _memoryCache.set(clerkUserId, next)
-            AsyncStorage.setItem(cacheKey(clerkUserId), next ?? '').catch(() => {})
-          }
+    // Shared, ref-counted channel: this hook mounts on multiple sibling tabs
+    // at once (Home, Profile), plus other hooks (useUserPhotoRealtime,
+    // useUserProfileRealtime) watch this same `users` row — all of them
+    // reuse one subscription per row instead of each opening a duplicate.
+    return subscribeRealtime(
+      `users:id=eq.${userRowId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'users', filter: `id=eq.${userRowId}` }],
+      (_event, payload) => {
+        const next = (payload.new as any)?.profile_photo_url ?? null
+        setPhotoUrl(next)
+        if (clerkUserId) {
+          _memoryCache.set(clerkUserId, next)
+          AsyncStorage.setItem(cacheKey(clerkUserId), next ?? '').catch(() => {})
         }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [userRowId])
+      },
+    )
+  }, [userRowId, clerkUserId])
 
   return { photoUrl, refresh }
 }
