@@ -27,6 +27,8 @@ interface ConsultationRow {
   doctor_connected_at: string | null
   patient_connected_at: string | null
   patient_left_at: string | null
+  doctor_reconnecting: boolean
+  patient_reconnecting: boolean
 }
 
 export interface DeriveCallStateInput {
@@ -36,6 +38,7 @@ export interface DeriveCallStateInput {
   doctorConnectedAt: string | null
   patientConnectedAt: string | null
   localAgoraReconnecting: boolean
+  peerReconnecting: boolean
   now: number
   hasLoaded: boolean
 }
@@ -54,7 +57,7 @@ export interface DeriveCallStateOutput {
 // function with role-appropriate inputs, so the two sides are structurally
 // unable to disagree about what a given row means.
 export function deriveCallState(input: DeriveCallStateInput): DeriveCallStateOutput {
-  const { role, status, startedAt, doctorConnectedAt, patientConnectedAt, localAgoraReconnecting, now, hasLoaded } = input
+  const { role, status, startedAt, doctorConnectedAt, patientConnectedAt, localAgoraReconnecting, peerReconnecting, now, hasLoaded } = input
 
   // Before the first DB row has actually arrived (mount, refresh, resume,
   // reconnect), `status` is null purely because we don't know it yet — that
@@ -70,7 +73,12 @@ export function deriveCallState(input: DeriveCallStateInput): DeriveCallStateOut
   if (status === 'in_progress') {
     const callStartedAtMs = startedAt ? new Date(startedAt).getTime() : null
     const elapsedSeconds = callStartedAtMs != null ? Math.max(0, Math.floor((now - callStartedAtMs) / 1000)) : null
-    return { phase: localAgoraReconnecting ? 'reconnecting' : 'on_call', callStartedAtMs, elapsedSeconds }
+    // Either side's own reconnect signal — mine locally (instant), or the
+    // peer's self-reported flag mirrored over Realtime — puts both screens
+    // into 'reconnecting' together instead of only the device that noticed
+    // first (see migration 093).
+    const reconnecting = localAgoraReconnecting || peerReconnecting
+    return { phase: reconnecting ? 'reconnecting' : 'on_call', callStartedAtMs, elapsedSeconds }
   }
 
   if (status === 'accepted') {
@@ -112,7 +120,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     let cancelled = false
     supabase
       .from('consultations')
-      .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
+      .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at, doctor_reconnecting, patient_reconnecting')
       .eq('id', consultationId)
       .single()
       .then(
@@ -155,7 +163,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     const t = setInterval(() => {
       supabase
         .from('consultations')
-        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at')
+        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at, doctor_reconnecting, patient_reconnecting')
         .eq('id', consultationId)
         .single()
         .then(
@@ -166,6 +174,8 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     return () => clearInterval(t)
   }, [consultationId, row?.status])
 
+  const peerReconnecting = role === 'doctor' ? !!row?.patient_reconnecting : !!row?.doctor_reconnecting
+
   const derived = deriveCallState({
     role,
     status: row?.status ?? null,
@@ -173,6 +183,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     doctorConnectedAt: row?.doctor_connected_at ?? null,
     patientConnectedAt: row?.patient_connected_at ?? null,
     localAgoraReconnecting,
+    peerReconnecting,
     now,
     hasLoaded,
   })
@@ -192,6 +203,25 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
       .eq('status', 'accepted')
       .then(() => {}, () => {})
   }, [consultationId, role])
+
+  // Mirrors this device's own local Agora reconnect signal onto the row so
+  // the peer's screen picks it up over Realtime instead of waiting on
+  // Agora's own (slower) cross-peer onUserOffline detection — see migration
+  // 093. Skips redundant writes when the value hasn't actually changed.
+  const lastReconnectingWrittenRef = useRef(false)
+  useEffect(() => {
+    if (!consultationId) return
+    if (lastReconnectingWrittenRef.current === localAgoraReconnecting) return
+    lastReconnectingWrittenRef.current = localAgoraReconnecting
+    const payload = role === 'doctor'
+      ? { doctor_reconnecting: localAgoraReconnecting }
+      : { patient_reconnecting: localAgoraReconnecting }
+    supabase
+      .from('consultations')
+      .update(payload)
+      .eq('id', consultationId)
+      .then(() => {}, () => {})
+  }, [consultationId, role, localAgoraReconnecting])
 
   // Patient-only: called on every successful join/rejoin (initial connect
   // *and* any later reconnect after "Leave Call"), unlike markSelfConnected

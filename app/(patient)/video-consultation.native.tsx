@@ -43,6 +43,7 @@ try {
 } catch {}
 
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
@@ -173,6 +174,20 @@ export default function VideoConsultationScreen() {
   const [activeChannel, setActiveChannel] = useState<any>(null)
   const [channelLoading, setChannelLoading] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [doctorStatus, setDoctorStatus] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!doctorId) return
+    getToken().then(async token => {
+      if (!token) return
+      const { data } = await getAuthClient(token)
+        .from('doctor_profiles')
+        .select('status')
+        .eq('user_id', doctorId)
+        .maybeSingle()
+      setDoctorStatus(data?.status ?? null)
+    }).catch(() => {})
+  }, [doctorId])
   // Gates token fetch and Agora join — true once patient answers (or skipped via callkeep/resume)
   const [readyToJoin, setReadyToJoin] = useState(skipRinging)
 
@@ -660,8 +675,8 @@ export default function VideoConsultationScreen() {
         if (reason === 5) setRemoteCamOff(true)
         else if (reason === 6) setRemoteCamOff(false)
       },
-      onNetworkQuality: (_uid: any, txQuality: number) => {
-        if (mounted) setNetworkQuality(txQuality as any)
+      onNetworkQuality: (_uid: any, txQuality: number, rxQuality: number) => {
+        if (mounted) setNetworkQuality(Math.max(txQuality, rxQuality) as any)
       },
       // uid 0 = local speaker in this callback specifically (per Agora's own
       // AudioVolumeInfo docs); any other uid is the doctor's peer. Drives the
@@ -981,7 +996,10 @@ export default function VideoConsultationScreen() {
                 : <Ionicons name="person" size={52} color="rgba(255,255,255,0.5)" />
               }
             </View>
-            <Text style={styles.waitingDoctorName}>{formatDoctorName(doctorName)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.waitingDoctorName}>{formatDoctorName(doctorName)}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={15} />}
+            </View>
             <Text style={styles.waitingSubtitle}>The doctor will call you shortly…</Text>
             <Text style={styles.waitingHint}>Your video call will start automatically when the doctor joins.</Text>
           </View>
@@ -1019,7 +1037,10 @@ export default function VideoConsultationScreen() {
               </View>
             </Animated.View>
 
-            <Text style={styles.ringName}>{formatDoctorName(doctorName)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.ringName}>{formatDoctorName(doctorName)}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={15} />}
+            </View>
             <Text style={styles.ringSubtitle}>is calling you…</Text>
             <Text style={styles.ringNote}>Tap Answer to join · Decline to go back</Text>
             <Text style={styles.ringCountdown}>Auto-declining in {ringCountdown}s</Text>
@@ -1055,7 +1076,10 @@ export default function VideoConsultationScreen() {
                 <Ionicons name="person" size={72} color="rgba(255,255,255,0.2)" />
               )}
             </SpeakingPulse>
-            <Text style={styles.videoPlaceholderText}>{formatDoctorName(doctorName)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.videoPlaceholderText}>{formatDoctorName(doctorName)}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={16} />}
+            </View>
             {tokenFetchFailed ? (
               <Pressable
                 onPress={() => setTokenRetryKey(k => k + 1)}
@@ -1137,6 +1161,7 @@ export default function VideoConsultationScreen() {
         counterpartLabel="Doctor"
         counterpartName={formatDoctorName(doctorName)}
         counterpartPhotoUrl={doctorPhotoUrl}
+        counterpartVerified={doctorStatus === 'approved'}
         startedAtIso={startedAtIso}
         elapsedSeconds={seconds}
         networkQuality={networkQuality}

@@ -16,8 +16,8 @@ import {
 } from '@expo-google-fonts/montserrat'
 import { ClerkLoaded, ClerkLoading, ClerkProvider, useAuth, useUser } from '@clerk/clerk-expo'
 import * as Notifications from 'expo-notifications'
-import { SplashScreen, Stack, useRouter, useSegments } from 'expo-router'
-import { useEffect, useRef } from 'react'
+import { SplashScreen, Stack, useGlobalSearchParams, useNavigationContainerRef, usePathname, useRouter, useSegments } from 'expo-router'
+import { useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, AppStateStatus, Platform, View } from 'react-native'
 import NetInfo from '@react-native-community/netinfo'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
@@ -31,11 +31,12 @@ import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 import { useActiveChatStore } from '@/store/activeChatStore'
 import ForceUpdateScreen from '@/components/shared/ForceUpdateScreen'
+import OfflineStartScreen from '@/components/shared/OfflineStartScreen'
 import NetworkBanner from '@/components/ui/NetworkBanner'
 import { callkeep, type IncomingCallPayload } from '@/lib/callkeep'
 import { registerCallTokens, handleIncomingCallData } from '@/lib/voipPush'
 import { logger } from '@/lib/logger'
-import { navigateForNotification, resolveIncomingRequestRoute } from '@/lib/notificationNav'
+import { navigateDoctorConsultationRoute, navigateFamilyRoute, navigateForNotification, resolveIncomingRequestRoute, type CurrentDoctorRoute } from '@/lib/notificationNav'
 import { markNotificationRead, refreshBadge } from '@/lib/notificationCenter'
 
 // Mirrors TERMINAL_STATUSES in hooks/useConsultationState.ts — any status here
@@ -123,6 +124,32 @@ function AppInitializer() {
 
   useStreamConnection()
 
+  // ── Doctor notification-tap dedup: where are we right now? ────────────────
+  // Read fresh inside the tap handlers below (registered once per
+  // [userRole]/[userRole, userId] effect run, so their closures would
+  // otherwise see a stale route) — see lib/notificationNav.ts's
+  // navigateDoctorConsultationRoute for how this prevents a notification tap
+  // from stacking a second Incoming Consultation/Chat/Voice/Video screen on
+  // top of one that's already showing.
+  const doctorRoutePathname = usePathname()
+  const doctorRouteParams = useGlobalSearchParams<{ consultationId?: string; highlightConsultationId?: string }>()
+  const currentDoctorRouteRef = useRef<CurrentDoctorRoute>({ pathname: doctorRoutePathname, consultationId: null, highlightConsultationId: null })
+  useEffect(() => {
+    currentDoctorRouteRef.current = {
+      pathname: doctorRoutePathname,
+      consultationId: doctorRouteParams.consultationId ?? null,
+      highlightConsultationId: doctorRouteParams.highlightConsultationId ?? null,
+    }
+  }, [doctorRoutePathname, doctorRouteParams.consultationId, doctorRouteParams.highlightConsultationId])
+
+  // Full navigation-tree snapshot, read fresh at tap-time rather than kept
+  // in a ref-on-render — lets navigateForNotification/navigateDoctorConsultationRoute
+  // scan every screen currently on the stack (not just the current top
+  // route) when deciding whether a consultation-family screen already
+  // exists somewhere and should be reused instead of duplicated.
+  const navContainerRef = useNavigationContainerRef()
+  const getNavRootState = () => navContainerRef.current?.getRootState()
+
   // Restore saved language preference on every cold start
   useEffect(() => {
     AsyncStorage.getItem(LANGUAGE_STORAGE_KEY).then((code) => {
@@ -142,7 +169,9 @@ function AppInitializer() {
     if (data.screen === 'incoming_request') {
       const consultationId = data.consultationId as string | undefined
       if (!consultationId) return
-      resolveIncomingRequestRoute(data).then(route => router.push(route as any))
+      resolveIncomingRequestRoute(data).then(route =>
+        navigateDoctorConsultationRoute(router, currentDoctorRouteRef.current, route.pathname, route.params, 'push', getNavRootState()),
+      )
       return
     }
 
@@ -153,7 +182,12 @@ function AppInitializer() {
       userRole === 'doctor'
         ? (consultationType === 'video' ? '/(doctor)/video-consultation' : consultationType === 'phone' ? '/(doctor)/phone-consultation' : '/(doctor)/chat-consultation')
         : (consultationType === 'video' ? '/(patient)/video-consultation' : consultationType === 'phone' ? '/(patient)/phone-consultation' : '/(patient)/chat-consultation')
-    router.replace({ pathname: pathname as any, params: { consultationId, channelId: consultationId } })
+    const params = { consultationId, channelId: consultationId }
+    if (userRole === 'doctor') {
+      navigateDoctorConsultationRoute(router, currentDoctorRouteRef.current, pathname, params, 'replace', getNavRootState())
+    } else {
+      navigateFamilyRoute(router, getNavRootState(), pathname, params, 'replace')
+    }
   }
 
   useEffect(() => {
@@ -832,7 +866,7 @@ function AppInitializer() {
   // one notification must not silently clear unrelated unread ones.
   useEffect(() => {
     const handleResponse = (data: Record<string, string>) => {
-      navigateForNotification(router, userRole, data)
+      navigateForNotification(router, userRole, data, userRole === 'doctor' ? currentDoctorRouteRef.current : undefined, getNavRootState())
       if (data?.notificationId) {
         markNotificationRead(supabase, data.notificationId).then(() => refreshBadge(supabase, userId))
       } else {
@@ -890,6 +924,40 @@ function SplashHider() {
   return null
 }
 
+// Clerk needs a live network round-trip to resolve its environment/client on
+// a cold start — with no cached session and no connectivity, `<ClerkLoading>`
+// would otherwise spin forever. After a grace period (avoids flashing this on
+// a merely-slow connection), check NetInfo directly and swap the spinner for
+// a full-screen "Connection unavailable" gate instead of leaving the user
+// staring at it indefinitely.
+const CLERK_OFFLINE_GATE_DELAY_MS = 4000
+
+function ClerkLoadingGate({ onRetry }: { onRetry: () => void }) {
+  const [showOfflineGate, setShowOfflineGate] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = setTimeout(() => {
+      NetInfo.fetch().then((state) => {
+        if (cancelled) return
+        const online = (state.isConnected ?? true) && (state.isInternetReachable ?? true)
+        if (!online) setShowOfflineGate(true)
+      })
+    }, CLERK_OFFLINE_GATE_DELAY_MS)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [])
+
+  if (showOfflineGate) {
+    return <OfflineStartScreen onRetry={() => { setShowOfflineGate(false); onRetry() }} />
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#070E27', justifyContent: 'center', alignItems: 'center' }}>
+      <ActivityIndicator size="large" color="#00BFA5" />
+    </View>
+  )
+}
+
 // ─── Root layout ──────────────────────────────────────────────────────────────
 
 export default function RootLayout() {
@@ -899,16 +967,18 @@ export default function RootLayout() {
     Montserrat_600SemiBold,
     Montserrat_700Bold,
   })
+  // Bumped on Retry to force ClerkProvider to remount and re-attempt its
+  // initial network fetch, rather than leaving it stuck on whatever request
+  // failed at cold start — the app itself is never restarted.
+  const [clerkKey, setClerkKey] = useState(0)
 
   if (!fontsLoaded && !fontError) return null
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+      <ClerkProvider key={clerkKey} publishableKey={publishableKey} tokenCache={tokenCache}>
         <ClerkLoading>
-          <View style={{ flex: 1, backgroundColor: '#070E27', justifyContent: 'center', alignItems: 'center' }}>
-            <ActivityIndicator size="large" color="#00BFA5" />
-          </View>
+          <ClerkLoadingGate onRetry={() => setClerkKey((k) => k + 1)} />
         </ClerkLoading>
         <ClerkLoaded>
           <SplashHider />

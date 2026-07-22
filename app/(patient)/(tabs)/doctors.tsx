@@ -3,6 +3,7 @@ import { useScrollToTop } from '@react-navigation/native'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   FlatList,
   Pressable,
   StyleSheet,
@@ -16,10 +17,14 @@ import { BookingModal } from '@/components/ui/BookingModal'
 import { DoctorCard, Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useTranslation } from 'react-i18next'
+
+const DOCTORS_LIST_CACHE_KEY = 'patient-doctors-list'
 
 function mapDoctor(d: any): Doctor {
   return {
@@ -39,6 +44,9 @@ function mapDoctor(d: any): Doctor {
     profile_photo_url: d.users?.profile_photo_url ?? null,
     availability: d.availability ?? null,
     languages: d.languages ?? null,
+    // The query this feeds always filters status='approved' server-side —
+    // every doctor mapDoctor() ever sees is already approved.
+    status: 'approved',
   }
 }
 
@@ -47,9 +55,22 @@ export default function DoctorsScreen() {
   const router = useRouter()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
+  const guardNav = useNavGuard()
   const [allDoctors, setAllDoctors] = useState<Doctor[]>([])
+  // True until the first fetch actually completes — without this, "No
+  // doctors found" flashed on every mount before the fetch below resolved.
+  const [isLoading, setIsLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
+
+  // Paint the last-known doctor list from disk immediately on mount.
+  useEffect(() => {
+    let cancelled = false
+    getCachedJson<Doctor[]>(DOCTORS_LIST_CACHE_KEY).then((cached) => {
+      if (cached && !cancelled) setAllDoctors(cached)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // Latest known realtime-derived fields per doctor. A REST fetch (initial
   // load, or the post-SUBSCRIBED reconciliation fetch below) can resolve
@@ -97,13 +118,25 @@ export default function DoctorsScreen() {
     const CHANNEL_NAME = 'patient-doctors-list-status'
 
     const fetchDoctors = async () => {
-      const { data } = await supabase
-        .from('doctor_profiles')
-        .select('*, users!inner(full_name, profile_photo_url)')
-        .eq('status', 'approved')
-        .order('rating_average', { ascending: false })
-      if (!mounted) return
-      if (data) setAllDoctors(mergeKnownRealtime(data.map(mapDoctor)))
+      try {
+        const { data } = await supabase
+          .from('doctor_profiles')
+          .select('*, users!inner(full_name, profile_photo_url)')
+          .eq('status', 'approved')
+          .order('rating_average', { ascending: false })
+        if (!mounted) return
+        if (data) {
+          const next = mergeKnownRealtime(data.map(mapDoctor))
+          setAllDoctors(next)
+          setCachedJson(DOCTORS_LIST_CACHE_KEY, next)
+        }
+      } catch {
+        // Network failure — leave whatever list is already on screen (cache
+        // or a prior fetch); this previously escaped uncaught and left
+        // isLoading stuck true forever, since the line below never ran.
+      } finally {
+        if (mounted) setIsLoading(false)
+      }
     }
 
     ;(async () => {
@@ -198,7 +231,11 @@ export default function DoctorsScreen() {
           .select('*, users!inner(full_name, profile_photo_url)')
           .eq('status', 'approved')
           .order('rating_average', { ascending: false })
-        if (!cancelled && data) setAllDoctors(mergeKnownRealtime(data.map(mapDoctor)))
+        if (!cancelled && data) {
+          const next = mergeKnownRealtime(data.map(mapDoctor))
+          setAllDoctors(next)
+          setCachedJson(DOCTORS_LIST_CACHE_KEY, next)
+        }
       })()
       return () => { cancelled = true }
     }, [])
@@ -234,9 +271,9 @@ export default function DoctorsScreen() {
     return list
   }, [searchQuery, allDoctors])
 
-  const handleViewProfile = (id: string) => {
+  const handleViewProfile = guardNav((id: string) => {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
-  }
+  })
 
   const ListHeader = (
     <View style={styles.headerContainer}>
@@ -287,11 +324,17 @@ export default function DoctorsScreen() {
         )}
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
-          <View style={styles.empty}>
-            <Ionicons name="search-outline" size={52} color={colors.steelGrey} />
-            <Text style={styles.emptyTitle}>{t('noDoctorsFound')}</Text>
-            <Text style={styles.emptySub}>{t('tryAdjustingFilters')}</Text>
-          </View>
+          isLoading ? (
+            <View style={styles.empty}>
+              <ActivityIndicator size="small" color={colors.steelGrey} />
+            </View>
+          ) : (
+            <View style={styles.empty}>
+              <Ionicons name="search-outline" size={52} color={colors.steelGrey} />
+              <Text style={styles.emptyTitle}>{t('noDoctorsFound')}</Text>
+              <Text style={styles.emptySub}>{t('tryAdjustingFilters')}</Text>
+            </View>
+          )
         }
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}

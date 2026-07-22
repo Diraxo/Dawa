@@ -244,6 +244,7 @@ export type Database = {
           doctor_amount: number | null
           doctor_connected_at: string | null
           doctor_id: string
+          doctor_reconnecting: boolean
           doctor_viewed_at: string | null
           duration_minutes: number | null
           ended_at: string | null
@@ -256,6 +257,7 @@ export type Database = {
           patient_connected_at: string | null
           patient_id: string
           patient_left_at: string | null
+          patient_reconnecting: boolean
           payment_status: string | null
           platform_amount: number | null
           previous_scheduled_at: string | null
@@ -286,6 +288,7 @@ export type Database = {
           doctor_amount?: number | null
           doctor_connected_at?: string | null
           doctor_id: string
+          doctor_reconnecting?: boolean
           doctor_viewed_at?: string | null
           duration_minutes?: number | null
           ended_at?: string | null
@@ -298,6 +301,7 @@ export type Database = {
           patient_connected_at?: string | null
           patient_id: string
           patient_left_at?: string | null
+          patient_reconnecting?: boolean
           payment_status?: string | null
           platform_amount?: number | null
           previous_scheduled_at?: string | null
@@ -328,6 +332,7 @@ export type Database = {
           doctor_amount?: number | null
           doctor_connected_at?: string | null
           doctor_id?: string
+          doctor_reconnecting?: boolean
           doctor_viewed_at?: string | null
           duration_minutes?: number | null
           ended_at?: string | null
@@ -340,6 +345,7 @@ export type Database = {
           patient_connected_at?: string | null
           patient_id?: string
           patient_left_at?: string | null
+          patient_reconnecting?: boolean
           payment_status?: string | null
           platform_amount?: number | null
           previous_scheduled_at?: string | null

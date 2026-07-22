@@ -22,6 +22,7 @@ const baseDoctor: DeriveCallStateInput = {
   doctorConnectedAt: STARTED,
   patientConnectedAt: STARTED,
   localAgoraReconnecting: false,
+  peerReconnecting: false,
   now: NOW,
   hasLoaded: true,
 }
@@ -77,6 +78,15 @@ describe('deriveCallState — doctor can always end the consultation (release it
     expect(isCallActive(out.phase)).toBe(true)
   })
 
+  test('patient self-reports reconnecting before doctor\'s own Agora onUserOffline fires (peer-reported flag) -> reconnecting immediately', () => {
+    // The whole point of migration 093: the doctor's own localAgoraReconnecting
+    // signal can lag behind the patient's — the patient's self-reported DB flag
+    // must independently drive the doctor into 'reconnecting'.
+    const out = deriveCallState({ ...baseDoctor, localAgoraReconnecting: false, peerReconnecting: true })
+    expect(out.phase).toBe('reconnecting')
+    expect(isCallActive(out.phase)).toBe(true)
+  })
+
   test('a genuinely never-answered outgoing call (accepted, doctor not yet self-connected) -> connecting, Cancel Call is correct here', () => {
     const out = deriveCallState({
       ...baseDoctor,
@@ -107,9 +117,10 @@ describe('deriveCallState — doctor can always end the consultation (release it
 describe('deriveCallState — doctor and patient phase agreement (release item #3: connection state)', () => {
   test('both roles derive the same phase from the same row for the core lifecycle phases', () => {
     const rows: Array<Omit<DeriveCallStateInput, 'role'>> = [
-      { status: 'in_progress', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: false, now: NOW, hasLoaded: true },
-      { status: 'in_progress', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: true, now: NOW, hasLoaded: true },
-      { status: 'completed', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: false, now: NOW, hasLoaded: true },
+      { status: 'in_progress', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: false, peerReconnecting: false, now: NOW, hasLoaded: true },
+      { status: 'in_progress', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: true, peerReconnecting: false, now: NOW, hasLoaded: true },
+      { status: 'in_progress', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: false, peerReconnecting: true, now: NOW, hasLoaded: true },
+      { status: 'completed', startedAt: STARTED, doctorConnectedAt: STARTED, patientConnectedAt: STARTED, localAgoraReconnecting: false, peerReconnecting: false, now: NOW, hasLoaded: true },
     ]
     for (const row of rows) {
       const doctorPhase = deriveCallState({ ...row, role: 'doctor' }).phase

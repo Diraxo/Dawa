@@ -26,6 +26,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
+import { useServerNow } from '@/lib/serverClock'
 import {
   SLOT_DURATION_MINS,
   formatTimeMins,
@@ -142,17 +143,12 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     buttons: AlertButton[]
   }>({ visible: false, variant: 'warning', title: '', message: '', buttons: [] })
   const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
-  // Forces a re-render every 30s so isSlotPast() (a pure function keyed off
-  // Date.now() at call time) re-evaluates without the patient having to
-  // touch anything — otherwise a slot that just became past stayed shown as
-  // selectable until some unrelated state change happened to re-render.
-  const [, setNowTick] = useState(0)
-  useEffect(() => {
-    if (!visible) return
-    const id = setInterval(() => setNowTick(t => t + 1), 30_000)
-    return () => clearInterval(id)
-  }, [visible])
-  const days = getNextDays(14, doctor?.availability ?? undefined)
+  // Device-clock-independent "now", synced against Postgres' own now() —
+  // see lib/serverClock.ts. Both re-syncs periodically and ticks every 30s,
+  // so a slot that just became past disappears without the patient touching
+  // anything, and can't be kept bookable by a wrong/rolled-back device clock.
+  const nowMs = useServerNow()
+  const days = getNextDays(14, doctor?.availability ?? undefined, nowMs)
   const selectedDayValue = days[selectedDay]?.value
 
   const canStartNow = Boolean(doctor?.is_online) && !doctorBusy && !doctorScheduledSoon
@@ -833,7 +829,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       if (days.length === 0) return false
       if (selectedTime === '') return false
       if (bookedTimes.has(selectedTime)) return false
-      if (isSlotPast(days[selectedDay]?.value ?? '', selectedTime)) return false
+      if (isSlotPast(days[selectedDay]?.value ?? '', selectedTime, nowMs)) return false
       return true
     }
     return true
@@ -1000,7 +996,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
                             <View style={styles.timeGrid}>
                               {slots.map(slot => {
                                 const isBooked = bookedTimes.has(slot)
-                                const isPast = !isBooked && isSlotPast(days[selectedDay]?.value ?? '', slot)
+                                const isPast = !isBooked && isSlotPast(days[selectedDay]?.value ?? '', slot, nowMs)
                                 return (
                                   <Pressable
                                     key={slot}

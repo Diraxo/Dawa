@@ -2,9 +2,9 @@ import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useFocusEffect, useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useCallback, useState } from 'react'
 import {
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,13 +15,16 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
 import { CareHubAlert } from '@/components/ui/CareHubAlert'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
 
@@ -38,9 +41,13 @@ function MenuRow({
   onPress: () => void
   danger?: boolean
 }) {
+  // Guarded here once so every MenuRow call site (edit profile, my reviews,
+  // documents, language, etc.) is protected against rapid repeat taps
+  // stacking duplicate screens, without needing a guard at each call site.
+  const guard = useNavGuard()
   return (
     <Pressable
-      onPress={onPress}
+      onPress={guard(onPress)}
       style={({ pressed }) => [styles.menuRow, pressed && { opacity: 0.7 }]}
     >
       <View style={[styles.menuIconWrap, danger && styles.menuIconWrapDanger]}>
@@ -83,11 +90,18 @@ export default function DoctorProfileScreen() {
   const { t } = useTranslation()
   const { clearAuth, disconnectStream } = useAuthStore()
   const { doctorStatus } = useDoctorStore()
+  const guardLogout = useNavGuard()
 
   const isPending = doctorStatus && doctorStatus !== 'approved'
 
-  const fullName = user?.fullName ?? `Dr. ${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()
-  const initial = (user?.firstName?.[0] ?? fullName[0] ?? 'D').toUpperCase()
+  // Clerk populates user.fullName from firstName/lastName automatically, so
+  // it's almost always present — the "Dr. " fallback below never used to
+  // fire, leaving the doctor's own name on this screen without the prefix
+  // every other doctor-facing screen shows. Strip any Dr. the doctor may
+  // have typed into their name themselves first, so it's never doubled.
+  const rawFullName = (user?.fullName ?? `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()).replace(/^Dr\.?\s*/i, '').trim()
+  const fullName = rawFullName ? `Dr. ${rawFullName}` : 'Dr.'
+  const initial = (user?.firstName?.[0] ?? rawFullName[0] ?? 'D').toUpperCase()
 
   const [profile, setProfile] = useState<ProfileData>(DEFAULT_PROFILE)
   const { photoUrl: profilePhotoUrl } = useOwnProfilePhoto()
@@ -96,6 +110,22 @@ export default function DoctorProfileScreen() {
   const [showDeleteAlert, setShowDeleteAlert] = useState(false)
   const [showDeleteConfirmAlert, setShowDeleteConfirmAlert] = useState(false)
   const [showDeleteErrorAlert, setShowDeleteErrorAlert] = useState(false)
+  const profileCacheKey = userId ? `doctor-profile-data:${userId}` : null
+
+  // Hydrate the last-known profile (rating/consultations/pricing/bio) from
+  // disk immediately so returning to this tab shows real values instead of
+  // DEFAULT_PROFILE's zeros/blanks while the focus-triggered fetch below is
+  // still in flight — same cache-then-refresh pattern as useOwnProfilePhoto.
+  useFocusEffect(
+    useCallback(() => {
+      if (!profileCacheKey) return
+      let cancelled = false
+      getCachedJson<ProfileData>(profileCacheKey).then((cached) => {
+        if (cached && !cancelled) setProfile(cached)
+      })
+      return () => { cancelled = true }
+    }, [profileCacheKey])
+  )
 
   useFocusEffect(
     useCallback(() => {
@@ -132,7 +162,7 @@ export default function DoctorProfileScreen() {
 
         if (profileRes.data) {
           const p = profileRes.data as any
-          setProfile({
+          const next: ProfileData = {
             rating: Number(p.rating_average ?? 0),
             consultations: p.total_consultations ?? 0,
             totalEarned,
@@ -145,10 +175,12 @@ export default function DoctorProfileScreen() {
             chatPrice: p.chat_price ?? 0,
             phonePrice: p.phone_price ?? 0,
             videoPrice: p.video_price ?? 0,
-          })
+          }
+          setProfile(next)
+          if (profileCacheKey) setCachedJson(profileCacheKey, next)
         }
       })
-    }, [userId])
+    }, [userId, profileCacheKey])
   )
 
   const showComingSoon = () => setShowComingSoonAlert(true)
@@ -204,7 +236,7 @@ export default function DoctorProfileScreen() {
           {
             text: 'Log Out',
             style: 'danger',
-            onPress: async () => {
+            onPress: guardLogout(async () => {
               setShowLogoutAlert(false)
               try {
                 const token = await getToken()
@@ -220,7 +252,7 @@ export default function DoctorProfileScreen() {
               clearAuth()
               await signOut()
               router.replace('/(auth)/sign-in')
-            },
+            }),
           },
         ]}
         onClose={() => setShowLogoutAlert(false)}
@@ -274,7 +306,13 @@ export default function DoctorProfileScreen() {
           <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.profileHeader}>
             <Pressable onPress={() => router.push('/(doctor)/edit-profile' as never)} style={styles.photoWrap}>
               {displayPhoto ? (
-                <Image source={{ uri: displayPhoto }} style={styles.photo} />
+                <Image
+                  source={{ uri: displayPhoto }}
+                  style={styles.photo}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                />
               ) : (
                 <View style={styles.photoFallback}>
                   <Text style={styles.photoInitial}>{initial}</Text>
@@ -284,7 +322,10 @@ export default function DoctorProfileScreen() {
                 <Ionicons name="camera" size={14} color={colors.mistWhite} />
               </View>
             </Pressable>
-            <Text style={styles.profileName}>{fullName}</Text>
+            <View style={styles.profileNameRow}>
+              <Text style={styles.profileName}>{fullName}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={18} />}
+            </View>
             <Text style={styles.profileSpecialty}>
               {profile.specialty || 'General Practice'}{profile.hospital ? ` · ${profile.hospital}` : ''}
             </Text>
@@ -513,6 +554,7 @@ const styles = StyleSheet.create({
   photoInitial: { fontFamily: fonts.bold, fontSize: 36, color: colors.mistWhite },
   editBadge: { position: 'absolute', bottom: 0, right: 0, width: 26, height: 26, borderRadius: 13, backgroundColor: colors.careBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.mistWhite },
 
+  profileNameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   profileName: { fontFamily: fonts.bold, fontSize: 22, color: colors.mistWhite, textAlign: 'center' },
   profileSpecialty: { fontFamily: fonts.regular, fontSize: 14, color: 'rgba(255,255,255,0.8)', textAlign: 'center' },
 

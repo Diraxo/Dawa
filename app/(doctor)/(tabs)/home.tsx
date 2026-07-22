@@ -3,11 +3,11 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRootNavigationState, useRouter } from 'expo-router'
 import * as Notifications from 'expo-notifications'
+import { Image } from 'expo-image'
 import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   AppState,
-  Image,
   Platform,
   Pressable,
   ScrollView,
@@ -24,11 +24,14 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { callkeep } from '@/lib/callkeep'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useNotificationCenter } from '@/hooks/useNotificationCenter'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
 import { useDoctorStore } from '@/store/doctorStore'
@@ -101,11 +104,14 @@ export default function DoctorHomeScreen() {
   const [schedule, setSchedule] = useState<ScheduleItem[]>([])
   const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
   const [stats, setStats] = useState({ totalConsultations: 0, completedToday: 0, earnings: 0, rating: 0 })
+  const statsCacheKey = user?.id ? `doctor-dashboard-stats:${user.id}` : null
+  const scheduleCacheKey = user?.id ? `doctor-dashboard-schedule:${user.id}` : null
   const [doctorProfileId, setDoctorProfileId] = useState<string | null>(null)
   const [isLoadingDashboard, setIsLoadingDashboard] = useState(true)
   const [dashboardLoadError, setDashboardLoadError] = useState<string | null>(null)
   const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
   const { isOnline, setIsOnline, toggling: togglingOnline, toggle: toggleOnline } = useDoctorOnlineToggle(doctorProfileId, { resyncOnForeground: true })
+  const guardNav = useNavGuard()
 
   // Re-run whenever a consultation change comes in over Realtime (see the
   // subscription below) so a newly-paid scheduled booking, or one that's
@@ -122,7 +128,7 @@ export default function DoctorHomeScreen() {
       .order('scheduled_at', { ascending: true })
 
     if (data) {
-      setSchedule(data.map((r: any) => ({
+      const next = data.map((r: any) => ({
         id: r.id,
         patientId: r.patient_id,
         patientName: (r.patient as any)?.full_name ?? 'Patient',
@@ -130,7 +136,9 @@ export default function DoctorHomeScreen() {
         time: new Date(r.scheduled_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         type: r.type ?? 'chat',
         status: r.status ?? 'scheduled',
-      })))
+      }))
+      setSchedule(next)
+      if (scheduleCacheKey) setCachedJson(scheduleCacheKey, next)
     }
   }
 
@@ -148,6 +156,37 @@ export default function DoctorHomeScreen() {
   // their zeroed initial state and the screen looking "stuck loading forever"
   // with no way to recover short of force-quitting the app. loadDashboard is
   // now retryable from the error state's Retry button.
+  // Re-runs just the four "Today's Stats" cards' numbers (Total Consultations,
+  // Completed Today, Rating, Total Earnings) — split out from loadDashboard so
+  // the consultations-table realtime subscription below can keep these live
+  // without also flashing the full-screen loading state on every event.
+  const refreshStats = async (profileId: string, client: ReturnType<typeof getAuthClient>) => {
+    const { startIso: todayStartIso } = ethiopiaTodayRange()
+    const [profileRes, todayStatsRes, allEarningsRes] = await Promise.all([
+      client.from('doctor_profiles').select('rating_average, total_consultations').eq('id', profileId).single(),
+      client.from('consultations')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'completed')
+        .gte('ended_at', todayStartIso),
+      // Lifetime total, not today-scoped — matches the website's "Total
+      // Earnings" card (carehub-web/app/doctor/page.tsx), which this
+      // screen's stat is meant to mirror.
+      client.from('consultations')
+        .select('doctor_amount')
+        .eq('status', 'completed'),
+    ])
+    if (!profileRes.data) return
+    const p = profileRes.data as any
+    const next = {
+      totalConsultations: p.total_consultations ?? 0,
+      completedToday: todayStatsRes.count ?? 0,
+      earnings: (allEarningsRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.doctor_amount) || 0), 0),
+      rating: Number(p.rating_average ?? 0),
+    }
+    setStats(next)
+    if (statsCacheKey) setCachedJson(statsCacheKey, next)
+  }
+
   const loadDashboard = async () => {
     if (!user?.id) return
     setDashboardLoadError(null)
@@ -156,7 +195,6 @@ export default function DoctorHomeScreen() {
       const token = await getToken()
       if (!token) throw new Error('Not signed in')
       const client = getAuthClient(token)
-      const { startIso: todayStartIso } = ethiopiaTodayRange()
 
       // doctor_profiles SELECT RLS returns own row + every approved doctor's
       // row (for patient browsing), so this must be filtered to the caller's
@@ -165,36 +203,26 @@ export default function DoctorHomeScreen() {
       if (meError || !me) throw meError ?? new Error('Could not load your account')
       setDbUserId((me as any).id)
 
-      const [profileRes, todayStatsRes, allEarningsRes] = await Promise.all([
-        client.from('doctor_profiles').select('id, user_id, rating_average, total_consultations, is_online').eq('user_id', (me as any).id).single(),
-        client.from('consultations')
-          .select('id', { count: 'exact', head: true })
-          .eq('status', 'completed')
-          .gte('ended_at', todayStartIso),
-        // Lifetime total, not today-scoped — matches the website's "Total
-        // Earnings" card (carehub-web/app/doctor/page.tsx), which this
-        // screen's stat is meant to mirror.
-        client.from('consultations')
-          .select('doctor_amount')
-          .eq('status', 'completed'),
-      ])
+      const { data: profile, error: profileError } = await client
+        .from('doctor_profiles').select('id, user_id, is_online').eq('user_id', (me as any).id).single()
+      if (profileError || !profile) throw profileError ?? new Error('Could not load your doctor profile')
 
-      if (profileRes.error || !profileRes.data) throw profileRes.error ?? new Error('Could not load your doctor profile')
-
-      const p = profileRes.data as any
+      const p = profile as any
       const profileId: string = p.id
       setDoctorProfileId(profileId)
       setIsOnline(p.is_online ?? false)
-      const rating = Number(p.rating_average ?? 0)
-      const completedToday = todayStatsRes.count ?? 0
-      const totalConsultations = p.total_consultations ?? 0
-      const earnings = (allEarningsRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.doctor_amount) || 0), 0)
-      setStats({ totalConsultations, completedToday, earnings, rating })
 
-      // Show incoming request modal for any consultation already waiting
-      // when the doctor opens the screen (Realtime only catches future updates)
-      await checkForWaitingRequest(profileId, token)
-      await loadTodaySchedule(client)
+      // Stats/today's-schedule are independent of each other (and of the
+      // waiting-request check below) once profileId+token are known — no
+      // reason to pay three sequential round trips for data that doesn't
+      // depend on one another.
+      await Promise.all([
+        refreshStats(profileId, client),
+        // Show incoming request modal for any consultation already waiting
+        // when the doctor opens the screen (Realtime only catches future updates)
+        checkForWaitingRequest(profileId, token),
+        loadTodaySchedule(client),
+      ])
     } catch (err: any) {
       setDashboardLoadError(err?.message ?? 'Could not load your dashboard')
     } finally {
@@ -203,6 +231,47 @@ export default function DoctorHomeScreen() {
   }
 
   useEffect(() => { loadDashboard() }, [user?.id])
+
+  // Hydrate last-known stats/schedule from disk immediately on mount so a
+  // cold start shows real numbers instead of zeros/blank while the fetch
+  // chain above (Clerk token -> users row -> doctor_profiles row -> stats)
+  // is still in flight — loadDashboard() above reconciles with fresh data
+  // as soon as it resolves, same cache-then-refresh pattern as
+  // hooks/useOwnProfilePhoto.ts.
+  useEffect(() => {
+    if (!statsCacheKey || !scheduleCacheKey) return
+    let cancelled = false
+    getCachedJson<typeof stats>(statsCacheKey).then((cached) => {
+      if (cached && !cancelled) setStats(cached)
+    })
+    getCachedJson<ScheduleItem[]>(scheduleCacheKey).then((cached) => {
+      if (cached && !cancelled) setSchedule(cached)
+    })
+    return () => { cancelled = true }
+  }, [statsCacheKey, scheduleCacheKey])
+
+  // Ratings/total_consultations live-update — a new review or a completed
+  // consultation updates doctor_profiles directly via DB trigger, which
+  // never touches the `consultations` table, so the realtime subscription
+  // below (scoped to `consultations`) can't catch it. Shares the same
+  // channel useDoctorOnlineToggle already opened for is_online, via the
+  // ref-counted manager, instead of opening a second subscription.
+  useEffect(() => {
+    if (!doctorProfileId) return
+    return subscribeRealtime(
+      `doctor_profiles:id=eq.${doctorProfileId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorProfileId}` }],
+      (_event, payload) => {
+        const updated = payload.new as any
+        if (updated?.rating_average == null && updated?.total_consultations == null) return
+        setStats((prev) => ({
+          ...prev,
+          rating: updated.rating_average != null ? Number(updated.rating_average) : prev.rating,
+          totalConsultations: updated.total_consultations ?? prev.totalConsultations,
+        }))
+      },
+    )
+  }, [doctorProfileId])
 
   // ── Show incoming request only once payment is confirmed, and only while
   // the doctor is NOT already busy in another consultation ─────────────────
@@ -324,8 +393,12 @@ export default function DoctorHomeScreen() {
         async () => {
           const token = await getToken()
           if (!token) return
-          await checkForWaitingRequest(doctorProfileId, token)
-          await loadTodaySchedule(getAuthClient(token))
+          const client = getAuthClient(token)
+          await Promise.all([
+            checkForWaitingRequest(doctorProfileId, token),
+            loadTodaySchedule(client),
+            refreshStats(doctorProfileId, client),
+          ])
         }
       )
       .on(
@@ -343,8 +416,10 @@ export default function DoctorHomeScreen() {
           if (!isRelevant) return
           const token = await getToken()
           if (!token) return
-          await checkForWaitingRequest(doctorProfileId, token)
-          await loadTodaySchedule(getAuthClient(token))
+          await Promise.all([
+            checkForWaitingRequest(doctorProfileId, token),
+            loadTodaySchedule(getAuthClient(token)),
+          ])
         }
       )
       .subscribe()
@@ -374,8 +449,10 @@ export default function DoctorHomeScreen() {
       if (next !== 'active') return
       getToken().then(async (token) => {
         if (!token) return
-        await checkForWaitingRequest(doctorProfileId, token)
-        await loadTodaySchedule(getAuthClient(token))
+        await Promise.all([
+          checkForWaitingRequest(doctorProfileId, token),
+          loadTodaySchedule(getAuthClient(token)),
+        ])
       })
     })
     return () => sub.remove()
@@ -425,16 +502,26 @@ export default function DoctorHomeScreen() {
             <Text style={styles.dateText}>{getFormattedDate()}</Text>
           </View>
           <View style={styles.headerRight}>
-            <Pressable style={styles.bellBtn} hitSlop={8} onPress={() => router.push('/(doctor)/notifications' as never)}>
+            <Pressable style={styles.bellBtn} hitSlop={8} onPress={guardNav(() => router.push('/(doctor)/notifications' as never))}>
               <Ionicons name="notifications-outline" size={24} color={colors.mistWhite} />
-              {unreadCount > 0 && <View style={styles.bellBadge} />}
+              {unreadCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText} numberOfLines={1}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                </View>
+              )}
             </Pressable>
             <Pressable
-              onPress={() => router.push('/(doctor)/(tabs)/profile')}
+              onPress={guardNav(() => router.push('/(doctor)/(tabs)/profile'))}
               style={({ pressed }) => [styles.avatarBtn, pressed && { opacity: 0.8 }]}
             >
               {(doctorPhotoUrl ?? user?.imageUrl) ? (
-                <Image source={{ uri: (doctorPhotoUrl ?? user?.imageUrl) as string }} style={styles.avatar} />
+                <Image
+                  source={{ uri: (doctorPhotoUrl ?? user?.imageUrl) as string }}
+                  style={styles.avatar}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                />
               ) : (
                 <View style={styles.avatarFallback}>
                   <Text style={styles.avatarInitial}>{firstName[0].toUpperCase()}</Text>
@@ -503,16 +590,20 @@ export default function DoctorHomeScreen() {
           <Text style={styles.sectionTitle}>{t('todayStats')}</Text>
           <View style={styles.statsRow}>
             {[
-              { icon: 'medical-outline', value: String(stats.totalConsultations), label: 'Total Consultations', color: colors.careBlue },
-              { icon: 'checkmark-circle-outline', value: String(stats.completedToday), label: 'Completed Today', color: colors.tealGreen },
-              { icon: 'star-outline', value: stats.rating > 0 ? stats.rating.toFixed(1) : '—', label: t('rating'), color: colors.warning },
-              { icon: 'wallet-outline', value: `ETB ${stats.earnings.toLocaleString()}`, label: 'Total Earnings', color: colors.tealGreen },
+              { icon: 'medical-outline', value: String(stats.totalConsultations), label: 'Total Consultations', color: colors.careBlue, route: '/(doctor)/(tabs)/consultations' },
+              { icon: 'checkmark-circle-outline', value: String(stats.completedToday), label: 'Completed Today', color: colors.tealGreen, route: { pathname: '/(doctor)/(tabs)/consultations', params: { tab: 'completed', dateFilter: 'today' } } },
+              { icon: 'star-outline', value: stats.rating > 0 ? stats.rating.toFixed(1) : '—', label: t('rating'), color: colors.warning, route: '/(doctor)/my-reviews' },
+              { icon: 'wallet-outline', value: `ETB ${stats.earnings.toLocaleString()}`, label: 'Total Earnings', color: colors.tealGreen, route: '/(doctor)/withdraw' },
             ].map((stat) => (
-              <View key={stat.label} style={styles.statCard}>
+              <Pressable
+                key={stat.label}
+                style={({ pressed }) => [styles.statCard, pressed && { opacity: 0.75 }]}
+                onPress={guardNav(() => router.push(stat.route as never))}
+              >
                 <Ionicons name={stat.icon as never} size={22} color={stat.color} />
                 <Text style={[styles.statValue, { color: stat.color }]}>{stat.value}</Text>
                 <Text style={styles.statLabel}>{stat.label}</Text>
-              </View>
+              </Pressable>
             ))}
           </View>
 
@@ -535,7 +626,14 @@ export default function DoctorHomeScreen() {
                 })}
               >
                 {item.patientPhotoUrl ? (
-                  <Image source={{ uri: item.patientPhotoUrl }} style={styles.scheduleAvatar} />
+                  <Image
+                    source={{ uri: item.patientPhotoUrl }}
+                    style={styles.scheduleAvatar}
+                    contentFit="cover"
+                    cachePolicy="memory-disk"
+                    transition={0}
+                    recyclingKey={item.patientPhotoUrl}
+                  />
                 ) : (
                   <View style={styles.scheduleIconWrap}>
                     <Ionicons name={CONSULTATION_ICONS[item.type]} size={20} color={colors.inkBlack} />
@@ -555,12 +653,12 @@ export default function DoctorHomeScreen() {
           <View style={styles.quickRow}>
             {[
               { icon: 'calendar-outline', label: t('upcomingAppts'), route: '/(doctor)/(tabs)/schedule' },
-              { icon: 'cash-outline', label: t('earnings'), route: '/(doctor)/(tabs)/profile' },
-              { icon: 'star-outline', label: t('myReviews'), route: '/(doctor)/(tabs)/profile' },
+              { icon: 'cash-outline', label: t('earnings'), route: '/(doctor)/withdraw' },
+              { icon: 'star-outline', label: t('myReviews'), route: '/(doctor)/my-reviews' },
             ].map((action) => (
               <Pressable
                 key={action.label}
-                onPress={() => router.push(action.route as never)}
+                onPress={guardNav(() => router.push(action.route as never))}
                 style={({ pressed }) => [styles.quickCard, pressed && { opacity: 0.8 }]}
               >
                 <Ionicons name={action.icon as never} size={24} color={colors.careBlue} />
@@ -604,7 +702,12 @@ const styles = StyleSheet.create({
   headerLeft: { flex: 1 },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   bellBtn: { position: 'relative', padding: 4 },
-  bellBadge: { position: 'absolute', top: 4, right: 4, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.error, borderWidth: 1.5, borderColor: colors.careBlue },
+  bellBadge: {
+    position: 'absolute', top: 0, right: 0, minWidth: 16, height: 16, borderRadius: 8,
+    backgroundColor: colors.error, borderWidth: 1.5, borderColor: colors.careBlue,
+    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3,
+  },
+  bellBadgeText: { fontFamily: fonts.bold, fontSize: 9, color: colors.mistWhite, lineHeight: 11 },
   greeting: { fontFamily: fonts.bold, fontSize: 20, color: colors.mistWhite, lineHeight: 26 },
   dateText: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.8)', marginTop: 2 },
   avatarBtn: { borderRadius: 22 },

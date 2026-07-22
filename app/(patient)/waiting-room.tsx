@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
@@ -55,6 +56,7 @@ interface DoctorInfo {
   specialty:       string
   yearsExperience: number | null
   hospitalName:    string | null
+  status:          string | null
 }
 
 export default function WaitingRoomScreen() {
@@ -125,7 +127,7 @@ export default function WaitingRoomScreen() {
     if (!consultationId) return
     supabase
       .from('consultations')
-      .select('doctor:doctor_profiles(specialty, years_experience, hospital_name, user:users(id, full_name, profile_photo_url))')
+      .select('doctor:doctor_profiles(specialty, years_experience, hospital_name, status, user:users(id, full_name, profile_photo_url))')
       .eq('id', consultationId)
       .single()
       .then(({ data }) => {
@@ -138,6 +140,7 @@ export default function WaitingRoomScreen() {
           specialty:       dp.specialty ?? 'General Practice',
           yearsExperience: dp.years_experience ?? null,
           hospitalName:    dp.hospital_name ?? null,
+          status:          dp.status ?? null,
         })
         setDoctorUserRowId(u.id ?? null)
       })
@@ -175,6 +178,7 @@ export default function WaitingRoomScreen() {
             specialty: updated.specialty ?? prev.specialty,
             hospitalName: updated.hospital_name ?? prev.hospitalName,
             yearsExperience: updated.years_experience ?? prev.yearsExperience,
+            status: updated.status ?? prev.status,
           } : prev)
         }
       )
@@ -570,7 +574,10 @@ export default function WaitingRoomScreen() {
             )}
 
             <View style={styles.doctorMeta}>
-              <Text style={styles.doctorName}>{displayName}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={styles.doctorName}>{displayName}</Text>
+                {doctorInfo?.status === 'approved' && <VerifiedBadge size={15} />}
+              </View>
               {doctorInfo?.specialty ? (
                 <View style={styles.doctorTagRow}>
                   <Ionicons name="medical-outline" size={13} color={colors.tealGreen} />

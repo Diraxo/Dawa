@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons'
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image } from 'expo-image'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -69,7 +70,13 @@ export function CallHeader({
 
         <View style={styles.centerChip} pointerEvents="none">
           {counterpartPhotoUrl ? (
-            <Image source={{ uri: counterpartPhotoUrl }} style={styles.centerPhoto} />
+            <Image
+              source={{ uri: counterpartPhotoUrl }}
+              style={styles.centerPhoto}
+              contentFit="cover"
+              cachePolicy="memory-disk"
+              transition={0}
+            />
           ) : (
             <View style={styles.centerPhotoFallback}>
               <Ionicons name="person" size={13} color="rgba(255,255,255,0.5)" />

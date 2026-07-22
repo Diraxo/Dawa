@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons'
-import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image } from 'expo-image'
+import { Modal, Pressable, StyleSheet, Text, View } from 'react-native'
 
 import { GradientButton } from '@/components/ui/GradientButton'
 import { colors } from '@/constants/colors'
@@ -46,7 +47,13 @@ export function AppointmentDetailsSheet({ appt, onClose, onJoin, onViewSummary }
           <View style={styles.header}>
             <View style={styles.avatarWrap}>
               {appt.patientPhotoUrl ? (
-                <Image source={{ uri: appt.patientPhotoUrl }} style={styles.avatar} />
+                <Image
+                  source={{ uri: appt.patientPhotoUrl }}
+                  style={styles.avatar}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                />
               ) : (
                 <View style={styles.avatarFallback}>
                   <Text style={styles.avatarFallbackText}>{appt.patientName.charAt(0) || '?'}</Text>

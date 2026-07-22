@@ -17,6 +17,7 @@ import { Conversation, ConversationItem } from '@/components/ui/ConversationItem
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { isChannelReadThrough, markChannelReadLocally } from '@/lib/readCache'
 import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
@@ -58,6 +59,7 @@ function formatTime(date: string | Date | null | undefined): string {
 export default function DoctorMessagesScreen() {
   const { t } = useTranslation()
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { isStreamConnected, userId } = useAuthStore()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -214,7 +216,7 @@ export default function DoctorMessagesScreen() {
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
-  const handlePress = (id: string) => {
+  const handlePress = guardNav((id: string) => {
     const convo = conversations.find((c) => c.id === id)
     if (!convo) return
     setConversations((prev) =>
@@ -235,7 +237,7 @@ export default function DoctorMessagesScreen() {
         consultationStatus: convo.consultationStatus,
       },
     })
-  }
+  })
 
   const handleLongPress = (id: string) => setOpenMenuId(id)
   const handleMenuClose = () => setOpenMenuId(null)

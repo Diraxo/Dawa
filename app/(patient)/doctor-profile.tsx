@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { BookingModal } from '@/components/ui/BookingModal'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -40,6 +41,7 @@ interface DoctorData {
   is_online: boolean; profile_photo_url?: string | null; userId?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
   languages?: string[] | null
+  status?: string | null
 }
 interface ReviewData {
   id: string; patientName: string; patientPhotoUrl: string | null
@@ -84,6 +86,9 @@ export default function DoctorProfileScreen() {
   const [doctor, setDoctor] = useState<DoctorData | null>(null)
   const [reviews, setReviews] = useState<ReviewData[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const [retryTick, setRetryTick] = useState(0)
+  const hasLoadedOnceRef = useRef(false)
   const [reviewsOffset, setReviewsOffset] = useState(0)
   const [hasMoreReviews, setHasMoreReviews] = useState(true)
   const [loadingMoreReviews, setLoadingMoreReviews] = useState(false)
@@ -101,7 +106,7 @@ export default function DoctorProfileScreen() {
   // wins) before it reaches state.
   const realtimeKnownRef = useRef<Partial<Pick<DoctorData,
     'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
-    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count'
+    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count' | 'status'
   >>>({})
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
@@ -117,15 +122,31 @@ export default function DoctorProfileScreen() {
     // ("cannot add postgres_changes callbacks ... after subscribe()").
     const CHANNEL_NAME = `patient-doctor-profile-status-${id}-${Date.now()}`
     realtimeKnownRef.current = {}
+    setLoading(true)
+    setLoadError(false)
 
     const fetchDoctor = async () => {
-      const { data: dp } = await supabase
-        .from('doctor_profiles')
-        .select('*, users!inner(id, full_name, profile_photo_url)')
-        .eq('id', id)
-        .single()
+      let dp: any = null
+      try {
+        const { data, error } = await supabase
+          .from('doctor_profiles')
+          .select('*, users!inner(id, full_name, profile_photo_url)')
+          .eq('id', id)
+          .single()
+        if (error) throw error
+        dp = data
+      } catch {
+        // A network failure on the post-SUBSCRIBED reconciliation fetch must
+        // not blank out an already-loaded profile — only the initial load
+        // (nothing shown yet) surfaces the error/retry state.
+        if (mounted && !hasLoadedOnceRef.current) setLoadError(true)
+        if (mounted) setLoading(false)
+        return
+      }
       if (!mounted) return
       if (dp) {
+        hasLoadedOnceRef.current = true
+        setLoadError(false)
         setDoctor({
           id: dp.id,
           name: formatDoctorName((dp as any).users?.full_name, 'Dr. Unknown'),
@@ -143,6 +164,7 @@ export default function DoctorProfileScreen() {
           userId: (dp as any).users?.id ?? null,
           availability: (dp as any).availability ?? null,
           languages: (dp as any).languages ?? null,
+          status: (dp as any).status ?? null,
           // Realtime is authoritative once received — a concurrently-resolving
           // fetch (like this one) could otherwise clobber a newer live value.
           ...realtimeKnownRef.current,
@@ -194,6 +216,7 @@ export default function DoctorProfileScreen() {
               video_price: Number(updated.video_price ?? 0),
               rating_average: Number(updated.rating_average ?? 0),
               review_count: (updated.review_count ?? 0) as number,
+              status: (updated.status ?? null) as string | null,
             }
             realtimeKnownRef.current = patch
             setDoctor(prev => prev ? {
@@ -210,6 +233,7 @@ export default function DoctorProfileScreen() {
               video_price: patch.video_price,
               rating_average: patch.rating_average,
               review_count: patch.review_count,
+              status: patch.status ?? prev.status,
             } : prev)
           }
         )
@@ -237,7 +261,7 @@ export default function DoctorProfileScreen() {
       mounted = false
       if (channelRef.current) supabase.removeChannel(channelRef.current)
     }
-  }, [id])
+  }, [id, retryTick])
 
   useEffect(() => {
     if (doctor && autoBook === '1' && !autoBookedRef.current) {
@@ -267,6 +291,25 @@ export default function DoctorProfileScreen() {
       setReviewsOffset(prev => prev + data.length)
     }
     setLoadingMoreReviews(false)
+  }
+
+  if (loadError && !doctor) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
+          <Ionicons name="cloud-offline-outline" size={40} color={colors.steelGrey} style={{ marginBottom: 12 }} />
+          <Text style={{ fontFamily: fonts.medium, color: colors.inkBlack, fontSize: 15, textAlign: 'center', marginBottom: 16 }}>
+            Could not load this profile. Check your connection and try again.
+          </Text>
+          <Pressable
+            onPress={() => { setLoadError(false); setLoading(true); setRetryTick((n) => n + 1) }}
+            style={{ paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.tealGreen }}
+          >
+            <Text style={{ fontFamily: fonts.semiBold, color: '#FFFFFF', fontSize: 14 }}>Retry</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    )
   }
 
   if (loading || !doctor) {
@@ -309,7 +352,14 @@ export default function DoctorProfileScreen() {
           <View style={styles.photoWrap}>
             {livePhotoUrl ? (
               <Pressable onPress={() => setImageFullscreen(true)}>
-                <Image source={{ uri: livePhotoUrl }} style={styles.photo} />
+                <Image
+                  source={{ uri: livePhotoUrl }}
+                  style={styles.photo}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                  recyclingKey={livePhotoUrl}
+                />
               </Pressable>
             ) : (
               <View style={styles.photoPlaceholder}>
@@ -324,7 +374,10 @@ export default function DoctorProfileScreen() {
             )}
           </View>
 
-          <Text style={styles.heroName}>{displayName}</Text>
+          <View style={styles.heroNameRow}>
+            <Text style={styles.heroName}>{displayName}</Text>
+            {doctor.status === 'approved' && <VerifiedBadge size={18} />}
+          </View>
           <Text style={styles.heroSpecialty}>{doctor.specialty}</Text>
           {doctor.subtitle ? (
             <View style={styles.hospitalRow}>
@@ -432,7 +485,14 @@ export default function DoctorProfileScreen() {
                 <View key={review.id} style={styles.reviewCard}>
                   <View style={styles.reviewHeader}>
                     {review.patientPhotoUrl ? (
-                      <Image source={{ uri: review.patientPhotoUrl }} style={styles.reviewAvatar} />
+                      <Image
+                        source={{ uri: review.patientPhotoUrl }}
+                        style={styles.reviewAvatar}
+                        contentFit="cover"
+                        cachePolicy="memory-disk"
+                        transition={0}
+                        recyclingKey={review.patientPhotoUrl}
+                      />
                     ) : (
                       <View style={styles.reviewAvatar}>
                         <Text style={styles.reviewAvatarText}>{review.patientName.charAt(0)}</Text>
@@ -518,7 +578,9 @@ export default function DoctorProfileScreen() {
             <Image
               source={{ uri: livePhotoUrl }}
               style={styles.fsImage}
-              resizeMode="contain"
+              contentFit="contain"
+              cachePolicy="memory-disk"
+              recyclingKey={livePhotoUrl}
             />
           )}
         </View>
@@ -574,7 +636,8 @@ const styles = StyleSheet.create({
   },
   onlineDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
   onlineText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.success },
-  heroName: { fontFamily: fonts.bold, fontSize: 22, color: colors.inkBlack, textAlign: 'center', marginBottom: 4 },
+  heroNameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 4 },
+  heroName: { fontFamily: fonts.bold, fontSize: 22, color: colors.inkBlack, textAlign: 'center' },
   heroSpecialty: { fontFamily: fonts.medium, fontSize: 15, color: colors.tealGreen, textAlign: 'center', marginBottom: 6 },
   hospitalRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 18 },
   hospitalText: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280' },

@@ -16,6 +16,7 @@ import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -34,6 +35,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { images } from '@/constants/images'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
 
@@ -57,6 +59,26 @@ interface SummaryData {
   report_pdf_path: string | null
 }
 
+// Deliberately excludes phone/email/address — doctors must never see patient
+// contact details here, only what's appropriate for a telemedicine profile.
+interface PatientProfileInfo {
+  fullName: string
+  gender: string | null
+  age: number | null
+  photoUrl: string | null
+}
+
+function calculateAge(dateOfBirth: string | null | undefined): number | null {
+  if (!dateOfBirth) return null
+  const birth = new Date(dateOfBirth)
+  if (Number.isNaN(birth.getTime())) return null
+  const now = new Date()
+  let age = now.getFullYear() - birth.getFullYear()
+  const monthDiff = now.getMonth() - birth.getMonth()
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birth.getDate())) age--
+  return age
+}
+
 const TYPE_LABELS: Record<string, string> = {
   chat: 'Chat Consultation',
   phone: 'Phone Consultation',
@@ -77,6 +99,7 @@ function formatConsultMeta(type: string | null, iso: string | null): string {
 
 export default function DoctorConsultationSummaryScreen() {
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { getToken } = useAuth()
   const { user } = useUser()
   const { consultationId, patientName } = useLocalSearchParams<{
@@ -101,6 +124,7 @@ export default function DoctorConsultationSummaryScreen() {
   const [reminderScheduled, setReminderScheduled] = useState(false)
   const [patientIdForReminder, setPatientIdForReminder] = useState<string | null>(null)
   const [doctorProfileId, setDoctorProfileId] = useState<string | null>(null)
+  const [patientProfile, setPatientProfile] = useState<PatientProfileInfo | null>(null)
 
   // Consultation type + display timestamp — this screen previously fetched
   // neither, so a doctor viewing a summary had no way to tell what kind of
@@ -134,10 +158,13 @@ export default function DoctorConsultationSummaryScreen() {
       try {
         const token = await getToken()
         if (!token) return
-        // Get patient ID and doctor profile ID for follow-up reminders
+        // Get patient ID and doctor profile ID for follow-up reminders, plus
+        // the patient's identity info (photo/age/gender) for the profile
+        // section below — phone is intentionally NOT selected here, this
+        // screen must never display patient contact details to the doctor.
         const { data: consultRow } = await getAuthClient(token)
           .from('consultations')
-          .select('patient_id, type, started_at, scheduled_at, created_at, duration_minutes, doctor_amount')
+          .select('patient_id, type, started_at, scheduled_at, created_at, duration_minutes, doctor_amount, patient:users!patient_id(full_name, profile_photo_url, patient_profiles(gender, date_of_birth))')
           .eq('id', consultationId)
           .maybeSingle()
         if ((consultRow as any)?.patient_id) setPatientIdForReminder((consultRow as any).patient_id)
@@ -149,6 +176,16 @@ export default function DoctorConsultationSummaryScreen() {
             durationMinutes: row.duration_minutes ?? null,
             doctorAmount: row.doctor_amount ?? null,
           })
+          const patientRow = Array.isArray(row.patient) ? row.patient[0] : row.patient
+          if (patientRow) {
+            const detail = Array.isArray(patientRow.patient_profiles) ? patientRow.patient_profiles[0] : patientRow.patient_profiles
+            setPatientProfile({
+              fullName: patientRow.full_name ?? patientName ?? 'Patient',
+              gender: detail?.gender ?? null,
+              age: calculateAge(detail?.date_of_birth),
+              photoUrl: patientRow.profile_photo_url ?? null,
+            })
+          }
         }
         if (patientName) setPatientNameForReport(patientName)
 
@@ -159,8 +196,9 @@ export default function DoctorConsultationSummaryScreen() {
             const { data: dp } = await getAuthClient(token)
               .from('doctor_profiles').select('id, specialty').eq('user_id', (ud as any).id).single()
             if (dp) setDoctorProfileId((dp as any).id)
+            const rawDoctorName = ((ud as any).full_name ?? user.fullName ?? '').replace(/^Dr\.?\s*/i, '').trim()
             setDoctorReportInfo({
-              name: (ud as any).full_name ?? user.fullName ?? 'Doctor',
+              name: rawDoctorName ? `Dr. ${rawDoctorName}` : 'Doctor',
               specialty: (dp as any)?.specialty ?? '',
             })
           }
@@ -550,6 +588,45 @@ export default function DoctorConsultationSummaryScreen() {
             </View>
           )}
         </LinearGradient>
+
+        {/* Patient profile section — this screen previously gave no access to
+            who the patient actually is beyond their name in the header
+            above. */}
+        {patientProfile && (
+          <View style={styles.patientProfileCard}>
+            <View style={styles.patientProfileTop}>
+              {patientProfile.photoUrl ? (
+                <Image source={{ uri: patientProfile.photoUrl }} style={styles.patientProfileAvatar} />
+              ) : (
+                <View style={styles.patientProfileAvatarFallback}>
+                  <Ionicons name="person" size={22} color={colors.careBlue} />
+                </View>
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.patientProfileName}>{patientProfile.fullName}</Text>
+                <Text style={styles.patientProfileMeta}>
+                  {[patientProfile.gender, patientProfile.age != null ? `${patientProfile.age} yrs` : null]
+                    .filter(Boolean).join(' · ') || 'No demographic info on file'}
+                </Text>
+              </View>
+            </View>
+            {!!patientIdForReminder && (
+              <Pressable
+                style={styles.patientProfileHistoryBtn}
+                onPress={guardNav(() => router.push({
+                  pathname: '/(doctor)/patient-history',
+                  params: { patientId: patientIdForReminder, patientName: patientProfile.fullName },
+                }))}
+                accessibilityLabel="View patient's full profile and history"
+                accessibilityRole="button"
+              >
+                <Ionicons name="person-circle-outline" size={16} color={colors.careBlue} />
+                <Text style={styles.patientProfileHistoryBtnText}>View Full Profile & History</Text>
+                <Ionicons name="chevron-forward" size={14} color={colors.careBlue} />
+              </Pressable>
+            )}
+          </View>
+        )}
 
         {/* Duration / earnings — this screen never showed either before. */}
         {!editing && consultMeta && (consultMeta.durationMinutes != null || consultMeta.doctorAmount != null) && (
@@ -966,6 +1043,24 @@ const styles = StyleSheet.create({
   patientCardSub: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
   referralBadge: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
   referralBadgeText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.mistWhite },
+
+  patientProfileCard: {
+    backgroundColor: colors.mistWhite, borderRadius: 14, borderWidth: 1, borderColor: colors.steelGrey,
+    padding: 16, marginBottom: 20,
+  },
+  patientProfileTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  patientProfileAvatar: { width: 44, height: 44, borderRadius: 22 },
+  patientProfileAvatarFallback: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: '#EFF6FF',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  patientProfileName: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  patientProfileMeta: { fontFamily: fonts.regular, fontSize: 12.5, color: '#6B7280', marginTop: 2 },
+  patientProfileHistoryBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12,
+    paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.cloudGrey,
+  },
+  patientProfileHistoryBtnText: { fontFamily: fonts.medium, fontSize: 13.5, color: colors.careBlue, flex: 1 },
 
   metaRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
   metaStat: {

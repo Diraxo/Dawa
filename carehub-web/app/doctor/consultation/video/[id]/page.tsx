@@ -392,7 +392,7 @@ export default function DoctorVideoConsultationPage() {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         client.on('network-quality', (stats: any) => {
-          setNetworkQuality(stats.uplinkNetworkQuality ?? 0)
+          setNetworkQuality(Math.max(stats.uplinkNetworkQuality ?? 0, stats.downlinkNetworkQuality ?? 0))
         })
 
         // Speaking-indicator pulse — reports both the local user's own

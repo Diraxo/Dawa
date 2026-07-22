@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { useServerNow } from '@/lib/serverClock'
 import {
   SLOT_DURATION_MINS,
   formatTimeMins,
@@ -69,18 +70,11 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
   const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
 
-  const days = getNextDays(14, availability ?? undefined)
+  // Device-clock-independent "now", synced against Postgres' own now() —
+  // mirrors the identical fix in BookingModal (see lib/serverClock.ts).
+  const nowMs = useServerNow()
+  const days = getNextDays(14, availability ?? undefined, nowMs)
   const selectedDayValue = days[selectedDay]?.value
-
-  // Forces a re-render every 30s so isSlotPast() (a pure function keyed off
-  // Date.now() at call time) re-evaluates without the patient touching
-  // anything — mirrors the identical fix in BookingModal.
-  const [, setNowTick] = useState(0)
-  useEffect(() => {
-    if (!visible) return
-    const id = setInterval(() => setNowTick(t => t + 1), 30_000)
-    return () => clearInterval(id)
-  }, [visible])
 
   useEffect(() => {
     if (visible) {
@@ -308,7 +302,7 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
                         <View style={styles.timeGrid}>
                           {slots.map(slot => {
                             const isBooked = bookedTimes.has(slot)
-                            const isPast = !isBooked && isSlotPast(selectedDayValue ?? '', slot)
+                            const isPast = !isBooked && isSlotPast(selectedDayValue ?? '', slot, nowMs)
                             return (
                               <Pressable
                                 key={slot}

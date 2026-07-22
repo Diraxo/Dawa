@@ -1,9 +1,11 @@
 import { Ionicons } from '@expo/vector-icons'
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image } from 'expo-image'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { formatCallDuration } from '@/lib/callDuration'
 
 interface CallInfoPanelProps {
@@ -14,6 +16,10 @@ interface CallInfoPanelProps {
   counterpartLabel: string // "Doctor" | "Patient"
   counterpartName: string
   counterpartPhotoUrl?: string | null
+  // Only ever passed true when counterpartLabel is "Doctor" and that doctor's
+  // status is 'approved' — callers are responsible for the gate, same
+  // contract as VerifiedBadge itself.
+  counterpartVerified?: boolean
   startedAtIso: string | null
   elapsedSeconds: number
   networkQuality: number // Agora 0-6 scale — 0 unknown, 1-2 excellent, 3-4 fair, 5-6 poor
@@ -40,7 +46,7 @@ function qualityMeta(quality: number) {
 // details (no "Agora", no crypto-algorithm names).
 export function CallInfoPanel({
   visible, onClose, consultationId, consultationType, counterpartLabel,
-  counterpartName, counterpartPhotoUrl, startedAtIso, elapsedSeconds, networkQuality,
+  counterpartName, counterpartPhotoUrl, counterpartVerified, startedAtIso, elapsedSeconds, networkQuality,
 }: CallInfoPanelProps) {
   const insets = useSafeAreaInsets()
   if (!visible) return null
@@ -62,12 +68,21 @@ export function CallInfoPanel({
         <View style={styles.identity}>
           <View style={styles.avatarCircle}>
             {counterpartPhotoUrl ? (
-              <Image source={{ uri: counterpartPhotoUrl }} style={styles.avatarImage} />
+              <Image
+                source={{ uri: counterpartPhotoUrl }}
+                style={styles.avatarImage}
+                contentFit="cover"
+                cachePolicy="memory-disk"
+                transition={0}
+              />
             ) : (
               <Ionicons name="person" size={30} color="rgba(255,255,255,0.5)" />
             )}
           </View>
-          <Text style={styles.identityName}>{counterpartName}</Text>
+          <View style={styles.identityNameRow}>
+            <Text style={styles.identityName}>{counterpartName}</Text>
+            {counterpartVerified && <VerifiedBadge size={15} />}
+          </View>
           <Text style={styles.identityLabel}>{counterpartLabel}</Text>
         </View>
 
@@ -151,7 +166,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   avatarImage: { width: '100%', height: '100%' },
-  identityName: { fontFamily: fonts.bold, fontSize: 16, color: colors.mistWhite, marginTop: 4 },
+  identityNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  identityName: { fontFamily: fonts.bold, fontSize: 16, color: colors.mistWhite },
   identityLabel: { fontFamily: fonts.regular, fontSize: 12, color: 'rgba(255,255,255,0.5)' },
   body: {
     marginHorizontal: 20, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',

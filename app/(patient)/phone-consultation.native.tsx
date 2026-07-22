@@ -25,6 +25,7 @@ import { Audio } from 'expo-av'
 const ClientRoleBroadcaster = 1
 
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { CallInfoPanel } from '@/components/consultation/CallInfoPanel'
 import { InCallChatPanel } from '@/components/consultation/InCallChatPanel'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
@@ -201,6 +202,7 @@ export default function PhoneConsultationScreen() {
   const [tokenFetchFailed, setTokenFetchFailed] = useState(false)
   const [tokenRetryKey, setTokenRetryKey] = useState(0)
   const [doctorSpecialty, setDoctorSpecialty] = useState('')
+  const [doctorStatus, setDoctorStatus] = useState<string | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [showInfoSheet, setShowInfoSheet] = useState(false)
   const [activeChannel, setActiveChannel] = useState<any>(null)
@@ -331,7 +333,7 @@ export default function PhoneConsultationScreen() {
       if (!token) return
       const { data } = await getAuthClient(token)
         .from('doctor_profiles')
-        .select('specialty, years_of_experience')
+        .select('specialty, years_of_experience, status')
         .eq('user_id', doctorId)
         .maybeSingle()
       if (data?.specialty) {
@@ -341,6 +343,7 @@ export default function PhoneConsultationScreen() {
             : data.specialty
         )
       }
+      setDoctorStatus(data?.status ?? null)
     }).catch(() => {})
   }, [doctorId])
 
@@ -622,8 +625,8 @@ export default function PhoneConsultationScreen() {
           } catch {}
         })
       },
-      onNetworkQuality: (_uid: any, txQuality: number) => {
-        if (mounted) setNetworkQuality(txQuality as any)
+      onNetworkQuality: (_uid: any, txQuality: number, rxQuality: number) => {
+        if (mounted) setNetworkQuality(Math.max(txQuality, rxQuality) as any)
       },
       onError: (err: any, msg: string) => {
         logger.error('[Phone][Patient] Agora error:', err, msg)
@@ -864,7 +867,10 @@ export default function PhoneConsultationScreen() {
                 : <Ionicons name="person" size={52} color="rgba(255,255,255,0.5)" />
               }
             </View>
-            <Text style={styles.waitingDoctorName}>{formatDoctorName(doctorName)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.waitingDoctorName}>{formatDoctorName(doctorName)}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={15} />}
+            </View>
             {doctorSpecialty ? <Text style={styles.waitingSpecialty}>{doctorSpecialty}</Text> : null}
             <Text style={styles.waitingSubtitle}>The doctor will call you shortly…</Text>
             <Text style={styles.waitingHint}>Your call will start automatically when the doctor joins.</Text>
@@ -901,7 +907,10 @@ export default function PhoneConsultationScreen() {
                 </View>
               </View>
             </Animated.View>
-            <Text style={styles.ringName}>{formatDoctorName(doctorName)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.ringName}>{formatDoctorName(doctorName)}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={15} />}
+            </View>
             {doctorSpecialty ? <Text style={styles.ringSpecialty}>{doctorSpecialty}</Text> : null}
             <Text style={styles.ringSubtitle}>is calling you…</Text>
             <Text style={styles.ringCountdown}>Auto-declining in {ringCountdown}s</Text>
@@ -964,7 +973,10 @@ export default function PhoneConsultationScreen() {
           }
         </Animated.View>
 
-        <Text style={styles.callerName}>{formatDoctorName(doctorName)}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={styles.callerName}>{formatDoctorName(doctorName)}</Text>
+          {doctorStatus === 'approved' && <VerifiedBadge size={15} />}
+        </View>
         {doctorSpecialty ? <Text style={styles.callerSub}>{doctorSpecialty}</Text> : null}
 
         {remoteMuted && isConnected && (
@@ -1097,6 +1109,7 @@ export default function PhoneConsultationScreen() {
         counterpartLabel="Doctor"
         counterpartName={formatDoctorName(doctorName)}
         counterpartPhotoUrl={doctorPhotoUrl}
+        counterpartVerified={doctorStatus === 'approved'}
         startedAtIso={startedAtIso}
         elapsedSeconds={seconds}
         networkQuality={networkQuality}

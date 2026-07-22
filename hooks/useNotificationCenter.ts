@@ -66,6 +66,15 @@ export function useNotificationCenter(userId: string | null | undefined) {
         } else if (event === 'UPDATE') {
           const updated = payload.new as NotificationRow
           setItems((prev) => prev.map((n) => (n.id === updated.id ? updated : n)))
+          // A read/mark-all-read from a DIFFERENT mounted instance of this hook
+          // (e.g. the Notifications screen, while Home's own bell-badge
+          // instance is still mounted underneath it) only lands here as a row
+          // UPDATE — without re-deriving unreadCount from the DB, that other
+          // instance's badge count would silently drift stale until something
+          // unrelated happened to remount it. Re-fetching the true count here
+          // (rather than guessing +1/-1 from possibly-incomplete local state)
+          // keeps every mounted screen's badge in sync immediately.
+          getUnreadCount(supabase, userId).then(setUnreadCount)
         }
       },
     )

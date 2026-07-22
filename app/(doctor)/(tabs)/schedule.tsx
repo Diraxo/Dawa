@@ -1,20 +1,21 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
   AppState,
-  Image,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -244,6 +245,16 @@ const SUSPENDED_MSG = 'Your account has been suspended. Please contact support.'
 const getStatusGateAlert = (status: string | null | undefined): [string, string] =>
   status === 'suspended' ? ['Account Suspended', SUSPENDED_MSG] : ['Account Under Review', PENDING_MSG]
 
+// Local calendar date → 'YYYY-MM-DD', matching how blocked_dates is stored.
+// Never use toISOString() here — it converts to UTC first, which can shift
+// the date by a day depending on the device's timezone offset.
+function toDateKey(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export default function ScheduleScreen() {
   const { t } = useTranslation()
   const { user } = useUser()
@@ -257,12 +268,15 @@ export default function ScheduleScreen() {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
   const [loadingAppts, setLoadingAppts] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadTick, setLoadTick] = useState(0)
   const [timePicker, setTimePicker] = useState<{ day: DayKey; field: 'startTime' | 'endTime' } | null>(null)
   const [showBlockPicker, setShowBlockPicker] = useState(false)
   const [blockPickerDate, setBlockPickerDate] = useState(() => {
     const d = new Date()
+    d.setHours(0, 0, 0, 0)
     d.setDate(d.getDate() + 1)
-    return d.toISOString().split('T')[0]
+    return d
   })
 
   // Today onward (>= start of today), same status set as Home's "Today's
@@ -320,31 +334,35 @@ export default function ScheduleScreen() {
 
   useEffect(() => {
     if (!user?.id) return
+    setLoadingAppts(true)
+    setLoadError(null)
     ;(async () => {
       try {
         const token = await getToken()
-        if (!token) return
+        if (!token) throw new Error('Not signed in')
         const client = getAuthClient(token)
 
-        const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).single()
-        if (!me) return
+        const { data: me, error: meError } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (meError || !me) throw meError ?? new Error('Could not load your account')
 
-        const { data: profile } = await client
+        const { data: profile, error: profileError } = await client
           .from('doctor_profiles')
           .select('id, availability')
           .eq('user_id', (me as any).id)
           .maybeSingle()
-        if (!profile) return
+        if (profileError || !profile) throw profileError ?? new Error('Could not load your doctor profile')
         setProfileId(profile.id)
         applyAvailability(profile.availability)
 
         await loadAppointments(client, profile.id)
+      } catch (err: any) {
+        setLoadError(err?.message ?? 'Could not load your schedule')
       } finally {
         setLoadingAppts(false)
       }
     })()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id])
+  }, [user?.id, loadTick])
 
   // Live-sync availability/blocked-days edited from another device or the
   // website — without this, this screen only reflected what it itself last
@@ -468,6 +486,81 @@ export default function ScheduleScreen() {
     }
   }
 
+  // Persists a single blocked date immediately (unlike the day-schedule grid
+  // above, which batches edits behind its own "Save Changes" button) — the
+  // date always comes from the native OS picker below, never free-typed, so
+  // no format/past-date validation is needed here.
+  const confirmBlockDate = (date: Date) => {
+    const dateKey = toDateKey(date)
+    setShowBlockPicker(false)
+    if (blockedDates.includes(dateKey)) return
+    const previous = blockedDates
+    const updated = [...blockedDates, dateKey]
+    setBlockedDates(updated)
+    getToken().then(async (token) => {
+      if (!token || !profileId) { setBlockedDates(previous); return }
+      const { data: updatedRows, error } = await getAuthClient(token)
+        .from('doctor_profiles')
+        .update({ availability: { ...availability, blocked_dates: updated } })
+        .eq('id', profileId)
+        .select('id')
+      if (error || !updatedRows || updatedRows.length === 0) {
+        setBlockedDates(previous)
+        Alert.alert('Error', 'Could not block this date. Please try again.')
+      }
+    })
+  }
+
+  const tomorrow = (() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() + 1)
+    return d
+  })()
+
+  const openBlockDatePicker = () => {
+    if (doctorStatus && doctorStatus !== 'approved') {
+      Alert.alert(...getStatusGateAlert(doctorStatus))
+      return
+    }
+    // Android's native picker is itself a self-contained calendar dialog
+    // (with month/year navigation built in) that resolves in one step — no
+    // need for our own bottom-sheet + separate confirm button there. iOS has
+    // no equivalent standalone dialog mode, so it stays inside the sheet
+    // below with an explicit Confirm button.
+    if (Platform.OS === 'android') {
+      DateTimePickerAndroid.open({
+        value: blockPickerDate,
+        mode: 'date',
+        minimumDate: tomorrow,
+        onChange: (event, selectedDate) => {
+          if (event.type === 'set' && selectedDate) {
+            setBlockPickerDate(selectedDate)
+            confirmBlockDate(selectedDate)
+          }
+        },
+      })
+    } else {
+      setShowBlockPicker(true)
+    }
+  }
+
+  // Only shown when nothing has ever loaded (profileId still null) — a later
+  // background refresh failure (Realtime callback, foreground resync) must
+  // never blow away an already-displayed schedule. Mirrors Home's dashboard
+  // error/retry gate.
+  if (loadError && !profileId) {
+    return (
+      <SafeAreaView style={[styles.safe, styles.centerFill]} edges={['top']}>
+        <Ionicons name="alert-circle-outline" size={40} color={colors.error} />
+        <Text style={styles.dashboardErrorText}>{loadError}</Text>
+        <Pressable style={styles.retryButton} onPress={() => setLoadTick((n) => n + 1)}>
+          <Text style={styles.retryButtonText}>{t('retry', { defaultValue: 'Retry' })}</Text>
+        </Pressable>
+      </SafeAreaView>
+    )
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.header}>
@@ -557,7 +650,14 @@ export default function ScheduleScreen() {
               })}
             >
               {appt.patientPhotoUrl ? (
-                <Image source={{ uri: appt.patientPhotoUrl }} style={styles.apptLeft} />
+                <Image
+                  source={{ uri: appt.patientPhotoUrl }}
+                  style={styles.apptLeft}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={0}
+                  recyclingKey={appt.patientPhotoUrl}
+                />
               ) : (
                 <View style={[styles.apptLeft, { backgroundColor: `${TYPE_COLORS[appt.type]}18` }]}>
                   <Ionicons name={TYPE_ICONS[appt.type]} size={21} color={TYPE_COLORS[appt.type]} />
@@ -607,78 +707,47 @@ export default function ScheduleScreen() {
 
           <Pressable
             style={({ pressed }) => [styles.blockTimeBtn, pressed && { opacity: 0.85 }]}
-            onPress={() => {
-              if (doctorStatus && doctorStatus !== 'approved') {
-                Alert.alert(...getStatusGateAlert(doctorStatus))
-              } else {
-                setShowBlockPicker(true)
-              }
-            }}
+            onPress={openBlockDatePicker}
           >
             <Ionicons name="ban-outline" size={18} color={colors.error} />
             <Text style={styles.blockTimeBtnText}>Block a Date</Text>
           </Pressable>
         </View>
 
-        {/* Block date picker modal */}
-        <Modal visible={showBlockPicker} transparent animationType="slide" onRequestClose={() => setShowBlockPicker(false)}>
-          <View style={tpStyles.overlay}>
-            <Pressable style={tpStyles.backdrop} onPress={() => setShowBlockPicker(false)} />
-            <View style={tpStyles.sheet}>
-              <View style={tpStyles.handle} />
-              <Text style={tpStyles.title}>Block a Date</Text>
-              <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
-                Enter a date to make unavailable for patient bookings.
-              </Text>
-              <TextInput
-                style={{
-                  height: 48, borderRadius: 12, borderWidth: 1.5, borderColor: colors.steelGrey,
-                  paddingHorizontal: 14, fontFamily: fonts.regular, fontSize: 15, color: colors.inkBlack,
-                  backgroundColor: colors.cloudGrey, marginBottom: 20,
-                }}
-                value={blockPickerDate}
-                onChangeText={setBlockPickerDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="#9CA3AF"
-                keyboardType="numeric"
-                maxLength={10}
-              />
-              <Pressable
-                onPress={() => {
-                  const dateRegex = /^\d{4}-\d{2}-\d{2}$/
-                  if (!dateRegex.test(blockPickerDate)) {
-                    Alert.alert('Invalid Date', 'Please enter a date in YYYY-MM-DD format.')
-                    return
-                  }
-                  const d = new Date(blockPickerDate + 'T12:00:00')
-                  if (isNaN(d.getTime())) { Alert.alert('Invalid Date', 'That date is not valid.'); return }
-                  if (d < new Date(new Date().setHours(0,0,0,0))) { Alert.alert('Past Date', 'You can only block future dates.'); return }
-                  if (!blockedDates.includes(blockPickerDate)) {
-                    const previous = blockedDates
-                    const updated = [...blockedDates, blockPickerDate]
-                    setBlockedDates(updated)
-                    getToken().then(async token => {
-                      if (!token || !profileId) { setBlockedDates(previous); return }
-                      const { data: updatedRows, error } = await getAuthClient(token)
-                        .from('doctor_profiles')
-                        .update({ availability: { ...availability, blocked_dates: updated } })
-                        .eq('id', profileId)
-                        .select('id')
-                      if (error || !updatedRows || updatedRows.length === 0) {
-                        setBlockedDates(previous)
-                        Alert.alert('Error', 'Could not block this date. Please try again.')
-                      }
-                    })
-                  }
-                  setShowBlockPicker(false)
-                }}
-                style={tpStyles.confirmBtn}
-              >
-                <Text style={tpStyles.confirmText}>Block This Date</Text>
-              </Pressable>
+        {/* Block date picker modal — iOS only; Android uses the native
+            DateTimePickerAndroid dialog opened directly from the button
+            above (see openBlockDatePicker). */}
+        {Platform.OS !== 'android' && (
+          <Modal visible={showBlockPicker} transparent animationType="slide" onRequestClose={() => setShowBlockPicker(false)}>
+            <View style={tpStyles.overlay}>
+              <Pressable style={tpStyles.backdrop} onPress={() => setShowBlockPicker(false)} />
+              <View style={tpStyles.sheet}>
+                <View style={tpStyles.handle} />
+                <Text style={tpStyles.title}>Block a Date</Text>
+                <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginBottom: 12 }}>
+                  Pick a date to make unavailable for patient bookings.
+                </Text>
+                <DateTimePicker
+                  value={blockPickerDate}
+                  mode="date"
+                  display="inline"
+                  minimumDate={tomorrow}
+                  themeVariant="light"
+                  onChange={(event, selectedDate) => {
+                    if (selectedDate) setBlockPickerDate(selectedDate)
+                  }}
+                  style={{ marginBottom: 16 }}
+                />
+                <Pressable
+                  onPress={() => confirmBlockDate(blockPickerDate)}
+                  style={tpStyles.confirmBtn}
+                >
+                  <Text style={tpStyles.confirmText}>Block This Date</Text>
+                </Pressable>
+              </View>
             </View>
-          </View>
-        </Modal>
+          </Modal>
+        )}
 
         <View style={{ height: 24 }} />
       </ScrollView>
@@ -715,6 +784,10 @@ const weekStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.cloudGrey },
+  centerFill: { alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 32 },
+  dashboardErrorText: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack, textAlign: 'center' },
+  retryButton: { backgroundColor: colors.careBlue, borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12, marginTop: 4 },
+  retryButtonText: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.mistWhite },
 
   header: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
   headerTitle: { fontFamily: fonts.bold, fontSize: 24, color: colors.mistWhite },

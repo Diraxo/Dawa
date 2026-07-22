@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useUser } from '@clerk/clerk-expo'
-import { useRouter } from 'expo-router'
+import { useGlobalSearchParams, useNavigationContainerRef, usePathname, useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
@@ -15,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { formatRelativeTime } from '@/lib/dateFormat'
 import { navigateForNotification } from '@/lib/notificationNav'
@@ -48,8 +49,15 @@ const DEFAULT_META = { icon: 'notifications-outline' as const, color: colors.ste
 
 export default function NotificationCenterView({ role }: { role: 'doctor' | 'patient' }) {
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { user } = useUser()
   const [userId, setUserId] = useState<string | null>(null)
+  const pathname = usePathname()
+  const globalParams = useGlobalSearchParams<{ consultationId?: string; highlightConsultationId?: string }>()
+  // Scanned fresh on every tap so a consultation-family screen frozen
+  // underneath this very Notification Center screen (not just the current
+  // top route) is still found — see lib/notificationNav.ts.
+  const navContainerRef = useNavigationContainerRef()
 
   useEffect(() => {
     if (!user?.id) return
@@ -63,10 +71,13 @@ export default function NotificationCenterView({ role }: { role: 'doctor' | 'pat
   const { items, unreadCount, loading, refreshing, loadingMore, hasMore, refresh, loadMore, markRead, markAllRead } =
     useNotificationCenter(userId)
 
-  const onPressItem = async (item: NotificationRow) => {
+  const onPressItem = guardNav(async (item: NotificationRow) => {
     if (!item.read_at) await markRead(item.id)
-    navigateForNotification(router, role, item.data_json ?? {})
-  }
+    const currentRoute = role === 'doctor'
+      ? { pathname, consultationId: globalParams.consultationId ?? null, highlightConsultationId: globalParams.highlightConsultationId ?? null }
+      : undefined
+    navigateForNotification(router, role, item.data_json ?? {}, currentRoute, navContainerRef.current?.getRootState())
+  })
 
   const renderItem = ({ item }: { item: NotificationRow }) => {
     const meta = TYPE_META[item.type ?? ''] ?? DEFAULT_META

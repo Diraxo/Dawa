@@ -73,6 +73,7 @@ import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { useActiveChatStore } from '@/store/activeChatStore'
@@ -127,6 +128,7 @@ export default function DoctorChatConsultationScreen() {
     consultationStatus?: string
   }>()
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { t } = useTranslation()
   const { getToken, userId } = useAuth()
   const insets = useSafeAreaInsets()
@@ -141,6 +143,8 @@ export default function DoctorChatConsultationScreen() {
   const [submitting, setSubmitting] = useState(false)
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null)
   const [channelLoading, setChannelLoading] = useState(false)
+  const [channelWatchFailed, setChannelWatchFailed] = useState(false)
+  const [channelRetryTick, setChannelRetryTick] = useState(0)
   const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [peerTyping, setPeerTyping] = useState(false)
   const [peerOnline, setPeerOnline] = useState<boolean | null>(null)
@@ -296,6 +300,7 @@ export default function DoctorChatConsultationScreen() {
     let currentChannel: Channel | null = null
     let connSub: { unsubscribe: () => void } | null = null
     setChannelLoading(true)
+    setChannelWatchFailed(false)
 
     let retries = 0
     const tryWatch = async () => {
@@ -349,6 +354,7 @@ export default function DoctorChatConsultationScreen() {
           setTimeout(tryWatch, 1200)
         } else {
           logger.error('[DoctorChat] channel watch failed after retries:', err)
+          setChannelWatchFailed(true)
         }
       } finally {
         if (mounted) setChannelLoading(false)
@@ -363,7 +369,7 @@ export default function DoctorChatConsultationScreen() {
       setActiveChannel(null)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveChannelId, isStreamConnected])
+  }, [effectiveChannelId, isStreamConnected, channelRetryTick])
 
   // ── Typing indicator ──────────────────────────────────────────────────────
   // The SDK's default <TypingIndicator/> reads Stream's own channel_state,
@@ -494,7 +500,7 @@ export default function DoctorChatConsultationScreen() {
     setShowMoreMenu(false)
   }
 
-  const handleMoreMenuAction = (action: string) => {
+  const handleMoreMenuAction = guardNav((action: string) => {
     setShowMoreMenu(false)
     if (action === 'profile') {
       handleAvatarPress()
@@ -526,7 +532,7 @@ export default function DoctorChatConsultationScreen() {
     } else if (action === 'block') {
       setShowBlockModal(true)
     }
-  }
+  })
 
   const submitReport = async () => {
     if (!reportReason) return
@@ -1027,6 +1033,17 @@ export default function DoctorChatConsultationScreen() {
         <View style={styles.loadingWrap}>
           <ActivityIndicator color={colors.tealGreen} size="large" />
           <Text style={styles.noChannelText}>{t('chatRequiresDevelopmentBuild')}</Text>
+        </View>
+      ) : channelWatchFailed ? (
+        <View style={styles.loadingWrap}>
+          <Ionicons name="cloud-offline-outline" size={44} color={colors.steelGrey} />
+          <Text style={styles.noChannelText}>Couldn't connect to chat. Check your internet connection.</Text>
+          <Pressable
+            onPress={() => setChannelRetryTick((n) => n + 1)}
+            style={{ marginTop: 4, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.tealGreen }}
+          >
+            <Text style={{ fontFamily: fonts.semiBold, color: '#FFFFFF', fontSize: 14 }}>Retry</Text>
+          </Pressable>
         </View>
       ) : channelLoading || !activeChannel ? (
         <View style={styles.loadingWrap}>

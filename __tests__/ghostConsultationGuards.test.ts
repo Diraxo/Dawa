@@ -3,7 +3,8 @@ import path from 'path'
 
 // Release item #5 (ghost consultation) and item #1's "must never show an
 // incoming call / auto-decline countdown after acceptance" requirement.
-// app/_layout.tsx owns notification-tap routing for the whole app; it has
+// app/_layout.tsx owns notification-tap routing for the whole app (with the
+// route-resolution logic factored out into lib/notificationNav.ts); it has
 // far too many native-module side effects (stream-chat-expo, VoIP push,
 // Clerk token cache) to safely import into a Jest/Node run, so this is a
 // textual guard on the specific invariants that fixed the ghost-call bug —
@@ -14,6 +15,7 @@ import path from 'path'
 // accepted/in_progress.
 
 const LAYOUT = fs.readFileSync(path.resolve(__dirname, '..', 'app/_layout.tsx'), 'utf8')
+const NOTIFICATION_NAV = fs.readFileSync(path.resolve(__dirname, '..', 'lib/notificationNav.ts'), 'utf8')
 
 describe('ghost consultation guards in app/_layout.tsx', () => {
   test('GHOST_TERMINAL_STATUSES matches the terminal-status set the call-state machine uses', () => {
@@ -34,7 +36,8 @@ describe('ghost consultation guards in app/_layout.tsx', () => {
   })
 
   test('resolveIncomingRequestRoute re-fetches live status before routing a tapped notification', () => {
-    const fnMatch = LAYOUT.match(/async function resolveIncomingRequestRoute[\s\S]*?\n}\n/)
+    // Lives in lib/notificationNav.ts, imported by app/_layout.tsx.
+    const fnMatch = NOTIFICATION_NAV.match(/export async function resolveIncomingRequestRoute[\s\S]*?\n}\n/)
     expect(fnMatch).not.toBeNull()
     const fn = fnMatch![0]
     // Must query the live row rather than trusting the notification payload.

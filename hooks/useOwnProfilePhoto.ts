@@ -90,5 +90,5 @@ export function useOwnProfilePhoto() {
     )
   }, [userRowId, clerkUserId])
 
-  return { photoUrl, refresh }
+  return { photoUrl, refresh, userRowId }
 }

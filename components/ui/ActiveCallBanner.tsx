@@ -2,11 +2,13 @@ import { useAuth } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { useRouter, useSegments } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
-import { Animated, Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image } from 'expo-image'
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 import { formatCallDuration } from '@/lib/callDuration'
@@ -19,6 +21,7 @@ const CONSULTATION_SEGMENTS = [
 
 export default function ActiveCallBanner() {
   const router = useRouter()
+  const guardNav = useNavGuard()
   const segments = useSegments()
   const insets = useSafeAreaInsets()
   const { isSignedIn } = useAuth()
@@ -78,7 +81,7 @@ export default function ActiveCallBanner() {
     active.type === 'video' ? 'Video Consultation' :
     active.type === 'phone' ? 'Phone Consultation' : 'Chat Consultation'
 
-  const handleTap = () => {
+  const handleTap = guardNav(() => {
     const rolePrefix = active.role === 'patient' ? '/(patient)' : '/(doctor)'
     const ROUTE_MAP: Record<string, string> = {
       phone: `${rolePrefix}/phone-consultation`,
@@ -95,7 +98,7 @@ export default function ActiveCallBanner() {
         resumeElapsed: String(displaySeconds),
       },
     })
-  }
+  })
 
   return (
     <Pressable
@@ -119,7 +122,13 @@ export default function ActiveCallBanner() {
           no photo is on file, never a blank/broken image or a "profile
           unavailable" placeholder. */}
       {active.otherPersonPhotoUrl ? (
-        <Image source={{ uri: active.otherPersonPhotoUrl }} style={styles.avatar} />
+        <Image
+          source={{ uri: active.otherPersonPhotoUrl }}
+          style={styles.avatar}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+          transition={0}
+        />
       ) : (
         <View style={styles.avatarFallback}>
           <Ionicons name={typeIcon as any} size={13} color={colors.tealGreen} />

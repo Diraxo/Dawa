@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { pushOwnPhotoToStream } from '@/lib/stream'
 import { stripDrPrefix } from '@/lib/utils'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { MessageCircle, Phone, Video, Camera } from 'lucide-react'
 
 const LANGUAGES = [
@@ -319,7 +320,10 @@ export default function DoctorProfilePage() {
           />
         </div>
         <div className="flex-1">
-          <p className="font-montserrat font-black text-xl text-ink-black">Dr. {displayName}</p>
+          <p className="font-montserrat font-black text-xl text-ink-black flex items-center gap-1.5">
+            Dr. {displayName}
+            {profile?.status === 'approved' && <VerifiedBadge size={16} />}
+          </p>
           <p className="text-ink-black/50 text-sm">{user?.emailAddresses[0]?.emailAddress}</p>
           {profile && (
             <div className="flex items-center gap-3 mt-2">

@@ -11,10 +11,12 @@ import { stripDrPrefix } from '@/lib/utils'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { formatCallDuration } from '@/lib/callDuration'
 import { ConsultationChatThread } from '@/components/chat/ConsultationChatThread'
 import { ConsultationInfoPanel } from '@/components/consultation/ConsultationInfoPanel'
 import { ConsultationActionButtons } from '@/components/ui/ConsultationActionButtons'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
 import { MessageCircle, Info, Phone } from 'lucide-react'
 import type { IAgoraRTCClient, IMicrophoneAudioTrack } from 'agora-rtc-sdk-ng'
@@ -25,6 +27,7 @@ interface Consultation {
   started_at: string | null
   doctor: {
     specialty: string
+    status: string | null
     user: { full_name: string; clerk_id: string; profile_photo_url: string | null } | null
   } | null
 }
@@ -53,6 +56,7 @@ export default function PhoneConsultationPage() {
   const [chatUnreadCount, setChatUnreadCount] = useState(0)
 
   const [isReconnecting, setIsReconnecting] = useState(false)
+  const retryGuard = useNavGuard()
   // True once this client has actually observed the doctor's peer publish
   // audio — the DB phase alone only proves each side's OWN join succeeded,
   // not that the two are actually connected to each other.
@@ -202,7 +206,7 @@ export default function PhoneConsultationPage() {
     async function load() {
       const { data } = await supabase
         .from('consultations')
-        .select('id, status, started_at, doctor:doctor_profiles(specialty, user:users(full_name, clerk_id, profile_photo_url))')
+        .select('id, status, started_at, doctor:doctor_profiles(specialty, status, user:users(full_name, clerk_id, profile_photo_url))')
         .eq('id', id)
         .single()
       setConsultation(data as unknown as Consultation)
@@ -418,7 +422,7 @@ export default function PhoneConsultationPage() {
       })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       client.on('network-quality', (stats: any) => {
-        setNetworkQuality(stats.uplinkNetworkQuality ?? 0)
+        setNetworkQuality(Math.max(stats.uplinkNetworkQuality ?? 0, stats.downlinkNetworkQuality ?? 0))
       })
 
       // ── (18) user-joined ─────────────────────────────────────────────────
@@ -586,6 +590,7 @@ export default function PhoneConsultationPage() {
 
   const doctorName = stripDrPrefix(consultation?.doctor?.user?.full_name ?? 'Doctor')
   const doctorPhotoUrl = consultation?.doctor?.user?.profile_photo_url ?? null
+  const doctorVerified = consultation?.doctor?.status === 'approved'
   const elapsed = state.elapsedSeconds ?? 0
 
   // ── Ringing screen ──────────────────────────────────────────────────────────
@@ -609,7 +614,10 @@ export default function PhoneConsultationPage() {
         </div>
 
         <div className="text-center">
-          <h1 className="font-montserrat font-black text-2xl text-white mb-1">Dr. {doctorName}</h1>
+          <h1 className="font-montserrat font-black text-2xl text-white mb-1 flex items-center justify-center gap-2">
+            Dr. {doctorName}
+            {doctorVerified && <VerifiedBadge size={18} />}
+          </h1>
           <p className="text-white/50 text-sm">{consultation?.doctor?.specialty}</p>
           <p className="text-teal-green font-semibold text-sm mt-1 flex items-center justify-center gap-1.5"><Phone className="w-4 h-4" /> Phone Consultation</p>
         <p className="text-white/30 text-xs mt-1">Auto-declining in {ringCountdown}s</p>
@@ -675,15 +683,18 @@ export default function PhoneConsultationPage() {
             </div>
           </div>
 
-          <h1 className="font-montserrat font-black text-2xl text-white mb-1">Dr. {doctorName}</h1>
+          <h1 className="font-montserrat font-black text-2xl text-white mb-1 flex items-center justify-center gap-2">
+            Dr. {doctorName}
+            {doctorVerified && <VerifiedBadge size={18} />}
+          </h1>
           <p className="text-white/50 text-sm mb-2">{consultation?.doctor?.specialty}</p>
           <p className="text-teal-green font-bold text-base mb-1 flex items-center justify-center gap-1.5"><Phone className="w-4 h-4" /> Phone Call</p>
           <div className="flex items-center gap-3 mb-8">
             {displayStatus === 'connected' && (
               <div className="flex items-end gap-0.5" style={{ height: 16 }}>
                 {[1, 2, 3].map(b => {
-                  const bars = networkQuality === 0 ? 3 : networkQuality <= 2 ? 3 : networkQuality <= 4 ? 2 : 1
-                  const color = networkQuality <= 2 ? '#4ADE80' : networkQuality <= 4 ? '#FBBF24' : '#F87171'
+                  const bars = networkQuality === 0 ? 0 : networkQuality <= 2 ? 3 : networkQuality <= 4 ? 2 : 1
+                  const color = networkQuality === 0 ? 'rgba(255,255,255,0.4)' : networkQuality <= 2 ? '#4ADE80' : networkQuality <= 4 ? '#FBBF24' : '#F87171'
                   return <div key={b} style={{ width: 3, height: 4 + b * 4, borderRadius: 1.5, backgroundColor: b <= bars ? color : 'rgba(255,255,255,0.2)' }} />
                 })}
               </div>
@@ -722,12 +733,12 @@ export default function PhoneConsultationPage() {
               </p>
               <div className="flex gap-3">
                 <button
-                  onClick={async () => {
+                  onClick={retryGuard(async () => {
                     await cleanupAgora()
                     agoraStartedRef.current = false
                     setErrorMessage('')
                     joinAgora()
-                  }}
+                  })}
                   className="text-white text-xs border border-white/30 rounded-lg px-4 py-2 hover:bg-white/10 transition-colors"
                 >
                   Retry
@@ -836,6 +847,7 @@ export default function PhoneConsultationPage() {
         counterpartLabel="Doctor"
         counterpartName={`Dr. ${doctorName}`}
         counterpartPhotoUrl={consultation?.doctor?.user?.profile_photo_url ?? null}
+        counterpartVerified={doctorVerified}
         startedAt={state.startedAtIso}
         elapsedSeconds={elapsed}
         networkQuality={networkQuality}

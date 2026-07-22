@@ -512,8 +512,8 @@ export default function DoctorPhoneConsultationScreen() {
           } catch (e) { logger.error('[Phone][Doctor] Token renewal failed:', e) }
         })
       },
-      onNetworkQuality: (_uid: any, txQuality: number) => {
-        if (mounted) setNetworkQuality(txQuality as any)
+      onNetworkQuality: (_uid: any, txQuality: number, rxQuality: number) => {
+        if (mounted) setNetworkQuality(Math.max(txQuality, rxQuality) as any)
       },
       onError: (err: any, msg: string) => {
         logger.error('[Phone][Doctor] Agora error:', err, msg)

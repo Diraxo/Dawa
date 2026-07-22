@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { useAuth } from '@clerk/nextjs'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { stripDrPrefix } from '@/lib/utils'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import Link from 'next/link'
 import {
   Clock, Wallet, Search, RefreshCw, XCircle, Ban, CalendarClock,
@@ -20,6 +21,7 @@ interface ConsultationData {
     id: string
     specialty: string
     bio: string
+    status: string | null
     user: { full_name: string; profile_photo_url: string | null } | null
   } | null
 }
@@ -126,7 +128,7 @@ export default function WaitingRoomPage() {
 
       const { data } = await supabase
         .from('consultations')
-        .select('id, type, status, credit_amount, doctor:doctor_profiles(id, specialty, bio, user:users(full_name, profile_photo_url))')
+        .select('id, type, status, credit_amount, doctor:doctor_profiles(id, specialty, bio, status, user:users(full_name, profile_photo_url))')
         .eq('id', consultationId)
         .single()
 
@@ -468,8 +470,9 @@ export default function WaitingRoomPage() {
           <TypeIcon size={14} /> {typeLabel}
         </div>
 
-        <h1 className="font-montserrat font-black text-xl text-ink-black mb-1">
-          Waiting for Dr. {doctorName}{dots}
+        <h1 className="font-montserrat font-black text-xl text-ink-black mb-1 flex items-center justify-center gap-1.5">
+          <span>Waiting for Dr. {doctorName}{dots}</span>
+          {consultation.doctor?.status === 'approved' && <VerifiedBadge size={16} />}
         </h1>
         <p className="text-ink-black/50 text-sm mb-4">
           {consultation.doctor?.specialty}

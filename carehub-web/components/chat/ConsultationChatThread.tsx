@@ -13,6 +13,7 @@ import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { WebVoiceNotePlayer } from '@/components/ui/WebVoiceNotePlayer'
 import { EndConsultationModal } from '@/components/doctor/EndConsultationModal'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
 import { logger } from '@/lib/logger'
@@ -57,6 +58,9 @@ interface ConsultationInfo {
   peerSpecialty?: string
   peerPatientId?: string
   peerPhotoUrl?: string | null
+  // Only meaningful when role === 'patient' (the peer is a doctor) — the
+  // patient role's own doctor_profiles.status, gating VerifiedBadge.
+  peerDoctorStatus?: string | null
 }
 
 interface PeerProfile {
@@ -84,6 +88,16 @@ type Att = {
 
 function getAtts(m: FormatMessageResponse): Att[] {
   return (m.attachments as Att[] | undefined) ?? []
+}
+
+// A message we've added to the list optimistically, before Stream has
+// confirmed it. `_localStatus` drives the "Sending…" / "Failed · Tap to
+// retry" UI; `_localPayload` keeps everything needed to redo the send
+// (including the original File objects, so a retry re-uploads rather than
+// requiring the user to reattach/retype).
+type ChatMessage = FormatMessageResponse & {
+  _localStatus?: 'sending' | 'failed'
+  _localPayload?: { text: string; files: { file: File; preview: string }[]; quotedId?: string }
 }
 
 function formatDateSeparator(date: Date): string {
@@ -226,7 +240,7 @@ export function ConsultationChatThread({
   const { user } = useUser()
   const [consultation, setConsultation] = useState<ConsultationInfo | null>(null)
   const [channel, setChannel] = useState<Channel | null>(null)
-  const [messages, setMessages] = useState<FormatMessageResponse[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [peerTyping, setPeerTyping] = useState(false)
@@ -242,7 +256,6 @@ export function ConsultationChatThread({
   const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [showImageMenu, setShowImageMenu] = useState(false)
   const [showAttachMenu, setShowAttachMenu] = useState(false)
-  const isSendingRef = useRef(false)
   const messageRefs = useRef<Record<string, HTMLDivElement>>({})
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
 
@@ -347,12 +360,13 @@ export function ConsultationChatThread({
         let peerSpecialty: string | undefined
         let peerPatientId: string | undefined
         let peerPhotoUrl: string | null = null
+        let peerDoctorStatus: string | null = null
         let status = ''
 
         if (role === 'patient') {
           const { data: consult } = await supabase
             .from('consultations')
-            .select('id, status, doctor:doctor_profiles(specialty, user:users(full_name, clerk_id, profile_photo_url))')
+            .select('id, status, doctor:doctor_profiles(specialty, status, user:users(full_name, clerk_id, profile_photo_url))')
             .eq('id', id)
             .single()
           const doctor = (consult as any)?.doctor
@@ -361,6 +375,7 @@ export function ConsultationChatThread({
           peerName = doctor?.user?.full_name ?? 'Doctor'
           peerSpecialty = doctor?.specialty
           peerPhotoUrl = doctor?.user?.profile_photo_url ?? null
+          peerDoctorStatus = doctor?.status ?? null
         } else {
           const { data: consult } = await supabase
             .from('consultations')
@@ -376,7 +391,7 @@ export function ConsultationChatThread({
         }
 
         if (cancelled) return
-        setConsultation({ id, status, peerClerkId, peerName, peerSpecialty, peerPatientId, peerPhotoUrl })
+        setConsultation({ id, status, peerClerkId, peerName, peerSpecialty, peerPatientId, peerPhotoUrl, peerDoctorStatus })
         peerClerkIdRef.current = peerClerkId
 
         const streamClient = getStreamClient()
@@ -415,7 +430,7 @@ export function ConsultationChatThread({
         await preloadImages(getMessageImageUrls(initialMsgs as any[]))
         setChannel(ch)
         setPeerOnline(!!ch.state.members[peerClerkId]?.user?.online)
-        setMessages(initialMsgs as unknown as FormatMessageResponse[])
+        setMessages(initialMsgs as unknown as ChatMessage[])
         const loadedIsReadOnly = status === 'completed' || status === 'cancelled' || status === 'ended_abnormally'
         if (!loadedIsReadOnly && isVisibleRef.current) {
           markChannelReadLocally(id, initialMsgs?.[initialMsgs.length - 1]?.id)
@@ -458,7 +473,7 @@ export function ConsultationChatThread({
       if (event.message) {
         setMessages(prev => {
           if (prev.some(m => m.id === event.message!.id)) return prev
-          return [...prev, event.message as unknown as FormatMessageResponse]
+          return [...prev, event.message as unknown as ChatMessage]
         })
         const fromPeer = event.message.user?.id !== clerkUserId
         // Only mark read when the page tab is focused AND (for the drawer
@@ -488,12 +503,12 @@ export function ConsultationChatThread({
     })
     const unsubUpdated = channel.on('message.updated', event => {
       if (event.message) {
-        setMessages(prev => prev.map(m => m.id === event.message!.id ? event.message as unknown as FormatMessageResponse : m))
+        setMessages(prev => prev.map(m => m.id === event.message!.id ? event.message as unknown as ChatMessage : m))
       }
     })
     const unsubDeleted = channel.on('message.deleted', event => {
       if (event.message) {
-        setMessages(prev => prev.map(m => m.id === event.message!.id ? event.message as unknown as FormatMessageResponse : m))
+        setMessages(prev => prev.map(m => m.id === event.message!.id ? event.message as unknown as ChatMessage : m))
       }
     })
     const unsubRead = channel.on('message.read', event => {
@@ -638,60 +653,91 @@ export function ConsultationChatThread({
     }, 80)
   }, [])
 
-  async function sendMessage() {
-    if (isSendingRef.current) return
-    isSendingRef.current = true
+  function buildOptimisticAttachments(files: { file: File; preview: string }[]): Att[] {
+    return files.map(({ file, preview }) => file.type.startsWith('image/')
+      ? { type: 'image', image_url: preview, asset_url: preview, mime_type: file.type, title: file.name, file_size: file.size }
+      : { type: 'file', asset_url: preview, file: preview, mime_type: file.type, title: file.name, file_size: file.size })
+  }
+
+  // Does the actual network work for one message (initial send or a retry)
+  // and reconciles the optimistic bubble with the outcome. Uses a
+  // client-assigned `id` so the eventual `message.new` echo for our own
+  // message is recognized as the same bubble rather than appended as a
+  // duplicate (see the dedup check in the message.new handler above).
+  async function performSend(localId: string, text: string, files: { file: File; preview: string }[], quotedId?: string) {
+    if (!channel) return
     try {
-      if (pendingFiles.length > 0) {
-        await sendFilesWithCaption(pendingFiles.map(f => f.file), input.trim())
-        pendingFiles.forEach(f => URL.revokeObjectURL(f.preview))
-        setPendingFiles([])
-        setInput('')
-        return
+      let attachments: Att[] | undefined
+      if (files.length > 0) {
+        setFileUploading(true)
+        attachments = await Promise.all(
+          files.map(async ({ file }) => {
+            if (file.type.startsWith('image/')) {
+              const res = await channel.sendImage(file)
+              return { type: 'image' as const, image_url: res.file, asset_url: res.file }
+            }
+            // Non-image documents (PDF, Word, etc.) must go through sendFile —
+            // sendImage silently mislabels them type:'image', which makes the
+            // renderer try (and fail) to paint a PDF as an <img>.
+            const res = await channel.sendFile(file, file.name, file.type)
+            return {
+              type: 'file' as const,
+              asset_url: res.file,
+              file: res.file,
+              title: file.name,
+              mime_type: file.type,
+              file_size: file.size,
+            }
+          })
+        )
       }
-      const text = input.trim()
-      if (!text || !channel) return
-      setInput('')
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
-      channel.stopTyping().catch(() => {})
-      await channel.sendMessage({ text, quoted_message_id: replyTo?.id })
-      setReplyTo(null)
+      const resp = await channel.sendMessage({ id: localId, text, attachments, quoted_message_id: quotedId })
+      files.forEach(f => URL.revokeObjectURL(f.preview))
+      setMessages(prev => prev.map(m => m.id === localId ? (resp.message as unknown as ChatMessage) : m))
+    } catch (err) {
+      logger.error('[Chat] send error:', err)
+      setMessages(prev => prev.map(m => m.id === localId ? { ...m, _localStatus: 'failed' as const } : m))
     } finally {
-      isSendingRef.current = false
+      if (files.length > 0) setFileUploading(false)
     }
   }
 
-  async function sendFilesWithCaption(files: File[], caption?: string) {
+  // Adds the message to the thread immediately (so nothing typed is ever
+  // silently lost to a network failure), then sends it in the background.
+  // A failure leaves the bubble in place marked "Failed · Tap to retry"
+  // instead of clearing the input/attachments and discarding the content.
+  async function sendMessage() {
     if (!channel) return
-    setFileUploading(true)
-    try {
-      const attachments = await Promise.all(
-        files.map(async (file) => {
-          if (file.type.startsWith('image/')) {
-            const res = await channel.sendImage(file)
-            return { type: 'image' as const, image_url: res.file, asset_url: res.file }
-          }
-          // Non-image documents (PDF, Word, etc.) must go through sendFile —
-          // sendImage silently mislabels them type:'image', which makes the
-          // renderer try (and fail) to paint a PDF as an <img>.
-          const res = await channel.sendFile(file, file.name, file.type)
-          return {
-            type: 'file' as const,
-            asset_url: res.file,
-            file: res.file,
-            title: file.name,
-            mime_type: file.type,
-            file_size: file.size,
-          }
-        })
-      )
-      await channel.sendMessage({ text: caption || '', attachments, quoted_message_id: replyTo?.id })
-      setReplyTo(null)
-    } catch (err) {
-      logger.error('[Chat] sendFiles error:', err)
-    } finally {
-      setFileUploading(false)
-    }
+    const text = input.trim()
+    const files = pendingFiles
+    if (!text && files.length === 0) return
+    const quotedId = replyTo?.id
+    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    const optimistic: ChatMessage = {
+      id: localId,
+      text,
+      attachments: buildOptimisticAttachments(files),
+      user: { id: clerkUserId, name: user?.fullName ?? user?.firstName ?? undefined, image: user?.imageUrl ?? undefined },
+      created_at: new Date().toISOString(),
+      type: 'regular',
+      quoted_message: replyTo ?? undefined,
+      _localStatus: 'sending',
+      _localPayload: { text, files, quotedId },
+    } as unknown as ChatMessage
+    setMessages(prev => [...prev, optimistic])
+    setInput('')
+    setPendingFiles([])
+    setReplyTo(null)
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+    channel.stopTyping().catch(() => {})
+    await performSend(localId, text, files, quotedId)
+  }
+
+  function retrySend(m: ChatMessage) {
+    if (m._localStatus !== 'failed' || !m._localPayload) return
+    const { text, files, quotedId } = m._localPayload
+    setMessages(prev => prev.map(mm => mm.id === m.id ? { ...mm, _localStatus: 'sending' as const } : mm))
+    performSend(m.id, text, files, quotedId)
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -730,6 +776,7 @@ export function ConsultationChatThread({
   const rawPeerName = consultation?.peerName ?? (isDoctor ? 'Patient' : 'Doctor')
   const peerDisplayName = isDoctor ? rawPeerName : (rawPeerName ? `Dr. ${stripDrPrefix(rawPeerName)}` : 'Doctor')
   const peerInitial = (isDoctor ? rawPeerName : stripDrPrefix(rawPeerName)).charAt(0).toUpperCase() || (isDoctor ? 'P' : 'D')
+  const peerVerified = !isDoctor && consultation?.peerDoctorStatus === 'approved'
 
   const displayedMessages = messages
   const searchResults = searchActive && searchQuery.trim()
@@ -832,8 +879,22 @@ export function ConsultationChatThread({
     })
   }
 
-  function renderStatus(m: FormatMessageResponse) {
+  function renderStatus(m: ChatMessage) {
     if (m.user?.id !== clerkUserId) return null
+    if (m._localStatus === 'sending') {
+      return <span className="text-[11px] text-white/50 italic">Sending…</span>
+    }
+    if (m._localStatus === 'failed') {
+      return (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); retrySend(m) }}
+          className="text-[11px] font-semibold text-red-100 underline decoration-red-200 underline-offset-2"
+        >
+          Failed · Tap to retry
+        </button>
+      )
+    }
     const msgDate = m.created_at ? new Date(m.created_at as any) : null
     const isRead = peerReadAt !== null && msgDate !== null && msgDate <= peerReadAt
     return <span className={`text-[11px] font-bold leading-none ${isRead ? 'text-sky-300' : 'text-white/40'}`}>✓✓</span>
@@ -981,7 +1042,10 @@ export function ConsultationChatThread({
                 </div>
               )}
               <div className="text-center">
-                <p className="font-montserrat font-bold text-ink-black text-lg">{peerProfile?.full_name ?? peerDisplayName}</p>
+                <p className="font-montserrat font-bold text-ink-black text-lg flex items-center justify-center gap-1.5">
+                  {peerProfile?.full_name ?? peerDisplayName}
+                  {peerVerified && <VerifiedBadge size={15} />}
+                </p>
                 {!isDoctor && consultation?.peerSpecialty && (
                   <p className="text-teal-600 text-sm font-semibold">{consultation.peerSpecialty}</p>
                 )}
@@ -1064,7 +1128,10 @@ export function ConsultationChatThread({
         </button>
 
         <div className="flex-1 min-w-0">
-          <p className={`font-montserrat font-bold text-ink-black truncate ${isPage ? 'text-sm' : 'text-xs'}`}>{peerDisplayName}</p>
+          <p className={`font-montserrat font-bold text-ink-black flex items-center gap-1.5 ${isPage ? 'text-sm' : 'text-xs'}`}>
+            <span className="truncate">{peerDisplayName}</span>
+            {peerVerified && <VerifiedBadge size={13} />}
+          </p>
           <div className="flex items-center gap-1.5">
             <div className={`w-1.5 h-1.5 rounded-full ${isReadOnly ? 'bg-steel-grey' : peerOnline ? 'bg-green-500' : 'bg-steel-grey'}`} />
             <span className={`text-xs font-medium ${isReadOnly || !peerOnline ? 'text-ink-black/40' : 'text-green-600'}`}>
@@ -1206,10 +1273,12 @@ export function ConsultationChatThread({
                     </div>
                   </div>
                 ) : (
-                  <div className={`flex ${mine ? 'justify-end' : 'justify-start'} mb-1`} onContextMenu={(e) => handleContextMenu(e, m)}>
+                  <div className={`flex ${mine ? 'justify-end' : 'justify-start'} mb-1`} onContextMenu={(e) => { if (!m._localStatus) handleContextMenu(e, m) }}>
                     <div className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl text-sm shadow-sm transition-colors duration-300 ${
                       mine ? 'bg-teal-500 text-white rounded-br-sm' : 'bg-white text-ink-black rounded-bl-sm'
-                    } ${highlightedMessageId === m.id ? 'ring-2 ring-yellow-400 shadow-yellow-200 shadow-lg' : ''}`}>
+                    } ${highlightedMessageId === m.id ? 'ring-2 ring-yellow-400 shadow-yellow-200 shadow-lg' : ''} ${
+                      m._localStatus === 'failed' ? 'opacity-80 ring-1 ring-red-300' : m._localStatus === 'sending' ? 'opacity-70' : ''
+                    }`}>
                       {renderQuotedMessage(m)}
                       {renderAttachments(m)}
                       {m.text && !hasAudio && <span>{m.text}</span>}

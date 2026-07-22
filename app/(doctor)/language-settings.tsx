@@ -3,10 +3,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
+import { AlertVariant, CareHubAlert } from '@/components/ui/CareHubAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -21,6 +22,7 @@ export default function DoctorLanguageSettingsScreen() {
   const { setSelectedLanguage } = useAppStore()
   const [selected, setSelected] = useState(i18n.language ?? 'en')
   const [saving, setSaving] = useState(false)
+  const [alertState, setAlertState] = useState<{ variant: AlertVariant; title: string; message: string; onOk?: () => void } | null>(null)
 
   useEffect(() => {
     AsyncStorage.getItem(LANGUAGE_STORAGE_KEY).then((code) => {
@@ -42,9 +44,14 @@ export default function DoctorLanguageSettingsScreen() {
       setSelectedLanguage(selected)
       await i18n.changeLanguage(selected)
       await AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, selected)
-      Alert.alert('Language Updated', `App language set to ${LANGUAGES.find((l) => l.id === selected)?.englishName}.`, [{ text: 'OK', onPress: () => router.back() }])
+      setAlertState({
+        variant: 'success',
+        title: 'Language Updated',
+        message: `App language set to ${LANGUAGES.find((l) => l.id === selected)?.englishName}.`,
+        onOk: () => router.back(),
+      })
     } catch {
-      Alert.alert('Error', 'Failed to change language. Please try again.')
+      setAlertState({ variant: 'error', title: 'Error', message: 'Failed to change language. Please try again.' })
     } finally {
       setSaving(false)
     }
@@ -107,6 +114,15 @@ export default function DoctorLanguageSettingsScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      <CareHubAlert
+        visible={!!alertState}
+        variant={alertState?.variant ?? 'info'}
+        title={alertState?.title ?? ''}
+        message={alertState?.message ?? ''}
+        buttons={[{ text: 'OK', onPress: () => { const onOk = alertState?.onOk; setAlertState(null); onOk?.() } }]}
+        onClose={() => setAlertState(null)}
+      />
     </SafeAreaView>
   )
 }

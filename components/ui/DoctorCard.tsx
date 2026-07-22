@@ -1,11 +1,14 @@
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image } from 'expo-image'
+import { memo } from 'react'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 
 export type Doctor = {
   id: string
@@ -24,6 +27,10 @@ export type Doctor = {
   profile_photo_url?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
   languages?: string[] | null
+  // Every doctor a patient can see through this card is already admin-approved
+  // (the lists that build these objects filter status='approved' server-side),
+  // but the field stays explicit so the badge's gate is never implicit.
+  status?: string | null
 }
 
 type Props = {
@@ -33,7 +40,7 @@ type Props = {
   mode?: 'grid' | 'list'
 }
 
-export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
+function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid' }: Props) {
   if (mode === 'list') {
     return (
       <View style={L.card}>
@@ -41,7 +48,14 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
         <View style={L.topRow}>
           <View style={L.photoWrap}>
             {doctor.profile_photo_url ? (
-              <Image source={{ uri: doctor.profile_photo_url }} style={L.photo} />
+              <Image
+                source={{ uri: doctor.profile_photo_url }}
+                style={L.photo}
+                contentFit="cover"
+                cachePolicy="memory-disk"
+                transition={0}
+                recyclingKey={doctor.id}
+              />
             ) : (
               <View style={L.photoPlaceholder}>
                 <Ionicons name="person" size={34} color={colors.steelGrey} />
@@ -50,7 +64,10 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
             {doctor.is_online && <View style={L.onlineDot} />}
           </View>
           <View style={L.info}>
-            <Text style={L.name} numberOfLines={1}>{doctor.name}</Text>
+            <View style={L.nameRow}>
+              <Text style={L.name} numberOfLines={1}>{doctor.name}</Text>
+              {doctor.status === 'approved' && <VerifiedBadge size={15} />}
+            </View>
             <Text style={L.specialty} numberOfLines={1}>{doctor.specialty}</Text>
             {doctor.subtitle ? (
               <Text style={L.hospital} numberOfLines={1}>{doctor.subtitle}</Text>
@@ -101,7 +118,14 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
     >
       <View style={G.photoWrap}>
         {doctor.profile_photo_url ? (
-          <Image source={{ uri: doctor.profile_photo_url }} style={G.photo} />
+          <Image
+            source={{ uri: doctor.profile_photo_url }}
+            style={G.photo}
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={0}
+            recyclingKey={doctor.id}
+          />
         ) : (
           <View style={G.photoPlaceholder}>
             <Ionicons name="person" size={42} color={colors.steelGrey} />
@@ -109,7 +133,10 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
         )}
         {doctor.is_online && <View style={G.onlineDot} />}
       </View>
-      <Text style={G.name} numberOfLines={1}>{doctor.name}</Text>
+      <View style={G.nameRow}>
+        <Text style={G.name} numberOfLines={1}>{doctor.name}</Text>
+        {doctor.status === 'approved' && <VerifiedBadge size={13} />}
+      </View>
       {doctor.subtitle ? (
         <Text style={G.subtitle} numberOfLines={1}>{doctor.subtitle}</Text>
       ) : null}
@@ -137,6 +164,13 @@ export function DoctorCard({ doctor, onPress, onBook, mode = 'grid' }: Props) {
   )
 }
 
+// Doctor list/home screens re-render this on every realtime tick (online
+// status, price, rating ticks for OTHER doctors) — without memo every visible
+// card (and its Image) remounts on each update even when its own doctor
+// object is unchanged, discarding the in-flight fade/transition and forcing
+// a redundant re-decode.
+export const DoctorCard = memo(DoctorCardImpl)
+
 // ─── List styles ──────────────────────────────────────────────────────────────
 const L = StyleSheet.create({
   card: {
@@ -161,7 +195,8 @@ const L = StyleSheet.create({
     borderWidth: 2.5, borderColor: colors.mistWhite,
   },
   info: { flex: 1, paddingTop: 2 },
-  name: { fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack, marginBottom: 2 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
+  name: { fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack, flexShrink: 1 },
   specialty: { fontFamily: fonts.medium, fontSize: 13, color: colors.tealGreen, marginBottom: 2 },
   hospital: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
   languageRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -204,7 +239,8 @@ const G = StyleSheet.create({
     backgroundColor: colors.success,
     borderWidth: 2.5, borderColor: colors.mistWhite,
   },
-  name: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 2 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 2 },
+  name: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, flexShrink: 1 },
   subtitle: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 2 },
   specialty: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
   languageRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 10 },

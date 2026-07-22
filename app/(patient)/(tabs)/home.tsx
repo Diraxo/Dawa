@@ -3,9 +3,10 @@ import { useScrollToTop, useFocusEffect } from '@react-navigation/native'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Image,
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -22,10 +23,12 @@ import { QuickActionCard } from '@/components/ui/QuickActionCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 
 function mapDoctor(d: any): Doctor {
   return {
@@ -45,6 +48,9 @@ function mapDoctor(d: any): Doctor {
     profile_photo_url: d.users?.profile_photo_url ?? null,
     availability: d.availability ?? null,
     languages: d.languages ?? null,
+    // Both queries this feeds always filter status='approved' server-side —
+    // every doctor mapDoctor() ever sees is already approved.
+    status: 'approved',
   }
 }
 
@@ -67,6 +73,7 @@ export default function HomeScreen() {
   const { getToken } = useAuth()
   const scrollRef = useRef<ScrollView>(null)
   useScrollToTop(scrollRef)
+  const guardNav = useNavGuard()
   const [searchQuery, setSearchQuery] = useState('')
   const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>([])
   const [topDoctors, setTopDoctors] = useState<Doctor[]>([])
@@ -74,8 +81,14 @@ export default function HomeScreen() {
   const [upcomingAppointment, setUpcomingAppointment] = useState<{
     doctorName: string; type: string; date: string; time: string
   } | null>(null)
+  // Distinct from `upcomingAppointment === null`, which is also the
+  // steady-state "genuinely has none" value — without this, the "No
+  // upcoming appointments" card flashed on every mount/re-login before the
+  // fetch below resolved, even for patients who do have one booked.
+  const [loadingAppointment, setLoadingAppointment] = useState(true)
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
   const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
+  const upcomingAppointmentCacheKey = user?.id ? `patient-upcoming-appt:${user.id}` : null
 
   // Kept current via effect below so the realtime handler (subscribed once
   // per fetch cycle) never reads a stale closed-over value of
@@ -144,27 +157,38 @@ export default function HomeScreen() {
     const CHANNEL_NAME = 'patient-home-doctor-status'
 
     const fetchDoctorLists = async () => {
-      // Public doctor data — no auth required
-      const [onlineRes, topRes] = await Promise.all([
-        supabase
-          .from('doctor_profiles')
-          .select('*, users!inner(full_name, profile_photo_url)')
-          .eq('status', 'approved')
-          .eq('is_online', true)
-          .order('rating_average', { ascending: false })
-          .limit(8),
-        supabase
-          .from('doctor_profiles')
-          .select('*, users!inner(full_name, profile_photo_url)')
-          .eq('status', 'approved')
-          .order('rating_average', { ascending: false })
-          .limit(8),
-      ])
+      try {
+        // Public doctor data — no auth required
+        const [onlineRes, topRes] = await Promise.all([
+          supabase
+            .from('doctor_profiles')
+            .select('*, users!inner(full_name, profile_photo_url)')
+            .eq('status', 'approved')
+            .eq('is_online', true)
+            .order('rating_average', { ascending: false })
+            .limit(8),
+          supabase
+            .from('doctor_profiles')
+            .select('*, users!inner(full_name, profile_photo_url)')
+            .eq('status', 'approved')
+            .order('rating_average', { ascending: false })
+            .limit(8),
+        ])
 
-      if (!mounted) return
-      if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
-      if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
-      setLoadingDoctors(false)
+        if (!mounted) return
+        if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
+        if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
+      } catch {
+        // Network failure — leave whatever list is already on screen (cache
+        // or a prior successful fetch) rather than throwing past this IIFE,
+        // which previously left loadingDoctors stuck true forever (the
+        // Promise.all rejecting skipped the setLoadingDoctors(false) below).
+        // The realtime subscription below still gets attempted after this,
+        // and its SUBSCRIBED reconciliation fetch retries this once
+        // connectivity returns.
+      } finally {
+        if (mounted) setLoadingDoctors(false)
+      }
     }
 
     ;(async () => {
@@ -320,23 +344,40 @@ export default function HomeScreen() {
       if (apptRes.data?.length) {
         const appt = apptRes.data[0] as any
         const d = new Date(appt.scheduled_at)
-        setUpcomingAppointment({
+        const next = {
           doctorName: formatDoctorName((appt.doctor_profiles as any)?.users?.full_name, 'Doctor'),
           type: appt.type ?? 'chat',
           date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
           time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        })
+        }
+        setUpcomingAppointment(next)
+        if (upcomingAppointmentCacheKey) setCachedJson(upcomingAppointmentCacheKey, next)
       } else {
         setUpcomingAppointment(null)
+        if (upcomingAppointmentCacheKey) setCachedJson(upcomingAppointmentCacheKey, null)
       }
+      setLoadingAppointment(false)
+    }
+
+    // Paint the last-known upcoming appointment immediately (memory/disk)
+    // instead of the "No upcoming appointments" empty state, which used to
+    // flash on every mount until the token->user-id->consultations chain
+    // below resolved.
+    if (upcomingAppointmentCacheKey) {
+      getCachedJson<typeof upcomingAppointment>(upcomingAppointmentCacheKey).then((cached) => {
+        if (mounted && cached !== undefined) setUpcomingAppointment(cached)
+      })
     }
 
     ;(async () => {
+      try {
       const token = await getToken()
-      if (!token || !mounted) return
+      if (!token) { if (mounted) setLoadingAppointment(false); return }
+      if (!mounted) return
       const client = getAuthClient(token)
       const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).maybeSingle()
-      if (!me || !mounted) return
+      if (!me) { if (mounted) setLoadingAppointment(false); return }
+      if (!mounted) return
 
       await loadUpcomingAppointment(client, (me as any).id)
       if (!mounted) return
@@ -361,6 +402,12 @@ export default function HomeScreen() {
           }
         )
         .subscribe()
+      } catch {
+        // Network failure anywhere above previously escaped this IIFE
+        // uncaught, leaving loadingAppointment stuck true forever (none of
+        // the explicit early-return branches above run on a thrown error).
+        if (mounted) setLoadingAppointment(false)
+      }
     })()
 
     return () => {
@@ -410,9 +457,9 @@ export default function HomeScreen() {
     return t('goodEvening')
   }
 
-  const handleDoctorPress = (id: string) => {
+  const handleDoctorPress = guardNav((id: string) => {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
-  }
+  })
 
   const filterDoctors = (docs: Doctor[]) => {
     let result = docs
@@ -457,7 +504,13 @@ export default function HomeScreen() {
             style={({ pressed }) => [styles.avatarBtn, pressed && { opacity: 0.75 }]}
           >
             {(dbPhotoUrl ?? user?.imageUrl) ? (
-              <Image source={{ uri: (dbPhotoUrl ?? user?.imageUrl) as string }} style={styles.avatar} />
+              <Image
+                source={{ uri: (dbPhotoUrl ?? user?.imageUrl) as string }}
+                style={styles.avatar}
+                contentFit="cover"
+                cachePolicy="memory-disk"
+                transition={0}
+              />
             ) : (
               <View style={styles.avatarFallback}>
                 <Text style={styles.avatarInitial}>
@@ -569,7 +622,11 @@ export default function HomeScreen() {
 
         {/* ── Upcoming Appointment ── */}
         <Text style={[styles.sectionTitle, styles.mt28]}>{t('upcomingAppointment')}</Text>
-        {upcomingAppointment ? (
+        {loadingAppointment && !upcomingAppointment ? (
+          <View style={[styles.emptyApptCard, styles.mt12]}>
+            <ActivityIndicator size="small" color={colors.steelGrey} />
+          </View>
+        ) : upcomingAppointment ? (
           <Pressable
             style={({ pressed }) => [styles.appointmentCard, pressed && { opacity: 0.9 }]}
             onPress={() => router.push('/(patient)/(tabs)/appointments')}

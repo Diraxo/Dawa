@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
 
@@ -67,6 +68,7 @@ export default function ConsultationHistoryScreen() {
   const { user } = useUser()
   const { getToken } = useAuth()
   const router = useRouter()
+  const guardNav = useNavGuard()
 
   const [rows, setRows] = useState<ConsultRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -178,8 +180,8 @@ export default function ConsultationHistoryScreen() {
               <Pressable
                 key={row.id}
                 style={({ pressed }) => [styles.rowCard, pressed && { opacity: 0.85 }]}
-                onPress={() => row.status === 'completed'
-                  ? router.push({ pathname: '/(doctor)/consultation-summary' as any, params: { consultationId: row.id, patientName: row.patientName } })
+                onPress={row.status === 'completed'
+                  ? guardNav(() => router.push({ pathname: '/(doctor)/consultation-summary' as any, params: { consultationId: row.id, patientName: row.patientName } }))
                   : undefined
                 }
               >

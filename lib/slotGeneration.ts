@@ -45,26 +45,34 @@ export function localDateString(d: Date): string {
 const ETHIOPIA_TZ = 'Africa/Addis_Ababa'
 
 // Wall-clock date/time as observed in Africa/Addis_Ababa right now, derived
-// from the true instant (Date.now(), never wrong) via Intl rather than the
-// device's own getHours()/getDate() — those reflect whatever timezone the
-// device happens to be configured for, which may not be Ethiopia's even for
-// a patient physically in Ethiopia (misconfigured device, traveler, etc).
-// The spec requires Ethiopia local time as the single source of truth,
-// evaluated down to the second, independent of the device.
-function nowInEthiopia() {
+// via Intl rather than the device's own getHours()/getDate() — those reflect
+// whatever timezone the device happens to be configured for, which may not
+// be Ethiopia's even for a patient physically in Ethiopia (misconfigured
+// device, traveler, etc). The spec requires Ethiopia local time as the
+// single source of truth, evaluated down to the second, independent of the
+// device.
+//
+// `nowMs` defaults to Date.now() (the device clock) but every call site that
+// can supply a server-synced instant (see lib/serverClock.ts's
+// useServerNow()) should pass one — the device clock's absolute value is not
+// trustworthy on its own (unset, misconfigured, or turned back deliberately
+// to keep an already-past slot looking bookable). This function only ever
+// reinterprets whatever instant it's given into Ethiopia wall-clock fields;
+// it never re-reads the device clock behind the caller's back.
+function nowInEthiopia(nowMs: number = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: ETHIOPIA_TZ,
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
-  }).formatToParts(new Date())
+  }).formatToParts(new Date(nowMs))
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value ?? '0')
   // hour12: false yields "24" at Ethiopia-midnight in some ICU builds.
   return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') % 24, minute: get('minute'), second: get('second') }
 }
 
-function ethiopiaDateString(): string {
-  const { year, month, day } = nowInEthiopia()
+function ethiopiaDateString(nowMs?: number): string {
+  const { year, month, day } = nowInEthiopia(nowMs)
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
@@ -110,11 +118,14 @@ function formatWeekdayLabel(dateStr: string): string {
 // This matches the server-side guard in book_appointment_slot() /
 // reschedule_appointment_slot() (`slot_start < now() - 2min` grace), and is
 // evaluated against Ethiopia wall-clock time down to the second.
-export function isSlotPast(dayValue: string, slot: string): boolean {
-  const today = ethiopiaDateString()
+//
+// `nowMs` should be a server-synced instant (lib/serverClock.ts's
+// useServerNow()) whenever the caller has one — see nowInEthiopia() above.
+export function isSlotPast(dayValue: string, slot: string, nowMs?: number): boolean {
+  const today = ethiopiaDateString(nowMs)
   if (dayValue < today) return true
   if (dayValue > today) return false
-  const { hour, minute, second } = nowInEthiopia()
+  const { hour, minute, second } = nowInEthiopia(nowMs)
   const nowSecs = hour * 3600 + minute * 60 + second
   return parseTimeMins(slot) * 60 <= nowSecs
 }
@@ -133,9 +144,9 @@ export function getAvailableSlots(availability: Availability | null | undefined,
   return slots
 }
 
-export function getNextDays(count: number, availability?: Availability | null) {
+export function getNextDays(count: number, availability?: Availability | null, nowMs?: number) {
   const days = []
-  const today = ethiopiaDateString()
+  const today = ethiopiaDateString(nowMs)
   for (let i = 0; i < count; i++) {
     const value = i === 0 ? today : addDaysToDateString(today, i)
     if (availability) {

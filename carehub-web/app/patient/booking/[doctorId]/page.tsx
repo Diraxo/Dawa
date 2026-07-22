@@ -8,6 +8,7 @@ import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
 import { useServerNow } from '@/lib/serverClock'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { MessageCircle, Phone, Video, Zap, Calendar, Wallet, Check } from 'lucide-react'
 import {
   DAY_NAMES,
@@ -27,6 +28,7 @@ interface DoctorProfile {
   hospital_name: string
   is_online: boolean
   availability: Record<string, unknown> | null
+  status: string
   user: { full_name: string } | null
 }
 
@@ -107,7 +109,7 @@ export default function BookingPage() {
   function loadDoctor() {
     supabase
       .from('doctor_profiles')
-      .select('id, specialty, hospital_name, is_online, chat_price, phone_price, video_price, availability, user:users(full_name)')
+      .select('id, specialty, hospital_name, is_online, chat_price, phone_price, video_price, availability, status, user:users(full_name)')
       .eq('id', doctorId)
       .single()
       .then(({ data }) => {
@@ -549,7 +551,10 @@ export default function BookingPage() {
       </Link>
 
       <h1 className="font-montserrat font-black text-2xl text-ink-black mb-1">Book Consultation</h1>
-      <p className="text-ink-black/50 text-sm mb-6">with Dr. {stripDrPrefix(doctor.user?.full_name ?? '')} · {doctor.specialty}</p>
+      <p className="text-ink-black/50 text-sm mb-6 flex items-center gap-1.5">
+        with Dr. {stripDrPrefix(doctor.user?.full_name ?? '')} · {doctor.specialty}
+        {doctor.status === 'approved' && <VerifiedBadge size={14} />}
+      </p>
 
       {/* Step indicator */}
       <div className="flex items-center gap-1 mb-8">

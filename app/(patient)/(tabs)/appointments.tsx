@@ -3,10 +3,11 @@ import { Ionicons } from '@expo/vector-icons'
 import { useFocusEffect, useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   FlatList,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,11 +17,14 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { RescheduleModal } from '@/components/ui/RescheduleModal'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useTranslation } from 'react-i18next'
 
@@ -45,6 +49,7 @@ interface Appointment {
   doctorHospital: string
   doctorIsOnline: boolean
   doctorPhotoUrl: string | null
+  doctorStatus: string | null
   type: ConsultationType
   scheduledAt: string
   dateLabel: string
@@ -95,6 +100,7 @@ function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Ap
     doctorHospital: dp?.hospital_name ?? '',
     doctorIsOnline: dp?.is_online ?? false,
     doctorPhotoUrl: dp?.users?.profile_photo_url ?? null,
+    doctorStatus: dp?.status ?? null,
     type: (row.type ?? 'chat') as ConsultationType,
     scheduledAt: iso,
     dateLabel: dateLbl(displayIso, todayLabel, tomorrowLabel),
@@ -143,7 +149,14 @@ function DoctorAvatar({ name, isOnline, photoUrl }: { name: string; isOnline: bo
   return (
     <View style={avatarStyles.wrapper}>
       {photoUrl ? (
-        <Image source={{ uri: photoUrl }} style={avatarStyles.circle} />
+        <Image
+          source={{ uri: photoUrl }}
+          style={avatarStyles.circle}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+          transition={0}
+          recyclingKey={photoUrl}
+        />
       ) : (
         <View style={[avatarStyles.circle, { backgroundColor: avatarColor(name) }]}>
           <Text style={avatarStyles.initials}>{initials}</Text>
@@ -212,7 +225,10 @@ function UpcomingCard({
         <DoctorAvatar name={item.doctorName} isOnline={item.doctorIsOnline} photoUrl={item.doctorPhotoUrl} />
 
         <View style={cardStyles.info}>
-          <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
+          <View style={cardStyles.doctorNameRow}>
+            <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
+            {item.doctorStatus === 'approved' && <VerifiedBadge size={13} />}
+          </View>
           <Text style={cardStyles.hospital}>{item.doctorHospital}</Text>
           <Text style={cardStyles.specialty}>{item.doctorSpecialty}</Text>
           {item.amount > 0 && <Text style={cardStyles.priceText}>ETB {item.amount.toLocaleString()}</Text>}
@@ -333,7 +349,10 @@ function PastCard({
         <DoctorAvatar name={item.doctorName} isOnline={false} photoUrl={item.doctorPhotoUrl} />
 
         <View style={cardStyles.info}>
-          <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
+          <View style={cardStyles.doctorNameRow}>
+            <Text style={cardStyles.doctorName}>{item.doctorName}</Text>
+            {item.doctorStatus === 'approved' && <VerifiedBadge size={13} />}
+          </View>
           <Text style={cardStyles.hospital}>{item.doctorHospital}</Text>
           <Text style={cardStyles.specialty}>{item.doctorSpecialty}</Text>
           {item.amount > 0 && <Text style={cardStyles.priceText}>ETB {item.amount.toLocaleString()}</Text>}
@@ -400,6 +419,11 @@ const cardStyles = StyleSheet.create({
   info: {
     flex: 1,
     gap: 2,
+  },
+  doctorNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
   },
   doctorName: {
     fontFamily: fonts.semiBold,
@@ -619,9 +643,15 @@ export default function AppointmentsScreen() {
   const { tab: tabParam } = useLocalSearchParams<{ tab?: string }>()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
+  const guardNav = useNavGuard()
   const [activeTab, setActiveTab] = useState<AppointmentTab>(tabParam === 'past' ? 'past' : 'upcoming')
   const [upcoming, setUpcoming] = useState<Appointment[]>([])
   const [past, setPast] = useState<Appointment[]>([])
+  // True until the first fetch (this mount/focus) actually completes — gates
+  // the FlatList's empty state so "No upcoming/past appointments" can only
+  // ever render once the server has genuinely confirmed there are none, not
+  // just because `upcoming`/`past` haven't been populated yet.
+  const [isLoading, setIsLoading] = useState(true)
   // Mirrors upcoming/past so the users-table realtime handler (below) can
   // check "is this changed doctor one of mine?" without a stale closure.
   const upcomingRef = useRef<Appointment[]>([])
@@ -629,6 +659,22 @@ export default function AppointmentsScreen() {
   useEffect(() => { upcomingRef.current = upcoming }, [upcoming])
   useEffect(() => { pastRef.current = past }, [past])
   const [reminders, setReminders] = useState<FollowupReminder[]>([])
+  const upcomingCacheKey = clerkUserId ? `patient-appointments-upcoming:${clerkUserId}` : null
+  const pastCacheKey = clerkUserId ? `patient-appointments-past:${clerkUserId}` : null
+
+  // Paint the last-known lists from disk immediately on mount, before the
+  // real fetch below even starts.
+  useEffect(() => {
+    if (!upcomingCacheKey || !pastCacheKey) return
+    let cancelled = false
+    getCachedJson<Appointment[]>(upcomingCacheKey).then((cached) => {
+      if (cached && !cancelled) setUpcoming(cached)
+    })
+    getCachedJson<Appointment[]>(pastCacheKey).then((cached) => {
+      if (cached && !cancelled) setPast(cached)
+    })
+    return () => { cancelled = true }
+  }, [upcomingCacheKey, pastCacheKey])
 
   // This tab screen stays mounted across tab switches, so a plain useState
   // initializer only wins on first-ever mount — re-navigating here with a
@@ -644,7 +690,7 @@ export default function AppointmentsScreen() {
         .from('consultations')
         .select(`
           id, type, status, payment_status, scheduled_at, started_at, created_at, patient_amount,
-          doctor_profiles!inner(id, specialty, hospital_name, is_online, users!inner(id, full_name, profile_photo_url))
+          doctor_profiles!inner(id, specialty, hospital_name, is_online, status, users!inner(id, full_name, profile_photo_url))
         `)
         .eq('patient_id', patientId)
         .order('scheduled_at', { ascending: false }),
@@ -668,8 +714,7 @@ export default function AppointmentsScreen() {
     // Upcoming: active, scheduled (not yet activated), OR legacy paid-pending scheduled (future only)
     // Sorted nearest-first (ascending) — the base query orders descending for
     // "past" to show most-recent-first, so upcoming needs its own re-sort.
-    setUpcoming(
-      data.filter(r => {
+    const nextUpcoming = data.filter(r => {
         if (r.status === 'active') return true
         if (r.status === 'scheduled') return true
         // The doctor has accepted (or the call is already underway) but the
@@ -690,12 +735,12 @@ export default function AppointmentsScreen() {
         }
         return false
       }).map(mapAppt).sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
-    )
+    setUpcoming(nextUpcoming)
+    if (upcomingCacheKey) setCachedJson(upcomingCacheKey, nextUpcoming)
 
     // Past: completed, or cancelled ONLY if payment was already confirmed
     // (payment-failure cancellations have payment_status='pending' — hide them)
-    setPast(
-      data.filter(r => {
+    const nextPast = data.filter(r => {
         if (r.status === 'completed') return true
         if (r.status === 'cancelled' && r.payment_status === 'paid') return true
         if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
@@ -703,21 +748,24 @@ export default function AppointmentsScreen() {
         }
         return false
       }).map(mapAppt)
-    )
+    setPast(nextPast)
+    if (pastCacheKey) setCachedJson(pastCacheKey, nextPast)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t])
+  }, [t, upcomingCacheKey, pastCacheKey])
 
   useFocusEffect(
     useCallback(() => {
       let cancelled = false
       let channel: ReturnType<typeof supabase.channel> | null = null
+      setIsLoading(true)
 
       getToken().then(async token => {
-        if (!token || cancelled) return
+        if (!token || cancelled) { if (!cancelled) setIsLoading(false); return }
         const client = getAuthClient(token)
         const { data: me } = await client.from('users').select('id').eq('clerk_id', clerkUserId).maybeSingle()
-        if (!me || cancelled) return
+        if (!me || cancelled) { if (!cancelled) setIsLoading(false); return }
         await loadAppointments(client, me.id)
+        setIsLoading(false)
         if (cancelled) return
 
         // Live-refresh while the tab is focused (new scheduled booking,
@@ -773,6 +821,11 @@ export default function AppointmentsScreen() {
             }
           )
           .subscribe()
+      }).catch(() => {
+        // A network failure anywhere in the chain above (no .catch existed
+        // before) otherwise left isLoading stuck true forever, since none of
+        // the explicit early-return branches run on a thrown/rejected error.
+        if (!cancelled) setIsLoading(false)
       })
       return () => { cancelled = true; if (channel) supabase.removeChannel(channel) }
     }, [getToken, clerkUserId, loadAppointments])
@@ -780,7 +833,7 @@ export default function AppointmentsScreen() {
 
   const list = activeTab === 'upcoming' ? upcoming : past
 
-  const handleJoin = (item: Appointment) => {
+  const handleJoin = guardNav((item: Appointment) => {
     const routes: Record<ConsultationType, string> = {
       chat: '/(patient)/chat-consultation',
       phone: '/(patient)/phone-consultation',
@@ -796,9 +849,9 @@ export default function AppointmentsScreen() {
         channelId: item.id,
       },
     })
-  }
+  })
 
-  const handleViewSummary = (item: Appointment) => {
+  const handleViewSummary = guardNav((item: Appointment) => {
     router.push({
       pathname: '/(patient)/consultation-summary',
       params: {
@@ -808,16 +861,16 @@ export default function AppointmentsScreen() {
         consultationType: item.type,
       },
     })
-  }
+  })
 
-  const handleBookAgain = (item: Appointment) => {
+  const handleBookAgain = guardNav((item: Appointment) => {
     router.push({
       pathname: '/(patient)/doctor-profile',
       params: { id: item.doctorId },
     })
-  }
+  })
 
-  const handleWaitingRoom = (item: Appointment) => {
+  const handleWaitingRoom = guardNav((item: Appointment) => {
     router.push({
       pathname: '/(patient)/waiting-room' as any,
       params: {
@@ -827,7 +880,7 @@ export default function AppointmentsScreen() {
         consultationType: item.type,
       },
     })
-  }
+  })
 
   const [rescheduleTarget, setRescheduleTarget] = useState<Appointment | null>(null)
 
@@ -905,7 +958,7 @@ export default function AppointmentsScreen() {
               <Pressable
                 key={r.id}
                 style={reminderStyles.chip}
-                onPress={() => router.push({ pathname: '/(patient)/consultation-summary' as any, params: { consultationId: r.consultation_id } })}
+                onPress={guardNav(() => router.push({ pathname: '/(patient)/consultation-summary' as any, params: { consultationId: r.consultation_id } }))}
                 accessibilityRole="button"
                 accessibilityLabel={`Follow-up reminder: ${r.message ?? 'scheduled reminder'} on ${dateStr} at ${timeStr}`}
               >
@@ -927,7 +980,15 @@ export default function AppointmentsScreen() {
         keyExtractor={item => item.id}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        ListEmptyComponent={<EmptyState tab={activeTab} />}
+        ListEmptyComponent={
+          isLoading ? (
+            <View style={emptyStyles.container}>
+              <ActivityIndicator size="small" color={colors.steelGrey} />
+            </View>
+          ) : (
+            <EmptyState tab={activeTab} />
+          )
+        }
         renderItem={({ item }) =>
           activeTab === 'upcoming' ? (
             <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onWaitingRoom={handleWaitingRoom} onOpenDoctor={handleBookAgain} />

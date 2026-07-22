@@ -516,8 +516,8 @@ export default function DoctorVideoConsultationScreen() {
           setRemoteMuted(false)
         }
       },
-      onNetworkQuality: (_uid: any, txQuality: number) => {
-        if (mounted) setNetworkQuality(txQuality as any)
+      onNetworkQuality: (_uid: any, txQuality: number, rxQuality: number) => {
+        if (mounted) setNetworkQuality(Math.max(txQuality, rxQuality) as any)
       },
       // uid 0 = local speaker in this callback specifically (per Agora's own
       // AudioVolumeInfo docs); any other uid is the patient's peer. Drives

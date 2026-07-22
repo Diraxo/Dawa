@@ -1215,18 +1215,24 @@ Deno.serve(async (req: Request) => {
 
       let notificationId: string | null = null
       if (doctorId) {
+        // `notifKind: 'rating'` is additive on top of the existing
+        // `screen: 'profile'` (kept unchanged so carehub-web's resolveUrl()/
+        // doctorPushUrl() — which only understand `screen` — keep routing to
+        // /doctor/profile exactly as before). Only the mobile app's
+        // navigateForNotification() reads notifKind, to route straight to
+        // Profile → My Ratings instead of the generic profile tab.
         notificationId = await insertNotification(supabase, {
           user_id:   doctorId,
           title,
           body,
           type:      'review_received',
-          data_json: { ...sharedData, screen: 'profile' },
+          data_json: { ...sharedData, screen: 'profile', notifKind: 'rating' },
         })
       }
       // Previously sent unconditionally — the "New Patient Reviews" toggle
       // had no effect at all. Gate on 'reviews', matching the settings screen.
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'reviews')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'profile', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, body, { screen: 'profile', notifKind: 'rating', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'reviews')) {
         await sendWebPush(supabase, doctorId, { title, body, url: doctorPushUrl('profile', consultation_id) })

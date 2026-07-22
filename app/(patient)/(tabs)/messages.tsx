@@ -15,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { Conversation, ConversationItem } from '@/components/ui/ConversationItem'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { streamClient } from '@/lib/stream'
@@ -57,6 +58,7 @@ type ListItem = Conversation & { type: 'conv' }
 export default function MessagesScreen() {
   const { t } = useTranslation()
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { isStreamConnected, userId } = useAuthStore()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -348,7 +350,7 @@ export default function MessagesScreen() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  const handlePress = (id: string) => {
+  const handlePress = guardNav((id: string) => {
     const convo = conversations.find((c) => c.id === id)
     if (!convo) return
     setConversations((prev) =>
@@ -370,7 +372,7 @@ export default function MessagesScreen() {
         consultationStatus: convo.consultationStatus,
       },
     })
-  }
+  })
 
   const handleLongPress = (id: string) => setOpenMenuId(id)
   const handleMenuClose = () => setOpenMenuId(null)

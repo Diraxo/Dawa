@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react'
 import { Lock, User, X, Phone, Video } from 'lucide-react'
 import { formatCallDuration } from '@/lib/callDuration'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 
 interface ConsultationInfoPanelProps {
   open: boolean
@@ -12,6 +13,9 @@ interface ConsultationInfoPanelProps {
   counterpartLabel: string // "Doctor" | "Patient"
   counterpartName: string
   counterpartPhotoUrl?: string | null
+  // Only ever passed true when counterpartLabel is "Doctor" and that
+  // doctor's status is 'approved' — callers own the gate.
+  counterpartVerified?: boolean
   startedAt: string | null
   elapsedSeconds: number
   networkQuality: number // Agora 0-6 scale — 0-2 good, 3-4 fair, 5-6 poor
@@ -31,7 +35,7 @@ function qualityMeta(quality: number) {
 
 export function ConsultationInfoPanel({
   open, onClose, consultationId, consultationType, counterpartLabel,
-  counterpartName, counterpartPhotoUrl, startedAt, elapsedSeconds, networkQuality,
+  counterpartName, counterpartPhotoUrl, counterpartVerified, startedAt, elapsedSeconds, networkQuality,
 }: ConsultationInfoPanelProps) {
   if (!open) return null
 
@@ -63,7 +67,10 @@ export function ConsultationInfoPanel({
               )}
             </div>
             <div>
-              <p className="font-montserrat font-bold text-lg">{counterpartName}</p>
+              <p className="font-montserrat font-bold text-lg flex items-center justify-center gap-1.5">
+                {counterpartName}
+                {counterpartVerified && <VerifiedBadge size={16} />}
+              </p>
               <p className="text-white/50 text-xs">{counterpartLabel}</p>
             </div>
           </div>

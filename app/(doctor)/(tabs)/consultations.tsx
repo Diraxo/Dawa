@@ -2,11 +2,12 @@ import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   Alert,
   AppState,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,8 +20,11 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
+import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -50,6 +54,7 @@ interface ConsultationItem {
   status: StatusBucket
   rawStatus: string
   createdAt: string
+  endedAt: string | null
   doctorAmount: number
   statusChangedAt: string
   doctorViewedAt: string | null
@@ -63,7 +68,7 @@ const isUnread = (c: ConsultationItem) =>
   !c.doctorViewedAt || new Date(c.doctorViewedAt) < new Date(c.statusChangedAt)
 
 const CONSULTATIONS_SELECT = `
-  id, type, status, created_at, started_at, scheduled_at, doctor_amount,
+  id, type, status, created_at, started_at, scheduled_at, ended_at, doctor_amount,
   status_changed_at, doctor_viewed_at,
   patient:users!consultations_patient_id_fkey(id, full_name, profile_photo_url)
 `
@@ -79,6 +84,7 @@ function mapConsultationRow(r: any): ConsultationItem {
     status: toStatusBucket(r.status),
     rawStatus: r.status,
     createdAt: r.created_at,
+    endedAt: r.ended_at ?? null,
     doctorAmount: Number(r.doctor_amount) || 0,
     statusChangedAt: r.status_changed_at ?? r.created_at,
     doctorViewedAt: r.doctor_viewed_at ?? null,
@@ -150,15 +156,26 @@ export default function ConsultationsScreen() {
   const { getToken } = useAuth()
   const { user } = useUser()
   const { doctorStatus } = useDoctorStore()
-  const params = useLocalSearchParams<{ tab?: string }>()
+  const guardNav = useNavGuard()
+  // dateFilter=today comes from Home's "Completed Today" stat card — same
+  // ended_at >= todayStartIso boundary that card's own count uses, so the
+  // two numbers can never disagree.
+  const params = useLocalSearchParams<{ tab?: string; dateFilter?: string }>()
+  const isTodayOnly = params.dateFilter === 'today'
   const [activeTab, setActiveTab] = useState<TabKey>('all')
   const [consultations, setConsultations] = useState<ConsultationItem[]>([])
+  // True until the first fetch (this mount/focus) actually completes — used
+  // to gate the "No consultations yet" empty state so it can never render
+  // while `consultations` is merely still its initial `[]`, only once the
+  // server has genuinely confirmed there are none.
+  const [isLoading, setIsLoading] = useState(true)
   // Mirrors `consultations` so the users-table realtime handler (below) can
   // check "is this changed patient one of mine?" without a stale closure.
   const consultationsRef = useRef<ConsultationItem[]>([])
   useEffect(() => { consultationsRef.current = consultations }, [consultations])
   const [search, setSearch] = useState('')
   const [profileId, setProfileId] = useState<string | null>(null)
+  const consultationsCacheKey = user?.id ? `doctor-consultations-list:${user.id}` : null
 
   const TABS: { key: TabKey; label: string }[] = [
     { key: 'all', label: 'All' },
@@ -184,6 +201,19 @@ export default function ConsultationsScreen() {
     })
   }, [getToken])
 
+  // Paint the last-known list from disk immediately on mount — before this
+  // even reaches its first real fetch, so a warm start shows real rows
+  // instead of the loading spinner (which only appears when there's nothing
+  // cached yet, e.g. the very first-ever launch).
+  useEffect(() => {
+    if (!consultationsCacheKey) return
+    let cancelled = false
+    getCachedJson<ConsultationItem[]>(consultationsCacheKey).then((cached) => {
+      if (cached && !cancelled) setConsultations(cached)
+    })
+    return () => { cancelled = true }
+  }, [consultationsCacheKey])
+
   // Tab screens stay mounted across tab switches, so a plain mount-only
   // fetch never sees a patient's photo edited while this tab was in the
   // background — re-fetch on every return to this tab instead. Also reset
@@ -195,19 +225,29 @@ export default function ConsultationsScreen() {
     useCallback(() => {
       const targetTab: TabKey = resolveTab(params.tab)
       setActiveTab(targetTab)
-      getToken().then(token => {
-        if (!token) return
-        getAuthClient(token)
-          .from('consultations')
-          .select(CONSULTATIONS_SELECT)
-          .order('created_at', { ascending: false })
-          .then(({ data }) => {
-            if (!data) return
-            const items = data.map(mapConsultationRow)
-            setConsultations(items)
-            markTabRead(targetTab, items)
-          })
-      })
+      setIsLoading(true)
+      ;(async () => {
+        try {
+          const token = await getToken()
+          if (!token) { setIsLoading(false); return }
+          const { data } = await getAuthClient(token)
+            .from('consultations')
+            .select(CONSULTATIONS_SELECT)
+            .order('created_at', { ascending: false })
+          setIsLoading(false)
+          if (!data) return
+          const items = data.map(mapConsultationRow)
+          setConsultations(items)
+          if (consultationsCacheKey) setCachedJson(consultationsCacheKey, items)
+          markTabRead(targetTab, items)
+        } catch {
+          // A network failure anywhere above (offline, dropped connection)
+          // otherwise left isLoading stuck true forever — nothing previously
+          // caught a rejected request, so the spinner never cleared. Falls
+          // back to whatever cached/previous list is already on screen.
+          setIsLoading(false)
+        }
+      })()
     // getToken deliberately excluded: @react-navigation's useFocusEffect
     // re-runs this callback immediately whenever ITS identity changes, not
     // just on real focus/blur — Clerk's getToken is a new function reference
@@ -310,7 +350,11 @@ export default function ConsultationsScreen() {
   const searchMatches = (c: ConsultationItem) =>
     !search.trim() || c.patientName.toLowerCase().includes(search.trim().toLowerCase())
 
-  const filtered = consultations.filter((c) => bucketMatches(c, activeTab) && searchMatches(c))
+  const { startIso: todayStartIso } = ethiopiaTodayRange()
+  const todayMatches = (c: ConsultationItem) =>
+    !isTodayOnly || (!!c.endedAt && c.endedAt >= todayStartIso)
+
+  const filtered = consultations.filter((c) => bucketMatches(c, activeTab) && searchMatches(c) && todayMatches(c))
 
   const handleTabPress = (tab: TabKey) => {
     setActiveTab(tab)
@@ -356,6 +400,12 @@ export default function ConsultationsScreen() {
       {/* Header */}
       <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.header}>
         <Text style={styles.headerTitle}>{t('consultationsTab')}</Text>
+        {isTodayOnly && (
+          <Pressable onPress={() => router.setParams({ dateFilter: '' })} style={styles.todayFilterChip}>
+            <Text style={styles.todayFilterChipText}>Today only</Text>
+            <Ionicons name="close-circle" size={14} color={colors.mistWhite} />
+          </Pressable>
+        )}
       </LinearGradient>
 
       {/* Search */}
@@ -399,7 +449,11 @@ export default function ConsultationsScreen() {
         contentContainerStyle={[styles.listContent, filtered.length === 0 && styles.listContentEmpty]}
         showsVerticalScrollIndicator={false}
       >
-        {filtered.length === 0 ? (
+        {isLoading && filtered.length === 0 ? (
+          <View style={styles.emptyWrap}>
+            <ActivityIndicator size="small" color={colors.steelGrey} />
+          </View>
+        ) : filtered.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Ionicons name="medical-outline" size={48} color={colors.steelGrey} />
             <Text style={styles.emptyTitle}>{t('noConsultationsYet')}</Text>
@@ -413,7 +467,7 @@ export default function ConsultationsScreen() {
             return (
             <Pressable
               key={item.id}
-              onPress={() => handleOpenConsultation(item)}
+              onPress={guardNav(() => handleOpenConsultation(item))}
               style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }, item.status === 'cancelled' && styles.cardCancelled]}
             >
               <View style={[styles.typeIconWrap, { backgroundColor: TYPE_COLORS[item.type] }]}>
@@ -423,7 +477,14 @@ export default function ConsultationsScreen() {
               <View style={styles.cardInfo}>
                 <View style={styles.patientRow}>
                   {item.patientPhotoUrl ? (
-                    <Image source={{ uri: item.patientPhotoUrl }} style={styles.avatarImg} />
+                    <Image
+                      source={{ uri: item.patientPhotoUrl }}
+                      style={styles.avatarImg}
+                      contentFit="cover"
+                      cachePolicy="memory-disk"
+                      transition={0}
+                      recyclingKey={item.patientPhotoUrl}
+                    />
                   ) : (
                     <View style={styles.avatarFallback}>
                       <Text style={styles.avatarFallbackText}>{item.patientName.charAt(0).toUpperCase()}</Text>
@@ -483,6 +544,11 @@ const styles = StyleSheet.create({
 
   header: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
   headerTitle: { fontFamily: fonts.bold, fontSize: 24, color: colors.mistWhite },
+  todayFilterChip: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.18)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 5, marginTop: 8,
+  },
+  todayFilterChipText: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.mistWhite },
 
   searchWrap: {
     flexDirection: 'row',

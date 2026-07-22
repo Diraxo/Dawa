@@ -2,9 +2,9 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
+import { Image } from 'expo-image'
 import { useState } from 'react'
 import {
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +18,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import Constants from 'expo-constants'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
@@ -51,6 +52,8 @@ export default function ProfileScreen() {
   const router = useRouter()
   const { selectedLanguage } = useAppStore()
   const { clearAuth, disconnectStream } = useAuthStore()
+  const guardNav = useNavGuard()
+  const guardLogout = useNavGuard()
   const fullName =
     (user?.fullName ??
       `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()) ||
@@ -192,7 +195,7 @@ export default function ProfileScreen() {
           {
             text: 'Log Out',
             style: 'danger',
-            onPress: async () => {
+            onPress: guardLogout(async () => {
               setShowLogoutAlert(false)
               if (user?.id) await clearPushTokens(user.id)
               await disconnectStream()
@@ -200,7 +203,7 @@ export default function ProfileScreen() {
               clearAuth()
               await signOut()
               router.replace('/(auth)/sign-in')
-            },
+            }),
           },
         ]}
         onClose={() => setShowLogoutAlert(false)}
@@ -269,7 +272,13 @@ export default function ProfileScreen() {
             onPress={() => router.push('/(patient)/edit-personal-info')}
           >
             {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatar} />
+              <Image
+                source={{ uri: avatarUri }}
+                style={styles.avatar}
+                contentFit="cover"
+                cachePolicy="memory-disk"
+                transition={0}
+              />
             ) : (
               <View style={styles.avatarFallback}>
                 <Text style={styles.avatarInitial}>{initial}</Text>
@@ -323,7 +332,7 @@ export default function ProfileScreen() {
                   styles.menuItem,
                   pressed && { backgroundColor: '#F9FAFB' },
                 ]}
-                onPress={item.onPress}
+                onPress={guardNav(item.onPress)}
               >
                 <View style={styles.menuIconWrap}>
                   <Ionicons

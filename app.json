@@ -75,6 +75,7 @@
       "./plugins/withFirebaseMessagingManifestFix.js",
       "expo-router",
       "expo-font",
+      "@react-native-community/datetimepicker",
       [
         "expo-image-picker",
         {

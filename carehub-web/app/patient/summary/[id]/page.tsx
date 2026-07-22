@@ -9,6 +9,7 @@ import { formatDate, stripDrPrefix, parsePrescription } from '@/lib/utils'
 import { getReportSignedUrl } from '@/lib/consultationReport'
 import Link from 'next/link'
 import LogoMark from '@/components/ui/LogoMark'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { MessageCircle, Phone, Video } from 'lucide-react'
 
 interface Summary {
@@ -35,17 +36,71 @@ interface ConsultationDetail {
   doctor: {
     specialty: string
     hospital_name: string
+    status: string | null
     user: { full_name: string } | null
   } | null
+}
+
+// Relative-if-recent, otherwise a short date+time — matches the mobile
+// app's phrasing for the same offline-banner "last saved" copy.
+function formatCachedAt(timestamp: number): string {
+  const diffMin = Math.round((Date.now() - timestamp) / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin} min ago`
+  const date = new Date(timestamp)
+  const isToday = date.toDateString() === new Date().toDateString()
+  const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  if (isToday) return `today at ${time}`
+  return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${time}`
 }
 
 export default function ConsultationSummaryPage() {
   const { id } = useParams<{ id: string }>()
   const { getToken } = useAuth()
   const { user } = useUser()
-  const [consultation, setConsultation] = useState<ConsultationDetail | null>(null)
-  const [summary, setSummary] = useState<Summary | null>(null)
+  // Both seeded synchronously from localStorage (if this summary was ever
+  // viewed before on this device) so a reopen while offline shows the
+  // cached notes instead of a blank/misleading state — the page previously
+  // gated all rendering on a freshly-fetched `consultation`, so even a
+  // cached summary never had anywhere to display.
+  const [consultation, setConsultation] = useState<ConsultationDetail | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.localStorage.getItem(`consultation-meta-${id}`)
+      return raw ? (JSON.parse(raw) as ConsultationDetail) : null
+    } catch {
+      return null
+    }
+  })
+  const [summary, setSummary] = useState<Summary | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.localStorage.getItem(`consultation-summary-${id}`)
+      return raw ? (JSON.parse(raw) as Summary) : null
+    } catch {
+      return null
+    }
+  })
+  // When the currently-shown summary was last saved to this device — lets the
+  // offline banner reassure the patient the cached copy is recent instead of
+  // leaving them to guess whether it's hours or months old.
+  const [summaryCachedAt, setSummaryCachedAt] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.localStorage.getItem(`consultation-summary-cachedAt-${id}`)
+      return raw ? Number(raw) : null
+    } catch {
+      return null
+    }
+  })
   const [loading, setLoading] = useState(true)
+  // True only when the summary/consultation fetch itself failed (offline,
+  // transient network error) after retries — never conflated with "doctor
+  // hasn't submitted a summary yet", which is a successful fetch that
+  // legitimately returned no row.
+  const [summaryError, setSummaryError] = useState(false)
+  const [consultationError, setConsultationError] = useState(false)
+  const [retryTick, setRetryTick] = useState(0)
   const [rating, setRating] = useState(0)
   const [hoverRating, setHoverRating] = useState(0)
   const [comment, setComment] = useState('')
@@ -78,8 +133,21 @@ export default function ConsultationSummaryPage() {
         .maybeSingle()
 
       if (cancelled) return
-      if (error && summaryAttempts < 3) { summaryAttempts += 1; setTimeout(() => loadSummary(client), 600); return }
+      if (error) {
+        if (summaryAttempts < 3) { summaryAttempts += 1; setTimeout(() => loadSummary(client), 600); return }
+        setSummaryError(true)
+        return
+      }
+      setSummaryError(false)
       setSummary((data as Summary) ?? null)
+      if (data) {
+        const now = Date.now()
+        try {
+          window.localStorage.setItem(`consultation-summary-${id}`, JSON.stringify(data))
+          window.localStorage.setItem(`consultation-summary-cachedAt-${id}`, String(now))
+        } catch { /* best-effort */ }
+        setSummaryCachedAt(now)
+      }
     }
 
     async function loadConsultation(client: ReturnType<typeof getAuthClient>): Promise<void> {
@@ -87,14 +155,22 @@ export default function ConsultationSummaryPage() {
         .from('consultations')
         .select(`
           id, type, status, started_at, ended_at, duration_minutes, patient_amount, doctor_id,
-          doctor:doctor_profiles!doctor_id(specialty, hospital_name, user:users(full_name))
+          doctor:doctor_profiles!doctor_id(specialty, hospital_name, status, user:users(full_name))
         `)
         .eq('id', id)
         .maybeSingle()
 
       if (cancelled) return
-      if (error && consultAttempts < 3) { consultAttempts += 1; setTimeout(() => loadConsultation(client), 600); return }
+      if (error) {
+        if (consultAttempts < 3) { consultAttempts += 1; setTimeout(() => loadConsultation(client), 600); return }
+        setConsultationError(true)
+        return
+      }
+      setConsultationError(false)
       setConsultation((data as unknown as ConsultationDetail) ?? null)
+      if (data) {
+        try { window.localStorage.setItem(`consultation-meta-${id}`, JSON.stringify(data)) } catch { /* best-effort */ }
+      }
     }
 
     async function load() {
@@ -102,6 +178,8 @@ export default function ConsultationSummaryPage() {
       if (cancelled) return
       if (!token || !user) {
         if (tokenAttempts < 5) { tokenAttempts += 1; setTimeout(load, 400); return }
+        setConsultationError(true)
+        setSummaryError(true)
         setLoading(false)
         return
       }
@@ -140,7 +218,12 @@ export default function ConsultationSummaryPage() {
 
     return () => { cancelled = true; supabase.removeChannel(channel) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user])
+  }, [id, user, retryTick])
+
+  function retryLoad() {
+    setLoading(true)
+    setRetryTick((n) => n + 1)
+  }
 
   async function getReportBlob(): Promise<Blob | null> {
     if (!summary?.report_pdf_path) return null
@@ -226,7 +309,10 @@ export default function ConsultationSummaryPage() {
     setSubmitting(false)
   }
 
-  if (loading) {
+  // A cached consultation from a prior visit renders immediately (with an
+  // offline banner if the background refresh fails) rather than blocking on
+  // a spinner that never resolves while offline.
+  if (loading && !consultation) {
     return (
       <div className="p-8 flex items-center justify-center min-h-[60vh]">
         <div className="text-ink-black/40 text-sm">Loading summary…</div>
@@ -235,6 +321,21 @@ export default function ConsultationSummaryPage() {
   }
 
   if (!consultation) {
+    // A fetch failure (offline/transient) must never be presented as "this
+    // record doesn't exist" — those are different problems with different
+    // fixes (reconnect vs. navigate away).
+    if (consultationError) {
+      return (
+        <div className="p-8 text-center">
+          <p className="text-3xl mb-2">📡</p>
+          <p className="font-montserrat font-bold text-ink-black mb-1">No Internet Connection</p>
+          <p className="text-ink-black/50 text-sm mb-4">Connect to the internet to load your consultation summary.</p>
+          <button onClick={retryLoad} className="btn-primary h-10 px-6 text-sm rounded-xl">
+            Retry
+          </button>
+        </div>
+      )
+    }
     return (
       <div className="p-8 text-center">
         <p className="font-montserrat font-bold text-ink-black mb-4">Summary not found</p>
@@ -304,7 +405,10 @@ export default function ConsultationSummaryPage() {
               {stripDrPrefix(consultation.doctor?.user?.full_name ?? '?').charAt(0)}
             </div>
             <div>
-              <p className="font-montserrat font-bold text-base text-ink-black">Dr. {stripDrPrefix(consultation.doctor?.user?.full_name ?? '')}</p>
+              <p className="font-montserrat font-bold text-base text-ink-black flex items-center gap-1.5">
+                Dr. {stripDrPrefix(consultation.doctor?.user?.full_name ?? '')}
+                {consultation.doctor?.status === 'approved' && <VerifiedBadge size={14} />}
+              </p>
               <p className="text-ink-black/60 text-sm">{consultation.doctor?.specialty} · {consultation.doctor?.hospital_name}</p>
             </div>
           </div>
@@ -329,6 +433,14 @@ export default function ConsultationSummaryPage() {
         </div>
 
         {/* Clinical notes */}
+        {summaryError && sum && (
+          <div className="mx-6 mt-6 flex items-center gap-2 rounded-xl bg-amber-100 px-4 py-2.5 text-xs font-semibold text-amber-800 print-hide">
+            📡 You&apos;re offline. Showing the last saved version.
+            {summaryCachedAt && (
+              <span className="font-normal opacity-75">· Updated {formatCachedAt(summaryCachedAt)}</span>
+            )}
+          </div>
+        )}
         {sum ? (
           <div className="divide-y divide-steel-grey">
             <div className="p-6 print-section">
@@ -374,6 +486,18 @@ export default function ConsultationSummaryPage() {
                 </div>
               </div>
             )}
+          </div>
+        ) : summaryError ? (
+          // Genuine fetch failure (offline/transient) with nothing cached —
+          // must never say "hasn't submitted notes yet", which would
+          // misreport a connectivity problem as a medical-record state.
+          <div className="p-8 text-center print-hide">
+            <p className="text-3xl mb-2">📡</p>
+            <p className="font-montserrat font-bold text-ink-black mb-1">No Internet Connection</p>
+            <p className="text-ink-black/50 text-sm mb-4">Connect to the internet to load your consultation summary.</p>
+            <button onClick={retryLoad} className="btn-primary h-10 px-6 text-sm rounded-xl">
+              Retry
+            </button>
           </div>
         ) : (
           <div className="p-8 text-center">

@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
 import { stripDrPrefix } from '@/lib/utils'
 import { Search } from 'lucide-react'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 
 interface Doctor {
   id: string
@@ -15,6 +16,7 @@ interface Doctor {
   bio: string
   languages: string[] | null
   availability: Record<string, unknown> | null
+  status: string
   user: { full_name: string; profile_photo_url: string | null } | null
 }
 
@@ -32,7 +34,7 @@ export default function BrowseDoctorsPage() {
   function loadDoctors() {
     supabase
       .from('doctor_profiles')
-      .select('id, specialty, years_experience, is_online, bio, languages, availability, user:users(full_name, profile_photo_url)')
+      .select('id, specialty, years_experience, is_online, bio, languages, availability, status, user:users(full_name, profile_photo_url)')
       .eq('status', 'approved')
       .then(({ data }) => {
         setDoctors(((data ?? []) as unknown as Doctor[]).map(reconcile))
@@ -118,7 +120,10 @@ export default function BrowseDoctorsPage() {
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="font-montserrat font-bold text-base text-ink-black">Dr. {stripDrPrefix(d.user?.full_name ?? '')}</p>
+                  <p className="font-montserrat font-bold text-base text-ink-black flex items-center gap-1.5">
+                    <span className="truncate">Dr. {stripDrPrefix(d.user?.full_name ?? '')}</span>
+                    {d.status === 'approved' && <VerifiedBadge size={15} />}
+                  </p>
                   <p className="text-ink-black/50 text-xs">{d.specialty} · {d.years_experience}yr exp</p>
                   <div className="flex items-center gap-2 mt-1">
                     {d.is_online ? (

@@ -27,12 +27,14 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { CareHubAlert } from '@/components/ui/CareHubAlert'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { images } from '@/constants/images'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
+import { getCachedJsonSync, setCachedJson } from '@/lib/persistentCache'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
@@ -46,6 +48,20 @@ interface SummaryData {
   followup_recommendation: string | null
   referral_needed: boolean | null
   referral_specialty: string | null
+}
+
+// Relative-if-recent, otherwise a short date+time — matches how the rest of
+// the app phrases "last updated" copy without needing a date-fns dependency.
+function formatCachedAt(timestamp: number): string {
+  const diffMs = Date.now() - timestamp
+  const diffMin = Math.round(diffMs / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin} min ago`
+  const date = new Date(timestamp)
+  const isToday = date.toDateString() === new Date().toDateString()
+  const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  if (isToday) return `today at ${time}`
+  return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${time}`
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -71,8 +87,26 @@ export default function ConsultationSummaryScreen() {
   const [commentError, setCommentError] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [successVisible, setSuccessVisible] = useState(false)
-  const [summary, setSummary] = useState<SummaryData | null>(null)
+  // Seeded synchronously from the last-known-good cache (if this summary was
+  // ever viewed before) so a reopen while offline shows the cached notes
+  // instead of a blank spinner.
+  const summaryCacheKey = consultationId ? `consultation-summary-${consultationId}` : ''
+  const summaryCachedAtKey = consultationId ? `consultation-summary-cachedAt-${consultationId}` : ''
+  const [summary, setSummary] = useState<SummaryData | null>(() =>
+    summaryCacheKey ? getCachedJsonSync<SummaryData>(summaryCacheKey) ?? null : null
+  )
+  // When the currently-shown summary was last saved to this device — lets the
+  // offline banner reassure the patient the cached copy is recent instead of
+  // leaving them to guess whether it's hours or months old.
+  const [summaryCachedAt, setSummaryCachedAt] = useState<number | null>(() =>
+    summaryCachedAtKey ? getCachedJsonSync<number>(summaryCachedAtKey) ?? null : null
+  )
   const [summaryLoading, setSummaryLoading] = useState(true)
+  // True only when the fetch itself failed (offline/transient) after retries
+  // — never conflated with "doctor hasn't submitted a summary yet", which is
+  // a successful fetch that legitimately returned no row.
+  const [summaryError, setSummaryError] = useState(false)
+  const [summaryRetryTick, setSummaryRetryTick] = useState(0)
   const scrollRef = useRef<ScrollView>(null)
 
   // Doctor identity — always fetched fresh from the DB (never trusted off the
@@ -84,6 +118,7 @@ export default function ConsultationSummaryScreen() {
   const [doctorInitialName, setDoctorInitialName] = useState<string | null>(null)
   const [doctorInitialPhotoUrl, setDoctorInitialPhotoUrl] = useState<string | null>(null)
   const [resolvedDoctorId, setResolvedDoctorId] = useState<string | null>(null)
+  const [doctorStatus, setDoctorStatus] = useState<string | null>(null)
   const { name: liveDoctorName, photoUrl: liveDoctorPhotoUrl } = useUserProfileRealtime(
     doctorUserId,
     doctorInitialName ?? doctorName ?? null,
@@ -113,7 +148,7 @@ export default function ConsultationSummaryScreen() {
         if (!token || cancelled) return
         const { data } = await getAuthClient(token)
           .from('consultations')
-          .select('doctor_id, doctor_profiles!doctor_id(users!inner(id, full_name, profile_photo_url))')
+          .select('doctor_id, doctor_profiles!doctor_id(status, users!inner(id, full_name, profile_photo_url))')
           .eq('id', consultationId)
           .maybeSingle()
         if (cancelled || !data) return
@@ -122,6 +157,7 @@ export default function ConsultationSummaryScreen() {
         setDoctorUserId(doctorProfile?.users?.id ?? null)
         setDoctorInitialName(doctorProfile?.users?.full_name ?? null)
         setDoctorInitialPhotoUrl(doctorProfile?.users?.profile_photo_url ?? null)
+        setDoctorStatus(doctorProfile?.status ?? null)
       } catch {
         // best-effort — falls back to the route param name if this fails
       }
@@ -203,12 +239,16 @@ export default function ConsultationSummaryScreen() {
     // Retries transient failures (Clerk session still hydrating on cold
     // launch, brief network blip) instead of permanently showing "not
     // submitted yet" for a summary that actually exists — a fetch error is
-    // never treated as "no summary."
+    // never treated as "no summary." Once retries are exhausted, the failure
+    // is surfaced as summaryError instead of overwriting summary with null,
+    // so a genuine fetch failure never gets mislabeled as "doctor hasn't
+    // submitted a summary yet."
     const fetchSummary = async () => {
       const token = await getToken()
       if (cancelled) return
       if (!token) {
         if (attempts < 5) { attempts += 1; setTimeout(fetchSummary, 400); return }
+        setSummaryError(true)
         setSummaryLoading(false)
         return
       }
@@ -218,8 +258,20 @@ export default function ConsultationSummaryScreen() {
         .eq('consultation_id', consultationId)
         .maybeSingle()
       if (cancelled) return
-      if (error && attempts < 3) { attempts += 1; setTimeout(fetchSummary, 600); return }
+      if (error) {
+        if (attempts < 3) { attempts += 1; setTimeout(fetchSummary, 600); return }
+        setSummaryError(true)
+        setSummaryLoading(false)
+        return
+      }
+      setSummaryError(false)
       setSummary(data)
+      if (data && summaryCacheKey) {
+        setCachedJson(summaryCacheKey, data)
+        const now = Date.now()
+        if (summaryCachedAtKey) setCachedJson(summaryCachedAtKey, now)
+        setSummaryCachedAt(now)
+      }
       setSummaryLoading(false)
     }
 
@@ -236,7 +288,7 @@ export default function ConsultationSummaryScreen() {
       .subscribe()
 
     return () => { cancelled = true; supabase.removeChannel(channel) }
-  }, [consultationId])
+  }, [consultationId, summaryRetryTick])
 
   const dateStr = (consultationDate ?? new Date()).toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
@@ -444,18 +496,46 @@ export default function ConsultationSummaryScreen() {
         <View style={styles.detailCard}>
           <Row icon={typeIcon} label={typeLabel} value="" accent />
           <Divider />
-          <Row icon="person-outline" label={t('doctorLabel')} value={displayDoctorName} photoUrl={displayDoctorPhotoUrl} />
+          <Row icon="person-outline" label={t('doctorLabel')} value={displayDoctorName} photoUrl={displayDoctorPhotoUrl} verified={doctorStatus === 'approved'} />
           <Row icon="calendar-outline" label={t('dateLabel')} value={dateStr} />
         </View>
 
         {/* Clinical notes — real data from consultation_summaries */}
-        {summaryLoading ? (
+        {summaryLoading && !summary ? (
           <View style={styles.summaryLoading}>
             <ActivityIndicator color={colors.careBlue} />
             <Text style={styles.summaryLoadingText}>{t('loadingNotes')}</Text>
           </View>
+        ) : !summary && summaryError ? (
+          // Genuine fetch failure (offline/transient) with nothing cached —
+          // must never say "awaiting doctor notes", which would misreport a
+          // connectivity problem as a medical-record state.
+          <View style={styles.summaryOfflineCard}>
+            <Ionicons name="cloud-offline-outline" size={32} color="#6B7280" />
+            <Text style={styles.summaryOfflineTitle}>{t('noInternetTitle')}</Text>
+            <Text style={styles.summaryOfflineMessage}>{t('noInternetSummaryMessage')}</Text>
+            <Pressable
+              style={({ pressed }) => [styles.summaryRetryBtn, pressed && { opacity: 0.8 }]}
+              onPress={() => { setSummaryLoading(true); setSummaryRetryTick((n) => n + 1) }}
+            >
+              <Text style={styles.summaryRetryText}>{t('retryButton')}</Text>
+            </Pressable>
+          </View>
         ) : (
           <>
+            {summaryError && summary ? (
+              <View style={styles.offlineBanner}>
+                <Ionicons name="cloud-offline-outline" size={14} color="#92400E" />
+                <View style={{ flexShrink: 1 }}>
+                  <Text style={styles.offlineBannerText}>{t('offlineShowingCachedSummary')}</Text>
+                  {summaryCachedAt ? (
+                    <Text style={styles.offlineBannerTimestamp}>
+                      {t('offlineCachedUpdatedAt', { date: formatCachedAt(summaryCachedAt) })}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
             <SectionCard title={t('chiefComplaint')}>
               <Text style={styles.noteText}>
                 {summary?.chief_complaint ?? t('clinicalNotesPlaceholder')}
@@ -638,8 +718,8 @@ export default function ConsultationSummaryScreen() {
   )
 }
 
-function Row({ icon, label, value, accent, photoUrl }: {
-  icon: string; label: string; value: string; accent?: boolean; photoUrl?: string | null
+function Row({ icon, label, value, accent, photoUrl, verified }: {
+  icon: string; label: string; value: string; accent?: boolean; photoUrl?: string | null; verified?: boolean
 }) {
   return (
     <View style={rowStyles.row}>
@@ -658,6 +738,7 @@ function Row({ icon, label, value, accent, photoUrl }: {
       )}
       <Text style={rowStyles.label}>{label}</Text>
       {value ? <Text style={rowStyles.value}>{value}</Text> : null}
+      {verified && <VerifiedBadge size={14} />}
     </View>
   )
 }
@@ -712,6 +793,25 @@ const styles = StyleSheet.create({
   noteText: { fontFamily: fonts.regular, fontSize: 14, color: '#374151', lineHeight: 22 },
   summaryLoading: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginBottom: 14, paddingVertical: 16 },
   summaryLoadingText: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' },
+  summaryOfflineCard: {
+    alignItems: 'center', marginHorizontal: 20, marginBottom: 14, paddingVertical: 28,
+    borderRadius: 14, borderWidth: 1, borderColor: colors.steelGrey,
+  },
+  summaryOfflineTitle: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack, marginTop: 10 },
+  summaryOfflineMessage: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', textAlign: 'center', marginTop: 6, marginHorizontal: 24 },
+  summaryRetryBtn: {
+    marginTop: 16, height: 38, paddingHorizontal: 20, borderRadius: 10,
+    borderWidth: 1.5, borderColor: colors.careBlue, backgroundColor: '#EFF6FF',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  summaryRetryText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.careBlue },
+  offlineBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 20, marginBottom: 12, paddingVertical: 10, paddingHorizontal: 12,
+    borderRadius: 10, backgroundColor: '#FEF3C7',
+  },
+  offlineBannerText: { fontFamily: fonts.regular, fontSize: 12, color: '#92400E', flexShrink: 1 },
+  offlineBannerTimestamp: { fontFamily: fonts.regular, fontSize: 11, color: '#92400E', opacity: 0.75, marginTop: 2 },
   rxItem: { marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.cloudGrey },
   rxMedicine: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
   rxDetail: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginTop: 2 },

@@ -67,11 +67,13 @@ import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
 import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { useAuth } from '@clerk/clerk-expo'
 import { logger } from '@/lib/logger'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { formatDoctorName, stripDrPrefix } from '@/lib/nameFormat'
@@ -142,6 +144,7 @@ export default function ChatConsultationScreen() {
   }>()
 
   const router = useRouter()
+  const guardNav = useNavGuard()
   const { t } = useTranslation()
   const { getToken, userId } = useAuth()
   const insets = useSafeAreaInsets()
@@ -190,6 +193,8 @@ export default function ChatConsultationScreen() {
   )
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null)
   const [channelLoading, setChannelLoading] = useState(false)
+  const [channelWatchFailed, setChannelWatchFailed] = useState(false)
+  const [channelRetryTick, setChannelRetryTick] = useState(0)
   const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
   const [peerOnline, setPeerOnline] = useState(false)
   const [peerTyping, setPeerTyping] = useState(false)
@@ -197,6 +202,7 @@ export default function ChatConsultationScreen() {
   const [doctorUserId, setDoctorUserId] = useState<string | null>(null)
   const [doctorInitialName, setDoctorInitialName] = useState<string | null>(null)
   const [doctorInitialPhotoUrl, setDoctorInitialPhotoUrl] = useState<string | null>(null)
+  const [doctorStatus, setDoctorStatus] = useState<string | null>(null)
   const doctorClerkIdRef = useRef<string>('')
   // Doctor identity kept live via Realtime — a rename/photo change mid-chat
   // reflects here immediately instead of staying stuck on the fetched value.
@@ -371,6 +377,7 @@ export default function ChatConsultationScreen() {
     let currentChannel: Channel | null = null
     let connSub: { unsubscribe: () => void } | null = null
     setChannelLoading(true)
+    setChannelWatchFailed(false)
 
     let retries = 0
     const tryWatch = async () => {
@@ -379,7 +386,7 @@ export default function ChatConsultationScreen() {
         // relying solely on membership set up elsewhere at accept-time.
         const { data } = await supabase
           .from('consultations')
-          .select('doctor:doctor_profiles(user:users(id, clerk_id, full_name, profile_photo_url))')
+          .select('doctor:doctor_profiles(status, user:users(id, clerk_id, full_name, profile_photo_url))')
           .eq('id', channelId)
           .single()
         const doctorClerkId = (data as any)?.doctor?.user?.clerk_id as string | undefined
@@ -387,6 +394,7 @@ export default function ChatConsultationScreen() {
         setDoctorUserId((data as any)?.doctor?.user?.id ?? null)
         setDoctorInitialName((data as any)?.doctor?.user?.full_name ?? null)
         setDoctorInitialPhotoUrl((data as any)?.doctor?.user?.profile_photo_url ?? null)
+        setDoctorStatus((data as any)?.doctor?.status ?? null)
         const members = userId && doctorClerkId ? [userId, doctorClerkId] : undefined
         const ch = streamClient.channel('messaging', channelId, members ? { members } : undefined)
         currentChannel = ch
@@ -425,6 +433,7 @@ export default function ChatConsultationScreen() {
           setTimeout(tryWatch, 1200)
         } else {
           logger.error('[Chat] channel watch failed after retries:', err)
+          setChannelWatchFailed(true)
         }
       } finally {
         if (mounted) setChannelLoading(false)
@@ -439,7 +448,7 @@ export default function ChatConsultationScreen() {
       setActiveChannel(null)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelId, consultationState, isStreamConnected])
+  }, [channelId, consultationState, isStreamConnected, channelRetryTick])
 
   // ── Typing indicator ──────────────────────────────────────────────────────
   // The SDK's default <TypingIndicator/> reads Stream's own channel_state,
@@ -683,7 +692,10 @@ export default function ChatConsultationScreen() {
             <Ionicons name="arrow-back" size={22} color={colors.inkBlack} />
           </Pressable>
           <View style={styles.headerCenter}>
-            <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+            <View style={styles.headerNameRow}>
+              <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={14} />}
+            </View>
             <Text style={styles.headerSub}>{t('upcomingAppointment')}</Text>
           </View>
           <View style={styles.headerPlaceholder} />
@@ -714,7 +726,10 @@ export default function ChatConsultationScreen() {
             <Ionicons name="arrow-back" size={22} color={colors.inkBlack} />
           </Pressable>
           <View style={styles.headerCenter}>
-            <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+            <View style={styles.headerNameRow}>
+              <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={14} />}
+            </View>
             <Text style={[styles.headerSub, { color: colors.tealGreen }]}>
               {t('itsTimeWaitingForDoctor')}
             </Text>
@@ -1054,7 +1069,10 @@ export default function ChatConsultationScreen() {
             {!isCompleted && peerOnline && <View style={styles.onlineDot} />}
           </View>
           <View style={styles.headerTextWrap}>
-            <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+            <View style={styles.headerNameRow}>
+              <Text style={styles.headerDoctorName} numberOfLines={1}>{displayName}</Text>
+              {doctorStatus === 'approved' && <VerifiedBadge size={14} />}
+            </View>
             <View style={styles.statusRow}>
               {!isCompleted && peerOnline && <View style={styles.liveDot} />}
               <Text style={[styles.headerSub, { color: isCompleted || !peerOnline ? '#9CA3AF' : colors.success }]}>
@@ -1094,6 +1112,18 @@ export default function ChatConsultationScreen() {
           <Ionicons name="chatbubble-ellipses-outline" size={52} color={colors.steelGrey} />
           <Text style={styles.noChannelTitle}>{t('chatNotConnected')}</Text>
           <Text style={styles.noChannelSub}>{t('channelAvailableWhenDoctorStarts')}</Text>
+        </View>
+      ) : channelWatchFailed ? (
+        <View style={styles.loadingWrap}>
+          <Ionicons name="cloud-offline-outline" size={52} color={colors.steelGrey} />
+          <Text style={styles.noChannelTitle}>Couldn't connect to chat</Text>
+          <Text style={styles.noChannelSub}>Check your internet connection and try again.</Text>
+          <Pressable
+            onPress={() => setChannelRetryTick((n) => n + 1)}
+            style={{ marginTop: 16, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.tealGreen }}
+          >
+            <Text style={{ fontFamily: fonts.semiBold, color: '#FFFFFF', fontSize: 14 }}>Retry</Text>
+          </Pressable>
         </View>
       ) : channelLoading || !activeChannel ? (
         <View style={styles.loadingWrap}>
@@ -1159,10 +1189,10 @@ export default function ChatConsultationScreen() {
           {isCompleted && (
             <View style={styles.summaryBar}>
               <Pressable
-                onPress={() => router.push({
+                onPress={guardNav(() => router.push({
                   pathname: '/(patient)/consultation-summary' as any,
                   params: { consultationId: channelId, doctorId, doctorName, consultationType: 'chat' },
-                })}
+                }))}
                 style={({ pressed }) => [styles.summaryBtn, pressed && { opacity: 0.82 }]}
               >
                 <Ionicons name="document-text-outline" size={18} color={colors.mistWhite} />
@@ -1215,6 +1245,7 @@ const styles = StyleSheet.create({
 
   doctorInfo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   headerTextWrap: { flex: 1 },
+  headerNameRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   headerDoctorName: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
   headerSub: { fontFamily: fonts.regular, fontSize: 12, marginTop: 1 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },

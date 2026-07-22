@@ -359,7 +359,7 @@ export default function DoctorPhoneConsultationPage() {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         client.on('network-quality', (stats: any) => {
-          setNetworkQuality(stats.uplinkNetworkQuality ?? 0)
+          setNetworkQuality(Math.max(stats.uplinkNetworkQuality ?? 0, stats.downlinkNetworkQuality ?? 0))
         })
 
         // ── (18) user-joined — patient entered channel before publish ────────

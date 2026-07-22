@@ -8,6 +8,7 @@ import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
 import Link from 'next/link'
 import { stripDrPrefix } from '@/lib/utils'
 import { MessageCircle, Phone, Video, Search } from 'lucide-react'
+import VerifiedBadge from '@/components/ui/VerifiedBadge'
 
 interface DoctorProfile {
   id: string
@@ -23,6 +24,7 @@ interface DoctorProfile {
   is_online: boolean
   languages: string[] | null
   availability: Record<string, unknown> | null
+  status: string
   user: { id: string; full_name: string; email: string; profile_photo_url: string | null } | null
 }
 
@@ -65,7 +67,7 @@ export default function DoctorProfilePage() {
     Promise.all([
       supabase
         .from('doctor_profiles')
-        .select('id, specialty, years_experience, hospital_name, bio, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, languages, availability, user:users(id, full_name, email, profile_photo_url)')
+        .select('id, specialty, years_experience, hospital_name, bio, chat_price, phone_price, video_price, rating_average, total_consultations, is_online, languages, availability, status, user:users(id, full_name, email, profile_photo_url)')
         .eq('id', id)
         .eq('status', 'approved')
         .single(),
@@ -216,7 +218,10 @@ export default function DoctorProfilePage() {
             </div>
 
             <div>
-              <h1 className="font-montserrat font-black text-xl text-ink-black">Dr. {stripDrPrefix(doctor.user?.full_name ?? '')}</h1>
+              <h1 className="font-montserrat font-black text-xl text-ink-black flex items-center gap-2">
+                Dr. {stripDrPrefix(doctor.user?.full_name ?? '')}
+                {doctor.status === 'approved' && <VerifiedBadge size={17} />}
+              </h1>
               <p className="text-int-blue font-semibold text-sm mt-0.5">{doctor.specialty}</p>
               <p className="text-ink-black/50 text-xs mt-1">{doctor.hospital_name}</p>
             </div>
