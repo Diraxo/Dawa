@@ -9,6 +9,7 @@ import {
   AppState,
   AppStateStatus,
   Image,
+  Linking,
   Platform,
   Pressable,
   StyleSheet,
@@ -526,9 +527,22 @@ export default function DoctorPhoneConsultationScreen() {
 
     async function startCall() {
       try {
-        const { status } = await Audio.requestPermissionsAsync()
+        const { status, canAskAgain: micCanAskAgain } = await Audio.requestPermissionsAsync()
         if (!mounted) return
-        if (status !== 'granted') { setLocalError(true); return }
+        if (status !== 'granted') {
+          Alert.alert(
+            'Microphone Required',
+            'Dawa needs microphone access to join this consultation. Please allow it to continue.',
+            micCanAskAgain
+              ? [{ text: 'OK' }]
+              : [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Open Settings', onPress: () => Linking.openSettings() },
+                ]
+          )
+          setLocalError(true)
+          return
+        }
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: true,
           playsInSilentModeIOS: true,

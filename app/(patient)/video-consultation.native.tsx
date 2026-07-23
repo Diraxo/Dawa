@@ -9,6 +9,7 @@ import {
   AppState,
   AppStateStatus,
   Image,
+  Linking,
   Platform,
   Pressable,
   StyleSheet,
@@ -726,10 +727,19 @@ export default function VideoConsultationScreen() {
 
     async function startCall() {
       try {
-        const { status: micStatus } = await Audio.requestPermissionsAsync()
+        const { status: micStatus, canAskAgain: micCanAskAgain } = await Audio.requestPermissionsAsync()
         if (!mounted) return
         if (micStatus !== 'granted') {
-          Alert.alert('Microphone Required', 'Please allow microphone access to join the call.')
+          Alert.alert(
+            'Microphone Required',
+            'Dawa needs microphone access to join this consultation. Please allow it to continue.',
+            micCanAskAgain
+              ? [{ text: 'OK' }]
+              : [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Open Settings', onPress: () => Linking.openSettings() },
+                ]
+          )
           setLocalError(true)
           return
         }
@@ -739,12 +749,15 @@ export default function VideoConsultationScreen() {
         // with no prompt and no error. Reuses expo-image-picker (already a
         // dependency) rather than adding a new native module.
         let cameraGranted = false
+        let cameraCanAskAgain = true
         try {
           const existing = await ImagePicker.getCameraPermissionsAsync()
           cameraGranted = existing.status === 'granted'
+          cameraCanAskAgain = existing.canAskAgain
           if (!cameraGranted && existing.canAskAgain) {
             const requested = await ImagePicker.requestCameraPermissionsAsync()
             cameraGranted = requested.status === 'granted'
+            cameraCanAskAgain = requested.canAskAgain
           }
         } catch (permErr) {
           logger.error('[Video][Patient] Camera permission check failed:', permErr)
@@ -753,7 +766,13 @@ export default function VideoConsultationScreen() {
         if (!cameraGranted) {
           Alert.alert(
             'Camera Required',
-            'Camera access is required for video calls. You can continue with audio only, or enable camera access in Settings and rejoin.'
+            'Camera access is required for video calls. You can continue with audio only for now.',
+            cameraCanAskAgain
+              ? [{ text: 'OK' }]
+              : [
+                  { text: 'Continue with Audio Only', style: 'cancel' },
+                  { text: 'Open Settings', onPress: () => Linking.openSettings() },
+                ]
           )
           cameraOffRef.current = true
           setCameraOff(true)
