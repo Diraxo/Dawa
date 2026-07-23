@@ -30,6 +30,10 @@ const SECTIONS = [
     body: 'We use industry-standard encryption (TLS in transit, AES at rest) and access controls to protect your data. Only authorized Dawa staff can access sensitive records, and only for legitimate operational purposes.',
   },
   {
+    title: 'Third-Party Services',
+    body: 'We use Clerk (authentication), Supabase (database and file storage), Agora (voice/video calls), Stream (chat messaging), Firebase (push notifications), and Chapa (processing patients’ consultation payments — we never see or store patient card details). Each provider only receives the data needed to deliver its service, and none may sell your data.',
+  },
+  {
     title: 'Your Rights',
     body: 'You may request access to, correction of, or deletion of your personal data by contacting support@dawa.app. Account deletion will remove your profile from patient discovery; consultation records may be retained for legal compliance.',
   },

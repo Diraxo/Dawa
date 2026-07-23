@@ -28,7 +28,7 @@ const SECTIONS: PolicySection[] = [
 
 Dawa does not use third-party analytics or crash-reporting SDKs, so we do not track which screens you visit, which features you use, or how long you use the app.
 
-We do not collect payment card information directly. Payment processing is handled by certified third-party processors (when enabled).`,
+We do not collect or store payment card information directly. Consultation payments are processed by Chapa, our third-party payment processor.`,
   },
   {
     title: '2. How We Use Your Information',
@@ -69,7 +69,7 @@ We never sell your data to third parties.`,
 
 • Access: Request a copy of all personal data we hold about you.
 • Correction: Update incorrect or incomplete information via the "Edit Personal Info" screen.
-• Deletion: Permanently delete your account and all associated data via Profile → Delete Account.
+• Deletion: Permanently delete your personal information (name, email, phone, profile photo) via Profile → Delete Account. Consultation records are retained afterward as described in Section 8 (Data Retention).
 • Portability: Request your data in a machine-readable format by emailing privacy@dawa.app.
 • Withdrawal of Consent: You can revoke consent for non-essential data processing at any time.
 
@@ -170,7 +170,7 @@ export default function PrivacyPolicyScreen() {
         <View style={styles.footer}>
           <Ionicons name="checkmark-circle" size={18} color={colors.tealGreen} />
           <Text style={styles.footerText}>
-            This policy complies with GDPR, Google Play, and Apple App Store requirements.
+            This policy is written to meet Google Play and Apple App Store data-safety disclosure requirements, and reflects data protection principles including those in the GDPR.
           </Text>
         </View>
 

@@ -66,6 +66,14 @@ const SECTIONS: Section[] = [
         ],
       },
       {
+        type: 'subsection',
+        label: 'Payment Information:',
+        items: [
+          'Consultation fees are processed by Chapa, our third-party payment processor. We do not collect or store your payment card details.',
+          'Doctors provide bank account details to receive withdrawal payouts.',
+        ],
+      },
+      {
         type: 'text',
         text: 'Dawa does not use third-party analytics or crash-reporting SDKs, so we do not track which screens you visit, which features you use, or how long you use the app.',
       },
@@ -96,7 +104,7 @@ const SECTIONS: Section[] = [
       {
         type: 'bullets',
         items: [
-          'All data is encrypted in transit using TLS 1.3',
+          'All data is encrypted in transit using TLS 1.2 or higher',
           'All data is encrypted at rest using AES-256',
           'Health data is stored on secure Supabase servers',
           'Doctor documents are stored in encrypted file storage',
@@ -121,6 +129,7 @@ const SECTIONS: Section[] = [
           'Agora (video/audio call infrastructure only — no health data shared)',
           'Stream (chat infrastructure only — messages are encrypted)',
           'Firebase (push notifications only — no health data shared)',
+          'Chapa (payment processing for consultation fees — no health data shared)',
           'Law enforcement when required by law',
         ],
       },
@@ -136,7 +145,7 @@ const SECTIONS: Section[] = [
         items: [
           'Access your personal data at any time',
           'Correct inaccurate information',
-          'Delete your account and all associated data',
+          'Delete your account and personal information (consultation records are retained afterward for medical compliance — see Data Retention)',
           'Download your consultation history',
           'Opt out of non-essential communications',
         ],

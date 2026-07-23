@@ -1,4 +1,4 @@
-# CareHub — Play Store Assets Checklist
+# Dawa — Play Store Assets Checklist
 
 Use this checklist to prepare and upload all required assets to Google Play Console.
 
@@ -19,7 +19,7 @@ Shown at the top of the store listing page.
 
 - [ ] **Size:** 1024 × 500 px
 - [ ] **Format:** JPG or PNG
-- [ ] **Content:** CareHub logo centered on Hero Gradient (#1A4598 → #00BFA5, left to right)
+- [ ] **Content:** Dawa logo centered on Hero Gradient (#1A4598 → #00BFA5, left to right)
 - [ ] **Target file:** `assets/images/feature-graphic.png`
 - [ ] Uploaded to Play Console → Store Listing → Feature Graphic
 
@@ -35,7 +35,7 @@ Shown at the top of the store listing page.
 
 | # | Screen | Description |
 |---|---|---|
-| 1 | Splash Screen | Dark navy background with CareHub logo and glow effects |
+| 1 | Splash Screen | Dark navy background with Dawa logo and glow effects |
 | 2 | Browse Doctors | Doctor listing cards with search/filter |
 | 3 | Doctor Profile | Full doctor profile with consultation type options |
 | 4 | Chat Consultation | Active chat session with doctor |

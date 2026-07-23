@@ -1,4 +1,4 @@
-# CareHub — Google Play Data Safety Form Answers
+# Dawa — Google Play Data Safety Form Answers
 
 Copy these answers into the Play Console **Data Safety** section.
 
@@ -43,15 +43,20 @@ Copy these answers into the Play Console **Data Safety** section.
 |---|---|---|---|---|
 | Files | ✅ Yes | ❌ No | ✅ Yes | Optional |
 
-> Medical license documents for doctor registration only.
+> Medical license and government ID documents for doctor registration only.
 
-### App Activity
+### Financial Info
 
 | Data Type | Collected | Shared | Encrypted | Required |
 |---|---|---|---|---|
-| App interactions | ✅ Yes | ❌ No | ❌ No | Optional |
+| Purchase history | ✅ Yes | ❌ No | ✅ Yes | Required (patients) |
+| Bank account / payout details | ✅ Yes | ❌ No | ✅ Yes | Required (doctors, for withdrawals) |
 
-> Used for app improvement only. No personally identifiable activity data is shared.
+> Patient payment card details are entered directly with Chapa (our payment processor) and are never collected or stored by Dawa. Doctors provide a bank account/name for withdrawal payouts, stored by Dawa.
+
+### App Activity
+
+**Not collected.** Dawa does not use any third-party analytics or crash-reporting SDK and does not track screen views, feature usage, or session activity.
 
 ---
 
@@ -59,7 +64,7 @@ Copy these answers into the Play Console **Data Safety** section.
 
 | Question | Answer |
 |---|---|
-| Is data encrypted in transit? | **Yes — TLS 1.3** |
+| Is data encrypted in transit? | **Yes — TLS 1.2 or higher** |
 | Is data encrypted at rest? | **Yes — AES-256** |
 | Can users request data deletion? | **Yes — via Profile Settings or by emailing support** |
 | Do you follow Families Policy? | **No — app is not directed at children** |

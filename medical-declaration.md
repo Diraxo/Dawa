@@ -1,4 +1,4 @@
-# CareHub — Google Play Medical App Declaration
+# Dawa — Google Play Medical App Declaration
 
 Google requires medical and health apps to complete a **Health Apps** declaration inside Play Console.
 Navigate to: **Policy → App Content → Health Apps**
@@ -18,18 +18,17 @@ Navigate to: **Policy → App Content → Health Apps**
 
 ## Required Disclaimer
 
-Add this disclaimer in these three places:
+Should appear in:
 
-1. **Onboarding** — one-time dismissible banner (see `MedicalDisclaimer` component)
-2. **Before every consultation starts** — non-dismissible banner
-3. **Play Store full description** — already included at the bottom
+1. **Onboarding** — one-time dismissible banner (`components/shared/MedicalDisclaimer.tsx`, dismissible mode — wired into `app/(auth)/sign-up.tsx`)
+2. **Before every consultation starts** — non-dismissible banner (same component, non-dismissible mode — wired into `components/ui/BookingModal.tsx`)
+3. **Play Store full description** — included (see `store-listing.md`)
 
-### Disclaimer Text
+### Disclaimer Text (as implemented in `MedicalDisclaimer.tsx`)
 
 ```
-CareHub provides access to licensed healthcare professionals for general medical 
-consultations. This service is not a substitute for emergency medical care. 
-For life-threatening emergencies, contact your local emergency services immediately.
+Dawa consultations are not a substitute for emergency care. Call emergency
+services for life-threatening conditions.
 ```
 
 ---

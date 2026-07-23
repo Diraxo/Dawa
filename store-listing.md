@@ -1,4 +1,4 @@
-# CareHub — Google Play Store Listing
+# Dawa — Google Play Store Listing
 
 Copy-paste these values directly into Play Console.
 
@@ -7,7 +7,7 @@ Copy-paste these values directly into Play Console.
 ## APP NAME (max 30 chars)
 
 ```
-CareHub - Doctor Consultation
+Dawa - Doctor Consultation
 ```
 
 ---
@@ -23,9 +23,9 @@ Connect with verified doctors via chat, phone & video call
 ## FULL DESCRIPTION (max 4000 chars)
 
 ```
-CareHub connects you with verified, licensed healthcare professionals for instant medical consultations — anytime, anywhere.
+Dawa connects you with verified, licensed healthcare professionals for medical consultations — anytime, anywhere.
 
-Whether you need quick medical advice or a scheduled consultation, CareHub makes healthcare accessible from your phone.
+Whether you need quick medical advice or a scheduled consultation, Dawa makes healthcare accessible from your phone.
 
 🩺 CONSULT YOUR WAY
 - 💬 Chat Consultation — Send messages and photos to your doctor
@@ -33,10 +33,10 @@ Whether you need quick medical advice or a scheduled consultation, CareHub makes
 - 🎥 Video Call — Face-to-face consultation from home
 
 ✅ VERIFIED DOCTORS ONLY
-Every doctor on CareHub is manually verified by our team. We check medical licenses and credentials before any doctor can see patients. You are always in safe hands.
+Every doctor on Dawa is manually verified by our team. We check medical licenses and credentials before any doctor can see patients.
 
 🌍 AVAILABLE IN MULTIPLE COUNTRIES
-CareHub serves patients in Ethiopia, Rwanda, United States, and Afghanistan, with support for English, Amharic, Afaan Oromoo, and Tigrinya.
+Dawa serves patients in Ethiopia, Rwanda, United States, and Afghanistan, with support for English, Amharic, Afaan Oromoo, and Tigrinya.
 
 📋 COMPLETE CONSULTATION EXPERIENCE
 - Detailed consultation summaries after every session
@@ -45,18 +45,17 @@ CareHub serves patients in Ethiopia, Rwanda, United States, and Afghanistan, wit
 - Rate and review your doctor
 
 🔒 YOUR PRIVACY IS PROTECTED
-- All health data is encrypted
+- Health data is encrypted in transit and at rest
 - Consultations are private and secure
 - We never sell your personal information
-- HIPAA-inspired data practices
 
 HOW IT WORKS:
 1. Create your free account
 2. Browse verified doctors by specialty
 3. Choose: Chat, Phone, or Video consultation
-4. Get your diagnosis and consultation summary
+4. Get your consultation summary from your doctor
 
-⚠️ IMPORTANT: CareHub is not for medical emergencies. If you have a life-threatening condition, call emergency services immediately.
+⚠️ IMPORTANT: Dawa is not for medical emergencies. If you have a life-threatening condition, call emergency services immediately. Dawa connects you with licensed healthcare professionals for consultations — it does not itself diagnose, treat, or guarantee any medical outcome.
 ```
 
 ---

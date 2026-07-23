@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     'Learn how Dawa collects, uses, and protects your personal information and health data.',
 }
 
-const LAST_UPDATED = 'June 2026'
+const LAST_UPDATED = 'July 23, 2026'
 
 type Block =
   | { type: 'text'; text: string }
@@ -63,10 +63,21 @@ const SECTIONS: Section[] = [
         type: 'subsection',
         label: 'Technical Information:',
         items: [
-          'Device type and operating system',
-          'App usage data and crash reports',
-          'IP address and approximate location (country level only)',
+          'Device type, browser/operating system, and push notification tokens',
+          'Country selected at sign-up (used to localize the app)',
         ],
+      },
+      {
+        type: 'subsection',
+        label: 'Payment Information:',
+        items: [
+          'Consultation fees are processed by Chapa, our third-party payment processor. We do not collect or store your payment card details.',
+          'Doctors provide bank account details to receive withdrawal payouts.',
+        ],
+      },
+      {
+        type: 'text',
+        text: 'Dawa does not currently use any third-party analytics or crash-reporting SDK, so we do not track which pages you visit, which features you use, or how long you use the app or website.',
       },
     ],
   },
@@ -95,7 +106,7 @@ const SECTIONS: Section[] = [
       {
         type: 'bullets',
         items: [
-          'All data is encrypted in transit using TLS 1.3',
+          'All data is encrypted in transit using TLS 1.2 or higher',
           'All data is encrypted at rest using AES-256',
           'Health data is stored on secure Supabase servers',
           'Doctor documents are stored in encrypted file storage',
@@ -120,6 +131,7 @@ const SECTIONS: Section[] = [
           'Agora (video/audio call infrastructure only — no health data shared)',
           'Stream (chat infrastructure only — messages are encrypted)',
           'Firebase (push notifications only — no health data shared)',
+          'Chapa (payment processing for consultation fees — no health data shared)',
           'Law enforcement when required by law',
         ],
       },
@@ -164,7 +176,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'Dawa is not intended for children under 18 without parental consent. We do not knowingly collect data from children under 13.',
+        text: 'Dawa requires all patient accounts to belong to someone 18 years of age or older and all doctor accounts to belong to someone 24 years of age or older — we do not offer parental- or guardian-consent accounts for minors. Dawa is not directed at children, and we do not knowingly collect personal information from anyone under 18. If we learn that a minor has created an account, we will suspend it and delete the associated data.',
       },
     ],
   },
