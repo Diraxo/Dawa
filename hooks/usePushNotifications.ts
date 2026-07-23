@@ -89,7 +89,11 @@ async function _register(clerkUserId: string) {
         lightColor: '#00BFA5',
         sound: 'default',
         enableVibrate: true,
-        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        // PRIVATE (not PUBLIC): the title/body below carry a patient's name —
+        // PUBLIC would force that onto a locked device's lock screen
+        // regardless of the OS's own "hide sensitive content" setting.
+        // PRIVATE respects whatever the user configured for this device.
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
         showBadge: true,
       })
       await Notifications.setNotificationChannelAsync('appointments', {

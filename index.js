@@ -81,7 +81,6 @@ if (Platform.OS === 'android') {
           }
 
           const { default: notifee, AndroidImportance, AndroidVisibility } = require('@notifee/react-native')
-          const patientName = String(data.patientName ?? 'A patient')
           const typeTitle = data.consultationType === 'phone'
             ? 'Voice Consultation' : data.consultationType === 'video' ? 'Video Consultation' : 'Chat'
 
@@ -107,21 +106,30 @@ if (Platform.OS === 'android') {
             id: 'incoming_requests_v2',
             name: 'Incoming Patient Requests',
             importance: AndroidImportance.MAX,
-            visibility: AndroidVisibility.PUBLIC,
+            // PRIVATE (not PUBLIC): title/body below never contain the
+            // patient's name specifically so this is safe either way, but
+            // PRIVATE also respects the device's own "hide sensitive
+            // content on lock screen" setting instead of overriding it —
+            // matches the channel created in hooks/usePushNotifications.ts.
+            visibility: AndroidVisibility.PRIVATE,
             sound: 'default',
             vibrationPattern: [0, 500, 300, 500, 300, 500],
           })
 
           console.log('[IncomingRequest] Notifee channel ready, displaying notification for', consultationId)
 
+          // Title/body deliberately stay generic (no patient name) — this is
+          // the text Android renders on the tray/lock screen. The patient's
+          // name is still in `data` for the in-app incoming-request screen
+          // to show once the doctor actually opens it.
           await notifee.displayNotification({
             // Deterministic id — a repeated 'new_request' notification for
             // the same consultation (see migration 067's 3-minute re-notify
             // cron) replaces this notification in place instead of stacking
             // a second tray entry for the same request.
             id: `incoming-request-${consultationId}`,
-            title: `${typeTitle} with ${patientName}`,
-            body: `${patientName} has paid and is waiting for your response.`,
+            title: `New ${typeTitle} request`,
+            body: 'A patient is waiting for your response. Open Dawa to review.',
             data: { screen: 'incoming_request', ...data },
             android: {
               channelId: 'incoming_requests_v2',

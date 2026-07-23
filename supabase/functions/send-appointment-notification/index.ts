@@ -524,9 +524,15 @@ Deno.serve(async (req: Request) => {
     const doctorUser = (reminder.doctor as any)?.user ?? {}
     const doctorPhoto = doctorUser.profile_photo_url || undefined
     const title = 'Follow-up Reminder'
-    const body = reminder.message?.trim()
+    // In-app (Notification Center) body preserves the doctor's actual note —
+    // it's only visible after the patient authenticates into the app.
+    const inAppBody = reminder.message?.trim()
       ? reminder.message
       : `${formatDoctorName(doctorUser.full_name, 'Your doctor')} scheduled a follow-up reminder for you.`
+    // Push/lock-screen body is deliberately generic regardless of what the
+    // doctor wrote — a free-text clinical note (medication names, diagnosis
+    // detail, etc.) must never surface outside the authenticated app.
+    const pushBody = `${formatDoctorName(doctorUser.full_name, 'Your doctor')} has a follow-up reminder for you. Tap to view.`
     // 'consultation_summary' (underscore) matches the existing deep-link
     // switch in app/_layout.tsx — opens app/(patient)/consultation-summary.tsx.
     const data = { screen: 'consultation_summary', consultationId: reminder.consultation_id, reminderId: reminder.id }
@@ -534,7 +540,7 @@ Deno.serve(async (req: Request) => {
     let notificationId: string | null = null
     if (patient.id) {
       notificationId = await insertNotification(supabase, {
-        user_id: patient.id, type: 'followup_reminder', title, body,
+        user_id: patient.id, type: 'followup_reminder', title, body: inAppBody,
         data_json: { consultation_id: reminder.consultation_id, reminder_id: reminder.id },
       })
     }
@@ -543,7 +549,7 @@ Deno.serve(async (req: Request) => {
     const recipients: Array<{ userId: string }> = []
     if (patient.push_token && await isPushEnabled(supabase, patient.id, 'appointment_reminder')) {
       messages.push(pushMessage(
-        patient.push_token, title, body, { ...data, notificationId: notificationId ?? '' }, doctorPhoto,
+        patient.push_token, title, pushBody, { ...data, notificationId: notificationId ?? '' }, doctorPhoto,
         await getUnreadBadgeCount(supabase, patient.id),
         `followup-${reminder_id}`,
       ))
@@ -551,7 +557,7 @@ Deno.serve(async (req: Request) => {
     }
     const expoResult = await sendExpoPush(messages)
     await logExpoPushErrors(supabase, expoResult, recipients)
-    const webPushSent = await sendWebPush(supabase, patient.id, { title, body, url: `/patient/summary/${reminder.consultation_id}` })
+    const webPushSent = await sendWebPush(supabase, patient.id, { title, body: pushBody, url: `/patient/summary/${reminder.consultation_id}` })
 
     await supabase.from('followup_reminders').update({ sent: true, sent_at: new Date().toISOString() }).eq('id', reminder_id)
 
@@ -645,6 +651,11 @@ Deno.serve(async (req: Request) => {
     : kind === 'reminder_5' || kind === 'reminder'
       ? 'Get ready for your consultation.'
       : kind === 'start' ? 'Patient is ready. Accept or Decline.' : 'Your scheduled consultation is ready.'
+  // Push/lock-screen body drops the patient's name (in-app notification row
+  // above keeps it) — same rationale as the followup-reminder generic body.
+  const doctorPushBody = kind === 'reminder_30' || kind === 'reminder_10'
+    ? `${minutesOut} minutes remaining until your ${typeLabel} with a patient.`
+    : doctorBody
 
   // At 'start' the cron has only just flipped status to waiting_for_doctor —
   // the doctor hasn't accepted yet, so the patient's deep link must land in
@@ -742,7 +753,7 @@ Deno.serve(async (req: Request) => {
 
   if (doctorUser.push_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
     messages.push(pushMessage(
-      doctorUser.push_token, doctorTitle, doctorBody,
+      doctorUser.push_token, doctorTitle, doctorPushBody,
       { screen: 'consultations', consultationId: appointment_id, notificationId: doctorNotificationId ?? '' },
       undefined,
       await getUnreadBadgeCount(supabase, doctorUser.id),
@@ -761,7 +772,7 @@ Deno.serve(async (req: Request) => {
   const doctorPushUrl = '/doctor/consultations'
   const webPushSent =
     (await sendWebPush(supabase, patient.id, { title: patientTitle, body: patientBody, url: patientPushUrl })) +
-    (await sendWebPush(supabase, doctorUser.id, { title: doctorTitle, body: doctorBody, url: doctorPushUrl }))
+    (await sendWebPush(supabase, doctorUser.id, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl }))
 
   // 3. Mark as sent so the cron job skips it next minute
   const sentColumn = kind === 'reminder' ? 'reminder_sent'

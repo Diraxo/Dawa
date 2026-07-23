@@ -729,6 +729,12 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = `${NOTIF_TYPE_TITLE[consult.type as string] ?? 'Consultation'} with ${patient.full_name ?? 'a patient'}`
       const body  = `Patient ${patient.full_name ?? 'A patient'} has paid and is waiting for your response.`
+      // Push/tray text stays generic (no patient name) so it's safe to show
+      // on a locked device — `title`/`body` above (with the real name) are
+      // only used for the in-app notification row; the incoming-request
+      // screen already reads the name from `sharedData` once opened.
+      const pushTitle = `New ${NOTIF_TYPE_TITLE[consult.type as string] ?? 'Consultation'} Request`
+      const pushBody  = 'A patient is waiting for your response. Open Dawa to review.'
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -769,7 +775,7 @@ Deno.serve(async (req: Request) => {
         }
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        await sendWebPush(supabase, doctorId, { title, body, url: doctorPushUrl('incoming_request', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title: pushTitle, body: pushBody, url: doctorPushUrl('incoming_request', consultation_id) })
       }
 
       // Doctor ring: Android → FCM data message triggers ConnectionService
@@ -850,7 +856,7 @@ Deno.serve(async (req: Request) => {
       const requestPushEnabled = await isPushEnabled(supabase, doctorId, 'consultation_request')
       if (doctorToken && requestPushEnabled) {
         console.log(`[Notify:${consultation_id}] Sending fallback Expo push (callRingDelivered=${callRingDelivered})`)
-        await sendPushNotification(doctorToken, title, body, {
+        await sendPushNotification(doctorToken, pushTitle, pushBody, {
           screen: 'incoming_request',
           // Lets the client's setNotificationHandler apply the same dedup
           // treatment this event's FCM data message already gets — without
@@ -995,6 +1001,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const doctorTitle = 'Consultation Request Closed'
       const doctorBody  = `The ${typeLabel} request from ${patient.full_name ?? 'a patient'} has ended.`
+      const doctorPushBody = `A ${typeLabel} request has ended.`
 
       let doctorNotifId: string | null = null
       if (doctorId) {
@@ -1013,14 +1020,14 @@ Deno.serve(async (req: Request) => {
       // toggle had no effect. Patient side has no equivalent column (only
       // consultation_request exists for patients), so it stays as-is.
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, doctorTitle, doctorBody, {
+        await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, {
           screen: 'consultations',
           notificationId: doctorNotifId ?? '',
           ...sharedData,
         }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorBody, url: doctorPushUrl('consultations', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('consultations', consultation_id) })
       }
       break
     }
@@ -1061,6 +1068,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const doctorTitle = 'Request Cancelled'
       const doctorBody  = `${patient.full_name ?? 'The patient'} cancelled the ${typeLabel} request before you responded.`
+      const doctorPushBody = `A ${typeLabel} request was cancelled before you responded.`
 
       // If this was a phone/video request, the doctor's device may still be
       // mid-ring on the ConnectionService incoming-call UI (see 'new_request'
@@ -1079,10 +1087,10 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, doctorTitle, doctorBody, { screen: 'consultations', notificationId: doctorNotifId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, { screen: 'consultations', notificationId: doctorNotifId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorBody, url: doctorPushUrl('consultations', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('consultations', consultation_id) })
       }
       break
     }
@@ -1093,6 +1101,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = 'Missed Call'
       const body  = `${patient.full_name ?? 'A patient'} missed your ${typeLabel}. The request has been marked as missed.`
+      const pushBody = `A patient missed your ${typeLabel}. The request has been marked as missed.`
 
       if (isCallType) await sendCallCancelSignal(patient.fcm_token ?? null, consultation_id)
 
@@ -1107,10 +1116,10 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, pushBody, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendWebPush(supabase, doctorId, { title, body, url: doctorPushUrl('consultations', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title, body: pushBody, url: doctorPushUrl('consultations', consultation_id) })
       }
       break
     }
@@ -1121,6 +1130,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = 'Call Declined'
       const body  = `${patient.full_name ?? 'The patient'} declined your ${typeLabel}.`
+      const pushBody = `A patient declined your ${typeLabel}.`
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -1133,10 +1143,10 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, pushBody, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendWebPush(supabase, doctorId, { title, body, url: doctorPushUrl('consultations', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title, body: pushBody, url: doctorPushUrl('consultations', consultation_id) })
       }
       break
     }
@@ -1212,6 +1222,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = 'New Rating Received'
       const body  = `${patient.full_name ?? 'A patient'} rated your consultation ${STARS[Math.min(rating ?? 5, 5)]}`
+      const pushBody = `A patient rated your consultation ${STARS[Math.min(rating ?? 5, 5)]}`
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -1232,10 +1243,10 @@ Deno.serve(async (req: Request) => {
       // Previously sent unconditionally — the "New Patient Reviews" toggle
       // had no effect at all. Gate on 'reviews', matching the settings screen.
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'reviews')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'profile', notifKind: 'rating', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, pushBody, { screen: 'profile', notifKind: 'rating', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'reviews')) {
-        await sendWebPush(supabase, doctorId, { title, body, url: doctorPushUrl('profile', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title, body: pushBody, url: doctorPushUrl('profile', consultation_id) })
       }
       break
     }
@@ -1272,6 +1283,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const doctorTitle = 'New Scheduled Appointment'
       const doctorBody  = `${patient.full_name ?? 'A patient'} booked a ${typeLabel} for ${date} at ${time}.`
+      const doctorPushBody = `A patient booked a ${typeLabel} for ${date} at ${time}.`
 
       let doctorNotifId: string | null = null
       if (doctorId) {
@@ -1289,12 +1301,12 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        await sendPushNotification(doctorToken, doctorTitle, doctorBody, {
+        await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, {
           screen: 'schedule', notificationId: doctorNotifId ?? '', ...sharedData,
         }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorBody, url: doctorPushUrl('schedule', consultation_id) })
+        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('schedule', consultation_id) })
       }
 
       // A booking made less than 10 minutes before its own slot never passes
@@ -1373,6 +1385,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const doctorTitle = 'Appointment Rescheduled'
       const doctorBody  = `${patient.full_name ?? 'A patient'} rescheduled their ${typeLabel} to ${date} at ${time}.`
+      const doctorPushBody = `A patient rescheduled their ${typeLabel} to ${date} at ${time}.`
 
       let doctorNotifId: string | null = null
       if (doctorId) {
@@ -1385,7 +1398,7 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        await sendPushNotification(doctorToken, doctorTitle, doctorBody, {
+        await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, {
           screen: 'schedule', notificationId: doctorNotifId ?? '', ...sharedData,
         }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
@@ -1424,6 +1437,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = 'Patient Joined'
       const body  = `${patient.full_name ?? 'The patient'} has joined the ${typeLabel}.`
+      const pushBody = `A patient has joined the ${typeLabel}.`
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -1436,7 +1450,7 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, pushBody, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       break
     }
@@ -1447,6 +1461,7 @@ Deno.serve(async (req: Request) => {
       const doctorToken = doctorUser.push_token ?? null
       const title = 'Patient Left'
       const body  = `${patient.full_name ?? 'The patient'} has left the ${typeLabel}.`
+      const pushBody = `A patient has left the ${typeLabel}.`
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -1459,7 +1474,7 @@ Deno.serve(async (req: Request) => {
         })
       }
       if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, title, body, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        await sendPushNotification(doctorToken, title, pushBody, { screen: 'consultations', notificationId: notificationId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
       }
       break
     }
