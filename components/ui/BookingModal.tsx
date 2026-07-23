@@ -19,6 +19,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
+import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
 import { AlertButton, AlertVariant, CareHubAlert } from '@/components/ui/CareHubAlert'
 import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
@@ -1053,6 +1054,10 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
                 ) : (
                   <Row label="Total" value={`ETB ${newFee}`} bold teal />
                 )}
+              </View>
+
+              <View style={{ marginTop: 12 }}>
+                <MedicalDisclaimer dismissible={false} />
               </View>
 
               {/* Credit banner */}

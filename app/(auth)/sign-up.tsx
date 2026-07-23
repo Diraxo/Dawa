@@ -22,6 +22,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
+import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
 import { CareHubLogo } from '@/components/ui/CareHubLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -442,6 +443,10 @@ export default function SignUpScreen() {
             </Text>
             .
           </Text>
+
+          <View style={{ marginTop: 16 }}>
+            <MedicalDisclaimer dismissible />
+          </View>
         </View>
 
         {/* ── OR DIVIDER ── */}
