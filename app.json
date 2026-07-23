@@ -73,6 +73,7 @@
     },
     "plugins": [
       "./plugins/withFirebaseMessagingManifestFix.js",
+      "./plugins/withScopedStoragePermissions.js",
       "expo-router",
       "expo-font",
       "@react-native-community/datetimepicker",
