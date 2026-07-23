@@ -23,7 +23,7 @@ import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
 import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
@@ -195,10 +195,11 @@ export default function DoctorProfileScreen() {
   const permanentlyDelete = async () => {
     setShowDeleteConfirmAlert(false)
     try {
-      // Best-effort document/photo cleanup — must never block account deletion.
       const token = await getToken().catch(() => null)
       if (token && user?.id) {
         const client = getAuthClient(token)
+
+        // Best-effort document/photo cleanup — must never block account deletion.
         const [{ data: docs }, { data: photos }] = await Promise.all([
           client.storage.from('doctor-documents').list(user.id).catch(() => ({ data: null }) as never),
           client.storage.from('profile-photos').list(user.id).catch(() => ({ data: null }) as never),
@@ -209,8 +210,39 @@ export default function DoctorProfileScreen() {
         if (photos?.length) {
           await client.storage.from('profile-photos').remove(photos.map((f) => `${user.id}/${f.name}`)).catch(() => {})
         }
+
+        // Anonymize rather than hard-delete the `users` row: doctor_profiles
+        // cascades from users, and consultations cascade from
+        // doctor_profiles — a hard delete here would silently wipe out
+        // every consultation, summary, and record for every patient this
+        // doctor ever saw, not just the doctor's own data. Scrubbing
+        // personal/credential fields satisfies "delete my account" while
+        // leaving patients' consultation history intact. `status`/
+        // `availability` are left untouched (only an admin can change them,
+        // enforced at the DB level); `is_online: false` alone is enough to
+        // make the doctor unbookable going forward.
+        const anonEmail = `deleted-${user.id}@dawa.invalid`
+        await client.from('users').update({
+          full_name: 'Deleted Doctor',
+          email: anonEmail,
+          phone: null,
+          profile_photo_url: null,
+          push_token: null,
+          fcm_token: null,
+          voip_token: null,
+          address: null,
+          is_suspended: true,
+        })
+        await client.from('doctor_profiles').update({
+          bio: null,
+          license_number: null,
+          license_doc_url: null,
+          id_doc_url: null,
+          hospital_name: null,
+          is_online: false,
+        })
       }
-      await supabase.from('users').delete().eq('clerk_id', user?.id)
+      await supabaseEmailAuth.auth.signOut()
       await user?.delete()
       await disconnectStream()
       clearAuth()
@@ -271,7 +303,7 @@ export default function DoctorProfileScreen() {
         visible={showDeleteAlert}
         variant="error"
         title="Delete Account"
-        message="This will permanently delete your account, license/ID documents, consultation history, and earnings data. This cannot be undone."
+        message="This will permanently remove your personal information and license/ID documents, and sign you out of Dawa. This cannot be undone."
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteAlert(false) },
           { text: 'Delete', style: 'danger', onPress: confirmDelete },
@@ -282,7 +314,7 @@ export default function DoctorProfileScreen() {
         visible={showDeleteConfirmAlert}
         variant="error"
         title="Final Confirmation"
-        message="All your documents, consultations, and account data will be permanently removed. Are you absolutely sure?"
+        message="Your personal information and documents will be permanently removed and cannot be recovered. Your past consultation records are kept for your patients' medical record-keeping, as described in our Privacy Policy. Are you absolutely sure?"
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteConfirmAlert(false) },
           { text: 'Permanently Delete', style: 'danger', onPress: permanentlyDelete },

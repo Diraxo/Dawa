@@ -1,12 +1,15 @@
 'use client'
 
-import { useUser, useAuth } from '@clerk/nextjs'
+import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { pushOwnPhotoToStream } from '@/lib/stream'
 import { stripDrPrefix } from '@/lib/utils'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { MessageCircle, Phone, Video, Camera } from 'lucide-react'
+
+type DangerDialog = 'none' | 'deactivate' | 'delete' | 'delete-confirm'
 
 const LANGUAGES = [
   'Arabic', 'Amharic', 'English', 'French', 'Somali', 'Swahili',
@@ -71,6 +74,11 @@ function parseDocuments(profile: DoctorProfile): DocEntry[] {
 export default function DoctorProfilePage() {
   const { user } = useUser()
   const { getToken } = useAuth()
+  const { signOut } = useClerk()
+  const router = useRouter()
+  const [dangerDialog, setDangerDialog] = useState<DangerDialog>('none')
+  const [dangerLoading, setDangerLoading] = useState(false)
+  const [dangerError, setDangerError] = useState<string | null>(null)
   const [profile, setProfile] = useState<DoctorProfile | null>(null)
   const [form, setForm] = useState<Partial<DoctorProfile>>({})
   const [editing, setEditing] = useState(false)
@@ -220,6 +228,80 @@ export default function DoctorProfilePage() {
       alert('Failed to delete photo. Please try again.')
     } finally {
       setUploadingPhoto(false)
+    }
+  }
+
+  async function handleDeactivate() {
+    if (!userRowId || !user) return
+    setDangerLoading(true)
+    setDangerError(null)
+    try {
+      const token = await getToken()
+      if (token) {
+        await getAuthClient(token).from('doctor_profiles').update({ is_online: false }).eq('id', profileId as string)
+      }
+      await signOut({ redirectUrl: '/sign-in' })
+    } catch {
+      setDangerError('Failed to deactivate. Please try again.')
+    } finally {
+      setDangerLoading(false)
+    }
+  }
+
+  async function handleDeleteFinal() {
+    if (!userRowId || !user || !profileId) return
+    setDangerLoading(true)
+    setDangerError(null)
+    try {
+      const token = await getToken()
+      if (!token) return
+      const client = getAuthClient(token)
+
+      // Best-effort document/photo cleanup — must never block account deletion.
+      const [{ data: docs }, { data: photos }] = await Promise.all([
+        client.storage.from('doctor-documents').list(user.id).catch(() => ({ data: null }) as never),
+        client.storage.from('profile-photos').list(user.id).catch(() => ({ data: null }) as never),
+      ])
+      if (docs?.length) {
+        await client.storage.from('doctor-documents').remove(docs.map(f => `${user.id}/${f.name}`)).catch(() => {})
+      }
+      if (photos?.length) {
+        await client.storage.from('profile-photos').remove(photos.map(f => `${user.id}/${f.name}`)).catch(() => {})
+      }
+
+      // Anonymize rather than hard-delete: doctor_profiles cascades from
+      // users, and consultations cascade from doctor_profiles — a hard
+      // delete would silently wipe every consultation/summary/record for
+      // every patient this doctor ever saw, not just the doctor's own data.
+      // Mirrors app/(doctor)/(tabs)/profile.tsx exactly so mobile and web
+      // leave the same anonymized state behind.
+      const anonEmail = `deleted-${user.id}@dawa.invalid`
+      await client.from('users').update({
+        full_name: 'Deleted Doctor',
+        email: anonEmail,
+        phone: null,
+        profile_photo_url: null,
+        push_token: null,
+        fcm_token: null,
+        voip_token: null,
+        address: null,
+        is_suspended: true,
+      }).eq('id', userRowId)
+      await client.from('doctor_profiles').update({
+        bio: null,
+        license_number: null,
+        license_doc_url: null,
+        id_doc_url: null,
+        hospital_name: null,
+        is_online: false,
+      }).eq('id', profileId)
+
+      await user.delete()
+      router.replace('/sign-up')
+    } catch {
+      setDangerError('Unable to delete account. Please contact support at support@dawa.app')
+      setDangerLoading(false)
+      setDangerDialog('none')
     }
   }
 
@@ -520,6 +602,92 @@ export default function DoctorProfilePage() {
           <a href="mailto:support@dawa.app" className="text-teal-green underline">support@dawa.app</a>.
         </p>
       </div>
+
+      {/* Danger Zone */}
+      <div className="card p-6 mt-6 border border-danger/20">
+        <h2 className="font-montserrat font-bold text-base text-danger mb-4">Danger Zone</h2>
+        <div className="flex flex-col gap-3">
+          <button
+            onClick={() => setDangerDialog('deactivate')}
+            className="w-full h-11 rounded-2xl border-2 border-warning text-warning font-montserrat font-semibold text-sm flex items-center justify-center gap-2 hover:bg-warning/5 transition-colors"
+          >
+            ⏸ Deactivate Account
+          </button>
+          <button
+            onClick={() => setDangerDialog('delete')}
+            className="w-full h-11 rounded-2xl border-2 border-danger text-danger font-montserrat font-semibold text-sm flex items-center justify-center gap-2 hover:bg-danger/5 transition-colors"
+          >
+            🗑 Delete Account
+          </button>
+        </div>
+        {dangerError && (
+          <p className="text-danger text-xs mt-3 text-center">{dangerError}</p>
+        )}
+      </div>
+
+      {/* Confirmation Dialogs */}
+      {dangerDialog !== 'none' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+          <div className="bg-white rounded-3xl p-8 max-w-sm w-full shadow-xl">
+            {dangerDialog === 'deactivate' && (
+              <>
+                <p className="text-3xl mb-4 text-center">⏸</p>
+                <h3 className="font-montserrat font-black text-xl text-ink-black mb-2 text-center">Deactivate Account</h3>
+                <p className="text-ink-black/60 text-sm text-center mb-6">
+                  You will be taken offline and logged out. You can reactivate by signing back in.
+                </p>
+                <div className="flex gap-3">
+                  <button onClick={() => setDangerDialog('none')} className="flex-1 btn-outline h-11 rounded-2xl text-sm">Cancel</button>
+                  <button
+                    onClick={handleDeactivate}
+                    disabled={dangerLoading}
+                    className="flex-1 h-11 rounded-2xl bg-warning text-white font-semibold text-sm disabled:opacity-50"
+                  >
+                    {dangerLoading ? '…' : 'Deactivate'}
+                  </button>
+                </div>
+              </>
+            )}
+            {dangerDialog === 'delete' && (
+              <>
+                <p className="text-3xl mb-4 text-center">🗑</p>
+                <h3 className="font-montserrat font-black text-xl text-ink-black mb-2 text-center">Delete Account</h3>
+                <p className="text-ink-black/60 text-sm text-center mb-6">
+                  This will permanently remove your personal information and license/ID documents, and sign you out of Dawa. This cannot be undone.
+                </p>
+                <div className="flex gap-3">
+                  <button onClick={() => setDangerDialog('none')} className="flex-1 btn-outline h-11 rounded-2xl text-sm">Cancel</button>
+                  <button
+                    onClick={() => setDangerDialog('delete-confirm')}
+                    className="flex-1 h-11 rounded-2xl bg-danger text-white font-semibold text-sm"
+                  >
+                    Continue
+                  </button>
+                </div>
+              </>
+            )}
+            {dangerDialog === 'delete-confirm' && (
+              <>
+                <p className="text-3xl mb-4 text-center">⚠️</p>
+                <h3 className="font-montserrat font-black text-xl text-ink-black mb-2 text-center">Final Confirmation</h3>
+                <p className="text-ink-black/60 text-sm text-center mb-6">
+                  Your personal information and documents will be permanently removed and cannot be recovered. Past consultation records are kept for medical record-keeping, as described in our Privacy Policy. Are you absolutely sure?
+                </p>
+                <div className="flex gap-3">
+                  <button onClick={() => setDangerDialog('none')} className="flex-1 btn-outline h-11 rounded-2xl text-sm">Cancel</button>
+                  <button
+                    onClick={handleDeleteFinal}
+                    disabled={dangerLoading}
+                    className="flex-1 h-11 rounded-2xl bg-danger text-white font-semibold text-sm disabled:opacity-50"
+                  >
+                    {dangerLoading ? '…' : 'Delete Forever'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

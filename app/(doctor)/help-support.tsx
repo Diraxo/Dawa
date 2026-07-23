@@ -52,7 +52,7 @@ const FAQ_SECTIONS: Section[] = [
     items: [
       { q: 'How do I update my profile or documents?', a: 'You can update your name, bio, hospital, and photo from Profile → Edit Profile. For document updates (license, ID), contact support as these require re-verification.' },
       { q: 'How is my data stored?', a: 'All data is stored securely with Row Level Security enforced on all database tables. We never share your data with third parties without your consent.' },
-      { q: 'How do I delete my account?', a: 'Go to Profile → Delete Account. This permanently removes your account, documents, and consultation data and cannot be undone.' },
+      { q: 'How do I delete my account?', a: 'Go to Profile → Delete Account. This permanently removes your personal information and documents and cannot be undone. Your past patients’ consultation records are kept for medical record-keeping, as described in our Privacy Policy.' },
     ],
   },
 ]

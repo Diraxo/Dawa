@@ -22,7 +22,7 @@ import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 import { useTranslation } from 'react-i18next'
@@ -102,17 +102,35 @@ export default function ProfileScreen() {
   const permanentlyDelete = async () => {
     setShowDeleteConfirmAlert(false)
     try {
-      // Best-effort avatar cleanup — must never block account deletion.
-      if (user?.id) {
-        const token = await getToken().catch(() => null)
-        if (token) {
-          await getAuthClient(token)
-            .storage.from('profile-photos')
-            .remove([`${user.id}/avatar.jpg`])
-            .catch(() => {})
-        }
+      const token = user?.id ? await getToken().catch(() => null) : null
+      if (user?.id && token) {
+        const client = getAuthClient(token)
+        // Best-effort avatar cleanup — must never block account deletion.
+        await client.storage.from('profile-photos').remove([`${user.id}/avatar.jpg`]).catch(() => {})
+
+        // Anonymize rather than hard-delete the `users` row: consultations,
+        // messages, and reviews all reference patient_id/sender_id with
+        // ON DELETE NO ACTION, so a hard delete throws a foreign-key
+        // violation for any patient who has ever sent a message or had a
+        // consultation — i.e. this used to fail silently for real users.
+        // Scrubbing personal fields satisfies "delete my account" while
+        // leaving the consultation records intact (as our Privacy Policy's
+        // Data Retention section already promises for medical compliance).
+        const anonEmail = `deleted-${user.id}@dawa.invalid`
+        await client.from('users').update({
+          full_name: 'Deleted Patient',
+          email: anonEmail,
+          phone: null,
+          profile_photo_url: null,
+          push_token: null,
+          fcm_token: null,
+          voip_token: null,
+          address: null,
+          is_suspended: true,
+        })
+        await client.from('patient_profiles').update({ date_of_birth: null, gender: null })
       }
-      await supabase.from('users').delete().eq('clerk_id', user?.id)
+      await supabaseEmailAuth.auth.signOut()
       await user?.delete()
       await disconnectStream()
       clearAuth()
@@ -223,7 +241,7 @@ export default function ProfileScreen() {
         visible={showDeleteAlert}
         variant="error"
         title="Delete Account"
-        message="This will permanently delete your account and all your data. This cannot be undone."
+        message="This will permanently remove your personal information (name, email, phone, profile photo) and sign you out of Dawa. This cannot be undone."
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteAlert(false) },
           { text: 'Delete', style: 'danger', onPress: confirmDelete },
@@ -234,7 +252,7 @@ export default function ProfileScreen() {
         visible={showDeleteConfirmAlert}
         variant="error"
         title="Final Confirmation"
-        message="All your consultations, medical records, and account data will be permanently removed. Are you absolutely sure?"
+        message="Your personal information will be permanently removed and cannot be recovered. Your past consultation records are kept for medical record-keeping, as described in our Privacy Policy. Are you absolutely sure?"
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeleteConfirmAlert(false) },
           { text: 'Permanently Delete', style: 'danger', onPress: permanentlyDelete },

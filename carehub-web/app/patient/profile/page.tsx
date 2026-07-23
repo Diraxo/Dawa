@@ -241,7 +241,27 @@ export default function PatientProfilePage() {
       const client = getAuthClient(token)
       // Best-effort — a missing file must never block account deletion.
       await client.storage.from('profile-photos').remove([`${user.id}/avatar.jpg`]).catch(() => {})
-      await client.from('users').delete().eq('id', userId)
+
+      // Anonymize rather than hard-delete: consultations/messages/reviews
+      // reference this row with ON DELETE NO ACTION, so a hard delete
+      // throws a foreign-key violation for any patient with consultation
+      // history. Scrubbing personal fields satisfies "delete my account"
+      // while keeping consultation records intact (see Privacy Policy ->
+      // Data Retention).
+      const anonEmail = `deleted-${userId}@dawa.invalid`
+      await client.from('users').update({
+        full_name: 'Deleted Patient',
+        email: anonEmail,
+        phone: null,
+        profile_photo_url: null,
+        push_token: null,
+        fcm_token: null,
+        voip_token: null,
+        address: null,
+        is_suspended: true,
+      }).eq('id', userId)
+      await client.from('patient_profiles').update({ date_of_birth: null, gender: null }).eq('user_id', userId)
+
       await user.delete()
       router.replace('/sign-up')
     } catch {
@@ -507,7 +527,7 @@ export default function PatientProfilePage() {
                 <p className="text-3xl mb-4 text-center">🗑</p>
                 <h3 className="font-montserrat font-black text-xl text-ink-black mb-2 text-center">Delete Account</h3>
                 <p className="text-ink-black/60 text-sm text-center mb-6">
-                  This will permanently delete your account and all your data. This cannot be undone.
+                  This will permanently remove your personal information (name, email, phone, profile photo). This cannot be undone.
                 </p>
                 <div className="flex gap-3">
                   <button onClick={() => setDangerDialog('none')} className="flex-1 btn-outline h-11 rounded-2xl text-sm">Cancel</button>
@@ -525,7 +545,7 @@ export default function PatientProfilePage() {
                 <p className="text-3xl mb-4 text-center">⚠️</p>
                 <h3 className="font-montserrat font-black text-xl text-ink-black mb-2 text-center">Final Confirmation</h3>
                 <p className="text-ink-black/60 text-sm text-center mb-6">
-                  All your consultations, medical records, and account data will be permanently removed. Are you absolutely sure?
+                  Your personal information will be permanently removed and cannot be recovered. Past consultation records are kept for medical record-keeping, as described in our Privacy Policy. Are you absolutely sure?
                 </p>
                 <div className="flex gap-3">
                   <button onClick={() => setDangerDialog('none')} className="flex-1 btn-outline h-11 rounded-2xl text-sm">Cancel</button>

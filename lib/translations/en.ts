@@ -505,7 +505,7 @@
   faqQ_dataStorage: 'How is my personal data stored?',
   faqA_dataStorage: 'Your data is stored securely on Supabase infrastructure with Row Level Security enforced on all tables. We never share your data with third parties without your consent.',
   faqQ_deleteAccount: 'How do I delete my account?',
-  faqA_deleteAccount: 'Go to Profile → Delete Account. This permanently removes all your data from our systems. This action cannot be undone.',
+  faqA_deleteAccount: 'Go to Profile → Delete Account. This permanently removes your personal information from our systems and cannot be undone. Past consultation records are kept for medical record-keeping, as described in our Privacy Policy.',
 
   // About Dawa screen
   aboutDawaTitle: 'About Dawa',
