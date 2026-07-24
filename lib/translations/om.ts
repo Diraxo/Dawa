@@ -151,6 +151,9 @@ const om: TranslationKeys = {
 
   messages: 'Ergaalee',
   searchConversations: 'Marii barbaadi...',
+  allChats: 'Hunda',
+  activeChats: 'Kan Hojjetu',
+  endedChats: 'Kan Xumurame',
   noMessages: 'Hanga yoonaatti ergaa hin jiru',
   noMessagesDesc: 'Mariitti dubbachuuf eegali',
 
@@ -333,6 +336,14 @@ const om: TranslationKeys = {
   noRecordsYet: 'Ammaaf galmee hin jiru',
   noRecordsDesc: 'Xumura marii fi qorichaa keessan galmee mariii keessanii jalqabaa booda asitti ni mul\'ata.',
   uploadNewDocument: 'Dokumentii Haaraa Fe\'i',
+  uploading: 'Fe\'aa jira…',
+  uploaded: 'Fe\'ameera',
+  uploadedSuccessfully: 'milkaa\'inaan fe\'ameera.',
+  uploadFailed: 'Fe\'uun Hin Milkoofne',
+  uploadedByYou: 'Isin fe\'ame',
+  userNotFound: 'Fayyadamaan hin argamne.',
+  authFailed: 'Dogoggora mirkaneessuu.',
+  tryAgain: 'Maaloo irra deebi\'aa yaalaa.',
   close: 'Cufí',
 
   searchCountry: 'Biyya barbaadi...',
@@ -416,6 +427,10 @@ const om: TranslationKeys = {
   done: 'Xumuri',
   rateYourExperience: 'Muuxannoo Keessan Qixi',
   pleaseRateFirst: 'Erguu dura mariittii qixeessaa.',
+  commentRequiredError: 'Odeeffannoo keessan utuu hin ergiin dura yaada kennaa.',
+  ratingSuccessTitle: 'Galatoomaa!',
+  ratingSuccessMessage: 'Qiimeessaan keessan milkaa\'inaan ergameera. Yaadni keessan qulqullina kunuunsaa bakka bira jiraataniif fooyyessuuf gargaara.',
+  continueButton: 'Itti Fufi',
 
   // Notification settings note
   notifDeviceSettingsNote: 'Eeyyama beeksisa push gocha meeshaa keessaniin bulchama.',
@@ -516,6 +531,7 @@ const om: TranslationKeys = {
   chatOpenAutoNote: 'Tokkumaan dokterichi marii jalqabeen\nofumaan banama.',
   consultationEnded: 'Gorsaan dhumateera',
   consultationEndedBanner: 'Gorsaan dhumateera · Mariin kun dubbisuf qofa',
+  typing: 'Barreessaa jira…',
   end: 'Xumuri',
   leaveConsultation: 'Gorsaa Gaduuf?',
   leaveConsultationMsg: 'Tab beellammaatii deebi\'uun gara marii deebi\'uu dandeessa.',

@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useScrollToTop, useFocusEffect } from '@react-navigation/native'
-import { useAuth, useUser } from '@clerk/clerk-expo'
+import { useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { Image } from 'expo-image'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Pressable,
@@ -25,34 +25,9 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
-import { formatDoctorName } from '@/lib/nameFormat'
+import { usePatientAppointments } from '@/hooks/usePatientAppointments'
+import { usePatientDoctors } from '@/hooks/usePatientDoctors'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient, supabase } from '@/lib/supabase'
-import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
-
-function mapDoctor(d: any): Doctor {
-  return {
-    id: d.id,
-    user_id: d.user_id,
-    name: formatDoctorName(d.users?.full_name, 'Dr. Unknown'),
-    subtitle: d.hospital_name ?? undefined,
-    specialty: d.specialty ?? 'General',
-    rating_average: Number(d.rating_average) ?? 0,
-    review_count: d.review_count ?? 0,
-    years_experience: d.years_experience ?? undefined,
-    bio: d.bio ?? undefined,
-    chat_price: Number(d.chat_price) ?? 0,
-    phone_price: Number(d.phone_price) ?? 0,
-    video_price: Number(d.video_price) ?? 0,
-    is_online: d.is_online ?? false,
-    profile_photo_url: d.users?.profile_photo_url ?? null,
-    availability: d.availability ?? null,
-    languages: d.languages ?? null,
-    // Both queries this feeds always filter status='approved' server-side —
-    // every doctor mapDoctor() ever sees is already approved.
-    status: 'approved',
-  }
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,33 +45,38 @@ export default function HomeScreen() {
   const { t } = useTranslation()
   const router = useRouter()
   const { user } = useUser()
-  const { getToken } = useAuth()
   const scrollRef = useRef<ScrollView>(null)
   useScrollToTop(scrollRef)
   const guardNav = useNavGuard()
   const [searchQuery, setSearchQuery] = useState('')
-  const [onlineDoctors, setOnlineDoctors] = useState<Doctor[]>([])
-  const [topDoctors, setTopDoctors] = useState<Doctor[]>([])
-  const [loadingDoctors, setLoadingDoctors] = useState(true)
-  const [upcomingAppointment, setUpcomingAppointment] = useState<{
-    doctorName: string; type: string; date: string; time: string
-  } | null>(null)
-  // Distinct from `upcomingAppointment === null`, which is also the
-  // steady-state "genuinely has none" value — without this, the "No
-  // upcoming appointments" card flashed on every mount/re-login before the
-  // fetch below resolved, even for patients who do have one booked.
-  const [loadingAppointment, setLoadingAppointment] = useState(true)
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
   const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
-  const upcomingAppointmentCacheKey = user?.id ? `patient-upcoming-appt:${user.id}` : null
 
-  // Kept current via effect below so the realtime handler (subscribed once
-  // per fetch cycle) never reads a stale closed-over value of
-  // topDoctors/onlineDoctors.
-  const topDoctorsRef = useRef<Doctor[]>([])
-  const onlineDoctorsRef = useRef<Doctor[]>([])
-  useEffect(() => { topDoctorsRef.current = topDoctors }, [topDoctors])
-  useEffect(() => { onlineDoctorsRef.current = onlineDoctors }, [onlineDoctors])
+  // Single source of truth, shared with the Appointments screen's
+  // Upcoming/Past tabs — see hooks/usePatientAppointments.ts. `isLoading` is
+  // only ever true before the first fetch for this user has resolved, so a
+  // realtime-triggered background refresh can never flip this widget back
+  // into a loading/empty state once real data has been shown.
+  const { upcoming, isLoading: loadingAppointment } = usePatientAppointments()
+  const nextAppointment = upcoming[0] ?? null
+  const upcomingAppointment = useMemo(() => {
+    if (!nextAppointment) return null
+    const d = new Date(nextAppointment.scheduledAt)
+    return {
+      doctorName: nextAppointment.doctorName,
+      type: nextAppointment.type,
+      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+    }
+  }, [nextAppointment])
+
+  // Single source of truth, shared with the Doctors tab's full list — see
+  // hooks/usePatientDoctors.ts. Both widgets below are pure slices of the
+  // same rating-sorted list, so they can never disagree with the Doctors tab
+  // about a given doctor's live is_online/price/bio/etc.
+  const { doctors: allDoctors, isLoading: loadingDoctors, refresh: refreshDoctors } = usePatientDoctors()
+  const topDoctors = useMemo(() => allDoctors.slice(0, 8), [allDoctors])
+  const onlineDoctors = useMemo(() => allDoctors.filter(d => d.is_online).slice(0, 8), [allDoctors])
 
   // The booking modal is handed a one-shot snapshot when opened; keep its
   // is_online AND availability (hours/blocked days/on-demand-vs-scheduled
@@ -106,345 +86,20 @@ export default function HomeScreen() {
   // actually available.
   useEffect(() => {
     if (!bookingDoctor) return
-    const live = topDoctors.find(d => d.id === bookingDoctor.id) ?? onlineDoctors.find(d => d.id === bookingDoctor.id)
+    const live = allDoctors.find(d => d.id === bookingDoctor.id)
     if (!live) return
     if (live.is_online !== bookingDoctor.is_online || live.availability !== bookingDoctor.availability) {
       setBookingDoctor({ ...bookingDoctor, is_online: live.is_online, availability: live.availability })
     }
-  }, [topDoctors, onlineDoctors, bookingDoctor])
+  }, [allDoctors, bookingDoctor])
 
-  // Latest known realtime-derived fields per doctor. A REST fetch (initial
-  // load, or the post-SUBSCRIBED reconciliation fetch below) can resolve
-  // after a realtime UPDATE has already landed for a doctor — without this,
-  // the fetch's setter would blindly overwrite state with a possibly-stale
-  // snapshot. Every fetch result is merged through this map (realtime always
-  // wins) before it reaches state.
-  const realtimeKnownRef = useRef<Map<string, Partial<Pick<Doctor,
-    'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
-    'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count' |
-    'name' | 'profile_photo_url'
-  >>>>(new Map())
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
-
-  const mergeKnownRealtime = (docs: Doctor[]): Doctor[] =>
-    docs.map(d => {
-      const known = realtimeKnownRef.current.get(d.id)
-      return known ? { ...d, ...known } : d
-    })
-
-  // Single merge point used by both the realtime handler and every fetch
-  // result so a doctor's fields are only ever patched, never blindly replaced.
-  const applyDoctorUpdate = (
-    list: Doctor[],
-    doctorId: string,
-    patch: Partial<Doctor>
-  ): Doctor[] => list.map(d => (d.id === doctorId ? { ...d, ...patch } : d))
-
-  // full_name/profile_photo_url live on `users`, not `doctor_profiles` — that
-  // row's realtime payload carries users.id, so matching goes through
-  // user_id instead of doctor.id.
-  const applyDoctorUpdateByUserId = (
-    list: Doctor[],
-    userId: string,
-    patch: Partial<Doctor>
-  ): Doctor[] => list.map(d => (d.user_id === userId ? { ...d, ...patch } : d))
-
-  useEffect(() => {
-    if (!user) return
-    let mounted = true
-    setLoadingDoctors(true)
-
-    const CHANNEL_NAME = 'patient-home-doctor-status'
-
-    const fetchDoctorLists = async () => {
-      try {
-        // Public doctor data — no auth required
-        const [onlineRes, topRes] = await Promise.all([
-          supabase
-            .from('doctor_profiles')
-            .select('*, users!inner(full_name, profile_photo_url)')
-            .eq('status', 'approved')
-            .eq('is_online', true)
-            .order('rating_average', { ascending: false })
-            .limit(8),
-          supabase
-            .from('doctor_profiles')
-            .select('*, users!inner(full_name, profile_photo_url)')
-            .eq('status', 'approved')
-            .order('rating_average', { ascending: false })
-            .limit(8),
-        ])
-
-        if (!mounted) return
-        if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
-        if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
-      } catch {
-        // Network failure — leave whatever list is already on screen (cache
-        // or a prior successful fetch) rather than throwing past this IIFE,
-        // which previously left loadingDoctors stuck true forever (the
-        // Promise.all rejecting skipped the setLoadingDoctors(false) below).
-        // The realtime subscription below still gets attempted after this,
-        // and its SUBSCRIBED reconciliation fetch retries this once
-        // connectivity returns.
-      } finally {
-        if (mounted) setLoadingDoctors(false)
-      }
-    }
-
-    ;(async () => {
-      // Fetch first, subscribe after — joining the realtime channel
-      // concurrently with this REST fetch let UPDATE events land in the
-      // join-latency window (silently dropped, never queued/redelivered),
-      // and let this fetch's callback clobber realtime state that had
-      // already been applied by an event that beat it back. The
-      // reconciliation fetch triggered on SUBSCRIBED below closes the
-      // join-latency-window gap.
-      await fetchDoctorLists()
-      if (!mounted) return
-
-      if (!mounted) return
-
-      // Realtime: doctor online/offline/availability status → update lists instantly
-      const existing = supabase.getChannels().find(ch => ch.topic === `realtime:${CHANNEL_NAME}`)
-      if (existing) supabase.removeChannel(existing)
-
-      const channel = supabase
-        .channel(CHANNEL_NAME)
-        .on(
-          'postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
-          async (payload) => {
-            const updated = payload.new as any
-            if (updated.status !== 'approved') return
-            const doctorId: string = updated.id
-            const isNowOnline: boolean = updated.is_online
-            const updatedLanguages: string[] | null | undefined = updated.languages
-            const updatedAvailability: Doctor['availability'] = updated.availability ?? null
-            const restPatch = {
-              bio: (updated.bio ?? undefined) as string | undefined,
-              specialty: (updated.specialty ?? 'General') as string,
-              subtitle: (updated.hospital_name ?? undefined) as string | undefined,
-              years_experience: (updated.years_experience ?? undefined) as number | undefined,
-              chat_price: Number(updated.chat_price ?? 0),
-              phone_price: Number(updated.phone_price ?? 0),
-              video_price: Number(updated.video_price ?? 0),
-              rating_average: Number(updated.rating_average ?? 0),
-              review_count: (updated.review_count ?? 0) as number,
-            }
-
-            realtimeKnownRef.current.set(doctorId, {
-              is_online: isNowOnline,
-              languages: updatedLanguages,
-              availability: updatedAvailability,
-              ...restPatch,
-            })
-
-            setTopDoctors(prev => applyDoctorUpdate(prev, doctorId, {
-              is_online: isNowOnline,
-              languages: updatedLanguages ?? undefined,
-              availability: updatedAvailability,
-              ...restPatch,
-            }))
-
-            if (!isNowOnline) {
-              setOnlineDoctors(prev => prev.filter(d => d.id !== doctorId))
-              return
-            }
-
-            if (onlineDoctorsRef.current.some(d => d.id === doctorId)) {
-              setOnlineDoctors(prev => applyDoctorUpdate(prev, doctorId, {
-                is_online: true,
-                languages: updatedLanguages ?? undefined,
-                availability: updatedAvailability,
-                ...restPatch,
-              }))
-              return
-            }
-
-            // Reuse the profile we already have (from topDoctors) instead of an
-            // extra network round trip — a failed/slow fetch here used to mean
-            // the doctor silently never reappeared as online until app restart.
-            const known = topDoctorsRef.current.find(d => d.id === doctorId)
-            if (known) {
-              setOnlineDoctors(prev => [{ ...known, ...restPatch, is_online: true, availability: updatedAvailability ?? known.availability }, ...prev])
-              return
-            }
-
-            const { data, error } = await supabase
-              .from('doctor_profiles')
-              .select('*, users!inner(full_name, profile_photo_url)')
-              .eq('id', doctorId)
-              .maybeSingle()
-            if (error) {
-              console.warn('[home] failed to fetch newly-online doctor profile', error)
-              return
-            }
-            if (data) {
-              setOnlineDoctors(prev =>
-                prev.some(d => d.id === doctorId) ? prev : [mapDoctor(data), ...prev]
-              )
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'users' },
-          (payload) => {
-            const updated = payload.new as any
-            const doc = topDoctorsRef.current.find(d => d.user_id === updated.id)
-              ?? onlineDoctorsRef.current.find(d => d.user_id === updated.id)
-            if (!doc) return
-            const patch = {
-              name: formatDoctorName(updated.full_name, 'Dr. Unknown'),
-              profile_photo_url: (updated.profile_photo_url ?? null) as string | null,
-            }
-            realtimeKnownRef.current.set(doc.id, { ...realtimeKnownRef.current.get(doc.id), ...patch })
-            setTopDoctors(prev => applyDoctorUpdateByUserId(prev, updated.id, patch))
-            setOnlineDoctors(prev => applyDoctorUpdateByUserId(prev, updated.id, patch))
-          }
-        )
-        .subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            // Reconcile anything that changed during the join-latency window
-            // (channel handshake + auth) between the initial fetch above and
-            // this channel actually reaching SUBSCRIBED.
-            fetchDoctorLists()
-          }
-        })
-
-      channelRef.current = channel
-    })()
-
-    return () => {
-      mounted = false
-      if (channelRef.current) supabase.removeChannel(channelRef.current)
-    }
-  }, [user])
-
-  // Upcoming appointment widget — kept live so a freshly-booked/rescheduled/
-  // cancelled consultation reflects here immediately without a manual
-  // refresh, matching the dedicated Appointments tab (app/(patient)/(tabs)/
-  // appointments.tsx). Real post-booking statuses are 'scheduled' (paid
-  // scheduled booking) and 'waiting_for_doctor' (on-demand/activated) —
-  // 'pending'/'active' were never actually written by book_appointment_slot().
-  useEffect(() => {
-    if (!user) return
-    let mounted = true
-    let channel: ReturnType<typeof supabase.channel> | null = null
-
-    const loadUpcomingAppointment = async (client: ReturnType<typeof getAuthClient>, patientId: string) => {
-      const apptRes = await client
-        .from('consultations')
-        .select('id, type, scheduled_at, doctor_profiles!inner(users!inner(full_name))')
-        .eq('patient_id', patientId)
-        .in('status', ['scheduled', 'waiting_for_doctor', 'accepted', 'in_progress', 'active'])
-        .order('scheduled_at', { ascending: true })
-        .limit(1)
-      if (!mounted) return
-      if (apptRes.data?.length) {
-        const appt = apptRes.data[0] as any
-        const d = new Date(appt.scheduled_at)
-        const next = {
-          doctorName: formatDoctorName((appt.doctor_profiles as any)?.users?.full_name, 'Doctor'),
-          type: appt.type ?? 'chat',
-          date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-          time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        }
-        setUpcomingAppointment(next)
-        if (upcomingAppointmentCacheKey) setCachedJson(upcomingAppointmentCacheKey, next)
-      } else {
-        setUpcomingAppointment(null)
-        if (upcomingAppointmentCacheKey) setCachedJson(upcomingAppointmentCacheKey, null)
-      }
-      setLoadingAppointment(false)
-    }
-
-    // Paint the last-known upcoming appointment immediately (memory/disk)
-    // instead of the "No upcoming appointments" empty state, which used to
-    // flash on every mount until the token->user-id->consultations chain
-    // below resolved.
-    if (upcomingAppointmentCacheKey) {
-      getCachedJson<typeof upcomingAppointment>(upcomingAppointmentCacheKey).then((cached) => {
-        if (mounted && cached !== undefined) setUpcomingAppointment(cached)
-      })
-    }
-
-    ;(async () => {
-      try {
-      const token = await getToken()
-      if (!token) { if (mounted) setLoadingAppointment(false); return }
-      if (!mounted) return
-      const client = getAuthClient(token)
-      const { data: me } = await client.from('users').select('id').eq('clerk_id', user.id).maybeSingle()
-      if (!me) { if (mounted) setLoadingAppointment(false); return }
-      if (!mounted) return
-
-      await loadUpcomingAppointment(client, (me as any).id)
-      if (!mounted) return
-
-      const topic = `patient-home-upcoming-${(me as any).id}`
-      // See doctors.tsx / incoming-request.tsx: a stale same-topic channel
-      // can still be registered on the client when removeChannel's teardown
-      // from a prior mount hasn't finished — supabase.channel() would then
-      // hand back that already-subscribed instance and .on() below would
-      // throw "cannot add postgres_changes callbacks after subscribe()".
-      const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
-      if (stale) supabase.removeChannel(stale)
-      channel = supabase
-        .channel(topic)
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${(me as any).id}` },
-          async () => {
-            const freshToken = await getToken()
-            if (!freshToken || !mounted) return
-            await loadUpcomingAppointment(getAuthClient(freshToken), (me as any).id)
-          }
-        )
-        .subscribe()
-      } catch {
-        // Network failure anywhere above previously escaped this IIFE
-        // uncaught, leaving loadingAppointment stuck true forever (none of
-        // the explicit early-return branches above run on a thrown error).
-        if (mounted) setLoadingAppointment(false)
-      }
-    })()
-
-    return () => {
-      mounted = false
-      if (channel) supabase.removeChannel(channel)
-    }
-  }, [user, getToken])
-
-  // Tab screens stay mounted across tab switches, so the mount-only effect
-  // above never sees a doctor's photo edited while this tab was in the
-  // background — re-fetch both lists on every return to this tab. Realtime
-  // is_online/availability state is preserved via mergeKnownRealtime.
+  // Tab screens stay mounted across tab switches, so the hook's own realtime
+  // subscription (UPDATE-only) never sees a newly-approved doctor appear —
+  // re-fetch on every return to this tab, same as before.
   useFocusEffect(
     useCallback(() => {
-      let cancelled = false
-      ;(async () => {
-        const [onlineRes, topRes] = await Promise.all([
-          supabase
-            .from('doctor_profiles')
-            .select('*, users!inner(full_name, profile_photo_url)')
-            .eq('status', 'approved')
-            .eq('is_online', true)
-            .order('rating_average', { ascending: false })
-            .limit(8),
-          supabase
-            .from('doctor_profiles')
-            .select('*, users!inner(full_name, profile_photo_url)')
-            .eq('status', 'approved')
-            .order('rating_average', { ascending: false })
-            .limit(8),
-        ])
-        if (cancelled) return
-        if (onlineRes.data) setOnlineDoctors(mergeKnownRealtime(onlineRes.data.map(mapDoctor)))
-        if (topRes.data) setTopDoctors(mergeKnownRealtime(topRes.data.map(mapDoctor)))
-      })()
-      return () => { cancelled = true }
-    }, [])
+      refreshDoctors()
+    }, [refreshDoctors])
   )
 
   const firstName =

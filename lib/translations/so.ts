@@ -164,6 +164,9 @@ const so: TranslationKeys = {
   // Messages
   messages: 'Farriimaaha',
   searchConversations: 'Sheekooyin raadi...',
+  allChats: 'Dhammaan',
+  activeChats: 'Firfircoon',
+  endedChats: 'Dhammaaday',
   noMessages: 'Weli fariin ma jirto',
   noMessagesDesc: 'Bilow la-tashiga si aad u xarriiqdo',
 
@@ -347,6 +350,14 @@ const so: TranslationKeys = {
   noRecordsYet: 'Wali diiwaanno ma jiraan',
   noRecordsDesc: 'Soo koobidda la-talintaada iyo qarbiyada waxay halkan ka muuqdaan ka dib la-talintaadii koowaad.',
   uploadNewDocument: 'Dukumentiga Cusub Soo Geli',
+  uploading: 'Soo gelinaya…',
+  uploaded: 'La soo geliyay',
+  uploadedSuccessfully: 'si guul leh ayaa loo soo geliyay.',
+  uploadFailed: 'Soo Gelintii Way Fashilantay',
+  uploadedByYou: 'Adiga ayaa soo geliyay',
+  userNotFound: 'Isticmaale lama helin.',
+  authFailed: 'Khalad xaqiijin ah.',
+  tryAgain: 'Fadlan isku day mar kale.',
   close: 'Xir',
 
   searchCountry: 'Wadanka raadi...',
@@ -430,6 +441,10 @@ const so: TranslationKeys = {
   done: 'Dhamee',
   rateYourExperience: 'Khibradda Qiimee',
   pleaseRateFirst: 'Fadlan la-talinta qiimee ka hor inta aadan gudbin.',
+  commentRequiredError: 'Fadlan faallo ka dhig ka hor inta aadan gudbin qiimeyntaada.',
+  ratingSuccessTitle: 'Mahadsanid!',
+  ratingSuccessMessage: 'Qiimeyntaadu si guul leh ayaa loo gudbiyay. Jawaabtaadu waxay caawisaa horumarinta tayada daryeelka bukaannada kale.',
+  continueButton: 'Sii Wad',
 
   // Notification settings note
   notifDeviceSettingsNote: 'Ogeysiisyada push waxaa lagu maareeya goobaha qalabkaaga.',
@@ -530,6 +545,7 @@ const so: TranslationKeys = {
   chatOpenAutoNote: 'Sheekadu si toos ah ayay u furmaysaa\nmarka dhakhtarku uu bilaabo xaaladda.',
   consultationEnded: 'Tashanaha waxa dhammaatay',
   consultationEndedBanner: 'Tashanaha waxa dhammaatay · Xidhiidhkani waa akhrin kaliya',
+  typing: 'Wax ayuu qorayaa…',
   end: 'Dhammee',
   leaveConsultation: 'Ma Tagi Doontaa Tashanaha?',
   leaveConsultationMsg: 'Waxaad dib uga bilaabi kartaa tab-ka Ballammada.',

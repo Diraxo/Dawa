@@ -8,6 +8,7 @@ import {
   Alert,
   AppState,
   AppStateStatus,
+  BackHandler,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -523,6 +524,21 @@ export default function ChatConsultationScreen() {
       router.replace('/(patient)/(tabs)/messages' as never)
     }
   }
+
+  // Android hardware back previously bypassed the "leave consultation"
+  // confirmation above entirely (no BackHandler listener existed), falling
+  // through to the native stack's default pop instead of this screen's own
+  // routing — kept current via a ref so the listener (registered once) always
+  // runs the latest handleBack, not a stale closure over consultationState.
+  const handleBackRef = useRef(handleBack)
+  handleBackRef.current = handleBack
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleBackRef.current()
+      return true
+    })
+    return () => sub.remove()
+  }, [])
 
   const handleAvatarPress = async () => {
     if (!doctorProfile && channelId) {

@@ -151,6 +151,9 @@ const ar: TranslationKeys = {
 
   messages: 'الرسائل',
   searchConversations: 'ابحث في المحادثات...',
+  allChats: 'الكل',
+  activeChats: 'نشط',
+  endedChats: 'منتهٍ',
   noMessages: 'لا توجد رسائل بعد',
   noMessagesDesc: 'ابدأ استشارة للتحدث',
 
@@ -333,6 +336,14 @@ const ar: TranslationKeys = {
   noRecordsYet: 'لا توجد سجلات بعد',
   noRecordsDesc: 'ستظهر ملخصات استشاراتك والوصفات الطبية هنا بعد استشارتك الأولى.',
   uploadNewDocument: 'رفع مستند جديد',
+  uploading: 'جارٍ الرفع…',
+  uploaded: 'تم الرفع',
+  uploadedSuccessfully: 'تم رفعه بنجاح.',
+  uploadFailed: 'فشل الرفع',
+  uploadedByYou: 'تم الرفع بواسطتك',
+  userNotFound: 'المستخدم غير موجود.',
+  authFailed: 'خطأ في المصادقة.',
+  tryAgain: 'يرجى المحاولة مرة أخرى.',
   close: 'إغلاق',
 
   searchCountry: 'ابحث عن الدولة...',
@@ -416,6 +427,10 @@ const ar: TranslationKeys = {
   done: 'تم',
   rateYourExperience: 'قيّم تجربتك',
   pleaseRateFirst: 'يرجى تقييم استشارتك قبل الإرسال.',
+  commentRequiredError: 'يرجى ترك تعليق قبل إرسال تقييمك.',
+  ratingSuccessTitle: 'شكرًا لك!',
+  ratingSuccessMessage: 'تم إرسال تقييمك بنجاح. ملاحظاتك تساعد في تحسين جودة الرعاية للمرضى الآخرين.',
+  continueButton: 'متابعة',
 
   // Notification settings note
   notifDeviceSettingsNote: 'تُدار أذونات الإشعارات الفورية في إعدادات جهازك.',
@@ -516,6 +531,7 @@ const ar: TranslationKeys = {
   chatOpenAutoNote: 'ستفتح الدردشة تلقائيًا\nبمجرد بدء الطبيب للجلسة.',
   consultationEnded: 'انتهت الاستشارة',
   consultationEndedBanner: 'انتهت الاستشارة · هذه المحادثة للقراءة فقط',
+  typing: 'يكتب الآن…',
   end: 'إنهاء',
   leaveConsultation: 'مغادرة الاستشارة؟',
   leaveConsultationMsg: 'يمكنك إعادة الانضمام من تبويب المواعيد.',

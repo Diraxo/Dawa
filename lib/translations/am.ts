@@ -151,6 +151,9 @@ const am: TranslationKeys = {
 
   messages: 'መልዕክቶች',
   searchConversations: 'ውይይቶች ፈልጉ...',
+  allChats: 'ሁሉም',
+  activeChats: 'ንቁ',
+  endedChats: 'ያለቀ',
   noMessages: 'እስካሁን መልዕክት የለም',
   noMessagesDesc: 'ለመወያየት ምክክር ጀምሩ',
 
@@ -333,6 +336,14 @@ const am: TranslationKeys = {
   noRecordsYet: 'ገና መዝገቦች የሉም',
   noRecordsDesc: 'የምክክር ማጠቃለያዎችዎ እና ቅዳሴዎች ከመጀመሪያ ምክክርዎ በኋላ እዚህ ይታያሉ።',
   uploadNewDocument: 'አዲስ ሰነድ ስቀል',
+  uploading: 'በመስቀል ላይ…',
+  uploaded: 'ተሰቅሏል',
+  uploadedSuccessfully: 'በተሳካ ሁኔታ ተሰቅሏል።',
+  uploadFailed: 'መስቀል አልተሳካም',
+  uploadedByYou: 'በእርስዎ የተሰቀለ',
+  userNotFound: 'ተጠቃሚ አልተገኘም።',
+  authFailed: 'የማረጋገጫ ስህተት።',
+  tryAgain: 'እባክዎ እንደገና ይሞክሩ።',
   close: 'ዝጋ',
 
   searchCountry: 'ሀገር ፈልጉ...',
@@ -416,6 +427,10 @@ const am: TranslationKeys = {
   done: 'ጨርስ',
   rateYourExperience: 'ተሞክሮዎን ይዝኑ',
   pleaseRateFirst: 'ከማስገቡ በፊት ምክክሩን ይዝኑ።',
+  commentRequiredError: 'ግምገማዎን ከማስገባትዎ በፊት አስተያየት ይተው።',
+  ratingSuccessTitle: 'እናመሰግናለን!',
+  ratingSuccessMessage: 'ግምገማዎ በተሳካ ሁኔታ ገብቷል። አስተያየትዎ ለሌሎች ታካሚዎች የእንክብካቤ ጥራትን ለማሻሻል ይረዳል።',
+  continueButton: 'ቀጥል',
 
   // Notification settings note
   notifDeviceSettingsNote: 'የፑሽ ማሳወቂያ ፈቃዶች በመሳሪያዎ ቅንብሮች ውስጥ ይተዳደራሉ።',
@@ -516,6 +531,7 @@ const am: TranslationKeys = {
   chatOpenAutoNote: 'ዶክተሩ ክፍለ-ጊዜውን ሲጀምሩ\nወሬ በራስ-ሰር ይከፈታል።',
   consultationEnded: 'ምክሩ ተጠናቋል',
   consultationEndedBanner: 'ምክሩ ተጠናቋል · ይህ ውይይት ለማንበብ ብቻ ነው',
+  typing: 'እየጻፈ ነው…',
   end: 'አቁም',
   leaveConsultation: 'ምክሩን ትወጣሉ?',
   leaveConsultationMsg: 'ከቀጠሮዎች ትር ዳግም መቀላቀል ይችላሉ።',

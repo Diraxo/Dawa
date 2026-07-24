@@ -608,6 +608,16 @@ export default function EditPersonalInfoScreen() {
   const [dbPhotoUrl, setDbPhotoUrl] = useState<string | null>(null)
   const [photoRemoved, setPhotoRemoved] = useState(false)
 
+  // Snapshot of what the DB actually had at load time (or the same defaults
+  // the fields started at, if the load silently failed) — handleSave only
+  // writes phone/country/address if they differ from this, so a failed
+  // background fetch can never overwrite the patient's real saved values
+  // with blanks just because they saved an unrelated field (e.g. gender).
+  // Mirrors the doctor-side pattern in app/(doctor)/edit-profile.tsx.
+  const initialPhoneRef = useRef('')
+  const initialCountryRef = useRef(selectedCountry ?? '')
+  const initialAddressRef = useRef('')
+
   const defaultDob: DateValue = useMemo(() => ({ day: 1, month: 0, year: 10 }), [])
   const [dob, setDob] = useState<DateValue>(defaultDob)
   const [dobError, setDobError] = useState('')
@@ -631,24 +641,32 @@ export default function EditPersonalInfoScreen() {
       if (!token) { setCountry(selectedCountry ?? ''); return }
       const client = getAuthClient(token)
 
-      const { data: ud } = await client
+      const { data: ud, error: udError } = await client
         .from('users')
         .select('id, phone, country, address, profile_photo_url')
         .eq('clerk_id', user!.id)
         .single()
+      if (udError) console.error('Failed to load user profile:', udError)
 
       if (ud) {
         setSupabaseUserId((ud as any).id)
-        setPhone((ud as any).phone ?? '')
-        setCountry((ud as any).country ?? selectedCountry ?? '')
-        setAddress((ud as any).address ?? '')
+        const loadedPhone = (ud as any).phone ?? ''
+        const loadedCountry = (ud as any).country ?? selectedCountry ?? ''
+        const loadedAddress = (ud as any).address ?? ''
+        setPhone(loadedPhone)
+        setCountry(loadedCountry)
+        setAddress(loadedAddress)
         setDbPhotoUrl((ud as any).profile_photo_url ?? null)
+        initialPhoneRef.current = loadedPhone
+        initialCountryRef.current = loadedCountry
+        initialAddressRef.current = loadedAddress
 
-        const { data: pp } = await client
+        const { data: pp, error: ppError } = await client
           .from('patient_profiles')
           .select('date_of_birth, gender')
           .eq('user_id', ud.id)
           .single()
+        if (ppError) console.error('Failed to load patient profile:', ppError)
 
         if (pp) {
           setGender(pp.gender ? (GENDER_DB_TO_UI[pp.gender] ?? '') : '')

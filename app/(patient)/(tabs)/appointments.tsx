@@ -1,10 +1,9 @@
-import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import { useFocusEffect, useScrollToTop } from '@react-navigation/native'
+import { useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { Image } from 'expo-image'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   FlatList,
@@ -22,18 +21,9 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
+import { usePatientAppointments, type PatientAppointment } from '@/hooks/usePatientAppointments'
 import { shadow } from '@/lib/shadow'
-import { getAuthClient, supabase } from '@/lib/supabase'
-import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
-import { formatDoctorName } from '@/lib/nameFormat'
 import { useTranslation } from 'react-i18next'
-
-interface FollowupReminder {
-  id: string
-  remind_at: string
-  message: string | null
-  consultation_id: string
-}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,40 +64,34 @@ function timeLbl(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 }
 
-// On-demand bookings set scheduled_at = new Date() which has non-zero seconds.
-// Scheduled slot times are always parsed as HH:MM:00 (zero seconds).
-function isOnDemandRow(row: any): boolean {
-  if (!row.scheduled_at) return true
-  const s = new Date(row.scheduled_at)
-  return s.getSeconds() !== 0 || s.getMilliseconds() !== 0
-}
-
-function mapAppointment(row: any, todayLabel: string, tomorrowLabel: string): Appointment {
-  const dp = row.doctor_profiles as any
-  // scheduledAt drives sorting, join params, and reschedule — keep it exactly
-  // as before (the booked slot time), untouched by the display-timestamp fix below.
-  const iso = row.scheduled_at ?? row.created_at ?? new Date().toISOString()
+// Adapts the shared hook's already-fetched-and-classified appointment into
+// this screen's display shape — the fetch/classification itself now lives in
+// usePatientAppointments so Home and this screen can never disagree about
+// which consultations are upcoming vs past. This mapping is pure/local (only
+// date/time label formatting, driven by `t`), so it can never retrigger a
+// fetch or reset the loading state the way the old per-screen effect did.
+function toDisplay(a: PatientAppointment, todayLabel: string, tomorrowLabel: string): Appointment {
   // The card's displayed date/time uses the same fallback chain as the
   // doctor-side and website surfaces (started_at first) so both roles show
   // the identical timestamp for the identical consultation.
-  const displayIso = row.started_at ?? row.scheduled_at ?? row.created_at ?? new Date().toISOString()
+  const displayIso = a.startedAt ?? a.scheduledAt ?? a.createdAt
   return {
-    id: row.id,
-    doctorId: dp?.id ?? '',
-    doctorUserId: dp?.users?.id ?? '',
-    doctorName: formatDoctorName(dp?.users?.full_name, 'Doctor'),
-    doctorSpecialty: dp?.specialty ?? 'General',
-    doctorHospital: dp?.hospital_name ?? '',
-    doctorIsOnline: dp?.is_online ?? false,
-    doctorPhotoUrl: dp?.users?.profile_photo_url ?? null,
-    doctorStatus: dp?.status ?? null,
-    type: (row.type ?? 'chat') as ConsultationType,
-    scheduledAt: iso,
+    id: a.id,
+    doctorId: a.doctorId,
+    doctorUserId: a.doctorUserId,
+    doctorName: a.doctorName,
+    doctorSpecialty: a.doctorSpecialty,
+    doctorHospital: a.doctorHospital,
+    doctorIsOnline: a.doctorIsOnline,
+    doctorPhotoUrl: a.doctorPhotoUrl,
+    doctorStatus: a.doctorStatus,
+    type: a.type,
+    scheduledAt: a.scheduledAt,
     dateLabel: dateLbl(displayIso, todayLabel, tomorrowLabel),
     timeLabel: timeLbl(displayIso),
-    status: (row.status ?? 'pending') as Appointment['status'],
-    amount: Number(row.patient_amount) || 0,
-    isOnDemand: isOnDemandRow(row),
+    status: a.status as Appointment['status'],
+    amount: a.amount,
+    isOnDemand: a.isOnDemand,
   }
 }
 
@@ -639,42 +623,29 @@ const emptyStyles = StyleSheet.create({
 export default function AppointmentsScreen() {
   const { t } = useTranslation()
   const router = useRouter()
-  const { getToken, userId: clerkUserId } = useAuth()
   const { tab: tabParam } = useLocalSearchParams<{ tab?: string }>()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
   const guardNav = useNavGuard()
   const [activeTab, setActiveTab] = useState<AppointmentTab>(tabParam === 'past' ? 'past' : 'upcoming')
-  const [upcoming, setUpcoming] = useState<Appointment[]>([])
-  const [past, setPast] = useState<Appointment[]>([])
-  // True until the first fetch (this mount/focus) actually completes — gates
-  // the FlatList's empty state so "No upcoming/past appointments" can only
-  // ever render once the server has genuinely confirmed there are none, not
-  // just because `upcoming`/`past` haven't been populated yet.
-  const [isLoading, setIsLoading] = useState(true)
-  // Mirrors upcoming/past so the users-table realtime handler (below) can
-  // check "is this changed doctor one of mine?" without a stale closure.
-  const upcomingRef = useRef<Appointment[]>([])
-  const pastRef = useRef<Appointment[]>([])
-  useEffect(() => { upcomingRef.current = upcoming }, [upcoming])
-  useEffect(() => { pastRef.current = past }, [past])
-  const [reminders, setReminders] = useState<FollowupReminder[]>([])
-  const upcomingCacheKey = clerkUserId ? `patient-appointments-upcoming:${clerkUserId}` : null
-  const pastCacheKey = clerkUserId ? `patient-appointments-past:${clerkUserId}` : null
 
-  // Paint the last-known lists from disk immediately on mount, before the
-  // real fetch below even starts.
-  useEffect(() => {
-    if (!upcomingCacheKey || !pastCacheKey) return
-    let cancelled = false
-    getCachedJson<Appointment[]>(upcomingCacheKey).then((cached) => {
-      if (cached && !cancelled) setUpcoming(cached)
-    })
-    getCachedJson<Appointment[]>(pastCacheKey).then((cached) => {
-      if (cached && !cancelled) setPast(cached)
-    })
-    return () => { cancelled = true }
-  }, [upcomingCacheKey, pastCacheKey])
+  // Single source of truth, shared with the Home screen's Upcoming
+  // Appointment widget — see hooks/usePatientAppointments.ts. `isLoading` is
+  // only ever true before the first fetch for this user has resolved; a
+  // realtime-triggered refresh never flips it back on, so the list can never
+  // flicker back to a loading/empty state once real data has been shown.
+  const { upcoming: rawUpcoming, past: rawPast, reminders, isLoading } = usePatientAppointments()
+
+  const todayLabel = t('today')
+  const tomorrowLabel = t('tomorrow')
+  const upcoming = useMemo(
+    () => rawUpcoming.map((a) => toDisplay(a, todayLabel, tomorrowLabel)),
+    [rawUpcoming, todayLabel, tomorrowLabel]
+  )
+  const past = useMemo(
+    () => rawPast.map((a) => toDisplay(a, todayLabel, tomorrowLabel)),
+    [rawPast, todayLabel, tomorrowLabel]
+  )
 
   // This tab screen stays mounted across tab switches, so a plain useState
   // initializer only wins on first-ever mount — re-navigating here with a
@@ -683,153 +654,6 @@ export default function AppointmentsScreen() {
   useEffect(() => {
     if (tabParam === 'past' || tabParam === 'upcoming') setActiveTab(tabParam)
   }, [tabParam])
-
-  const loadAppointments = useCallback(async (client: ReturnType<typeof getAuthClient>, patientId: string) => {
-    const [{ data }, { data: reminderData }] = await Promise.all([
-      client
-        .from('consultations')
-        .select(`
-          id, type, status, payment_status, scheduled_at, started_at, created_at, patient_amount,
-          doctor_profiles!inner(id, specialty, hospital_name, is_online, status, users!inner(id, full_name, profile_photo_url))
-        `)
-        .eq('patient_id', patientId)
-        .order('scheduled_at', { ascending: false }),
-      client
-        .from('followup_reminders')
-        .select('id, remind_at, message, consultation_id')
-        .eq('patient_id', patientId)
-        .eq('sent', false)
-        .gte('remind_at', new Date().toISOString())
-        .order('remind_at', { ascending: true })
-        .limit(3),
-    ])
-    if (reminderData) setReminders(reminderData as FollowupReminder[])
-    if (!data) return
-
-    const now = new Date()
-    const todayLabel = t('today')
-    const tomorrowLabel = t('tomorrow')
-    const mapAppt = (row: any) => mapAppointment(row, todayLabel, tomorrowLabel)
-
-    // Upcoming: active, scheduled (not yet activated), OR legacy paid-pending scheduled (future only)
-    // Sorted nearest-first (ascending) — the base query orders descending for
-    // "past" to show most-recent-first, so upcoming needs its own re-sort.
-    const nextUpcoming = data.filter(r => {
-        if (r.status === 'active') return true
-        if (r.status === 'scheduled') return true
-        // The doctor has accepted (or the call is already underway) but the
-        // patient hasn't navigated in yet — the realtime recovery listener
-        // in app/_layout.tsx normally sweeps the patient straight into the
-        // call, but this card must still exist (with a working Join button)
-        // for the brief window before that happens, and as a fallback if it
-        // doesn't. Without this branch the row vanished from both tabs the
-        // instant the doctor accepted.
-        if (r.status === 'accepted' || r.status === 'in_progress') return true
-        // A scheduled appointment sits here for the brief window between the
-        // server-time cron activating it (scheduled_at reached) and the
-        // doctor accepting — without this branch the row vanished from both
-        // tabs entirely for that window.
-        if (r.status === 'waiting_for_doctor' && !isOnDemandRow(r)) return true
-        if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
-          return new Date(r.scheduled_at) > now
-        }
-        return false
-      }).map(mapAppt).sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
-    setUpcoming(nextUpcoming)
-    if (upcomingCacheKey) setCachedJson(upcomingCacheKey, nextUpcoming)
-
-    // Past: completed, or cancelled ONLY if payment was already confirmed
-    // (payment-failure cancellations have payment_status='pending' — hide them)
-    const nextPast = data.filter(r => {
-        if (r.status === 'completed') return true
-        if (r.status === 'cancelled' && r.payment_status === 'paid') return true
-        if (r.status === 'pending' && r.payment_status === 'paid' && !isOnDemandRow(r)) {
-          return new Date(r.scheduled_at) <= now
-        }
-        return false
-      }).map(mapAppt)
-    setPast(nextPast)
-    if (pastCacheKey) setCachedJson(pastCacheKey, nextPast)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, upcomingCacheKey, pastCacheKey])
-
-  useFocusEffect(
-    useCallback(() => {
-      let cancelled = false
-      let channel: ReturnType<typeof supabase.channel> | null = null
-      setIsLoading(true)
-
-      getToken().then(async token => {
-        if (!token || cancelled) { if (!cancelled) setIsLoading(false); return }
-        const client = getAuthClient(token)
-        const { data: me } = await client.from('users').select('id').eq('clerk_id', clerkUserId).maybeSingle()
-        if (!me || cancelled) { if (!cancelled) setIsLoading(false); return }
-        await loadAppointments(client, me.id)
-        setIsLoading(false)
-        if (cancelled) return
-
-        // Live-refresh while the tab is focused (new scheduled booking,
-        // reschedule, doctor accepting/declining, cancellation) — the
-        // useFocusEffect re-fetch above only catches changes made while this
-        // tab was NOT focused.
-        channel = supabase
-          .channel(`patient-appointments-${me.id}`)
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'consultations', filter: `patient_id=eq.${me.id}` },
-            async () => {
-              const freshToken = await getToken()
-              if (!freshToken) return
-              await loadAppointments(getAuthClient(freshToken), me.id)
-            }
-          )
-          .on(
-            // A doctor editing their name/photo/bio doesn't touch
-            // `consultations` at all, so the subscription above never fires
-            // for it — without this, a patient sitting on this tab keeps
-            // seeing the doctor's old identity until they navigate away and back.
-            'postgres_changes',
-            { event: 'UPDATE', schema: 'public', table: 'users' },
-            async (payload) => {
-              const updated = payload.new as any
-              const isMyDoctor =
-                upcomingRef.current.some((a) => a.doctorUserId === updated.id) ||
-                pastRef.current.some((a) => a.doctorUserId === updated.id)
-              if (!isMyDoctor) return
-              const freshToken = await getToken()
-              if (!freshToken) return
-              await loadAppointments(getAuthClient(freshToken), me.id)
-            }
-          )
-          .on(
-            // Same gap as above but for doctor_profiles fields (is_online,
-            // specialty, hospital_name) — a doctor going online/offline while
-            // a patient sits on this tab previously stayed frozen at whatever
-            // it was on the last fetch/focus, unlike doctors.tsx/home.tsx
-            // which already subscribe to this table.
-            'postgres_changes',
-            { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
-            async (payload) => {
-              const updated = payload.new as any
-              const isMyDoctor =
-                upcomingRef.current.some((a) => a.doctorId === updated.id) ||
-                pastRef.current.some((a) => a.doctorId === updated.id)
-              if (!isMyDoctor) return
-              const freshToken = await getToken()
-              if (!freshToken) return
-              await loadAppointments(getAuthClient(freshToken), me.id)
-            }
-          )
-          .subscribe()
-      }).catch(() => {
-        // A network failure anywhere in the chain above (no .catch existed
-        // before) otherwise left isLoading stuck true forever, since none of
-        // the explicit early-return branches run on a thrown/rejected error.
-        if (!cancelled) setIsLoading(false)
-      })
-      return () => { cancelled = true; if (channel) supabase.removeChannel(channel) }
-    }, [getToken, clerkUserId, loadAppointments])
-  )
 
   const list = activeTab === 'upcoming' ? upcoming : past
 

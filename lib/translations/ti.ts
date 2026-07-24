@@ -151,6 +151,9 @@ const ti: TranslationKeys = {
 
   messages: 'መልእኽቲ',
   searchConversations: 'ዝርርብ ድለ...',
+  allChats: 'ኩሉ',
+  activeChats: 'ንጡፍ',
+  endedChats: 'ዝተወድአ',
   noMessages: 'ክሳዕ ሕጂ መልእኽቲ የለን',
   noMessagesDesc: 'ንምዝርራብ ምኽሪ ጀምር',
 
@@ -333,6 +336,14 @@ const ti: TranslationKeys = {
   noRecordsYet: 'ገና ዝርዝር የለን',
   noRecordsDesc: 'ናይ ምኽሪ ጸብጻባትካን ናይ ሓኪም ትእዛዛትካን ድሕሪ ፍሉይ ምኽሪ ኣብዚ ይርኤ።',
   uploadNewDocument: 'ሓድሽ ሰነድ ስቀል',
+  uploading: 'ይስቀል ኣሎ…',
+  uploaded: 'ተሰቒሉ',
+  uploadedSuccessfully: 'ብዓወት ተሰቒሉ።',
+  uploadFailed: 'ምስቃል ኣይተዓወተን',
+  uploadedByYou: 'ብኣኻ ተሰቒሉ',
+  userNotFound: 'ተጠቃሚ ኣይተረኸበን።',
+  authFailed: 'ጌጋ ምርግጋጽ።',
+  tryAgain: 'በጃኹም ደጊምኩም ፈትኑ።',
   close: 'ዕጸወ',
 
   searchCountry: 'ሃገር ድለ...',
@@ -416,6 +427,10 @@ const ti: TranslationKeys = {
   done: 'ውዳእ',
   rateYourExperience: 'ተሞክሮካ ግምግምዎ',
   pleaseRateFirst: 'ካብ ምቕራብ ቅድሚ ምኽሪ ምግምጋምካ ተረጋገጽ።',
+  commentRequiredError: 'ግምገማኹም ከተእትዉ ቅድሚ ርእይቶ ይሃቡ።',
+  ratingSuccessTitle: 'የቐንየልና!',
+  ratingSuccessMessage: 'ግምገማኹም ብዓወት ተሓቲሙ። ርእይቶኹም ንኻልኦት ሕሙማት ጽሬት ክንክን ንምምሕያሽ ይሕግዝ።',
+  continueButton: 'ቀጽል',
 
   // Notification settings note
   notifDeviceSettingsNote: 'ፍቓዳት ኣድጋፍ ምልክት push ኣብ ቅጥዕቲ መሳርሒካ ይምራሕ።',
@@ -516,6 +531,7 @@ const ti: TranslationKeys = {
   chatOpenAutoNote: 'ዶክተር ኣኼባ ምስ ጀመሩ\nዝርርብ ብኣውቶማቲክ ክፉት ይኸውን።',
   consultationEnded: 'ምኽሪ ተወዲኡ',
   consultationEndedBanner: 'ምኽሪ ተወዲኡ · እዚ ዝርርብ ምንባብ ጥራይ ዝፍቀደሉ እዩ',
+  typing: 'ይጽሕፍ ኣሎ…',
   end: 'ወዳእ',
   leaveConsultation: 'ካብ ምኽሪ ትወጽእ?',
   leaveConsultationMsg: 'ካብ ትሕዝቶ ቆጸራ ዳግም ክትጽንበር ትኽእል ኢኻ።',

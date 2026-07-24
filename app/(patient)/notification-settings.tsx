@@ -3,6 +3,7 @@ import { useAuth } from '@clerk/clerk-expo'
 import { useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -86,17 +87,26 @@ export default function NotificationSettingsScreen() {
     return () => { cancelled = true }
   }, [])
 
-  // Debounced save to Supabase
-  const savePrefs = (next: Record<PrefKey, boolean>) => {
+  // Debounced save to Supabase. Reverts the optimistic toggle and alerts on
+  // failure — previously the error from `upsert` was never even read, so a
+  // failed save left the switch showing the opposite of what the server
+  // actually had stored, with no indication anything went wrong.
+  const savePrefs = (next: Record<PrefKey, boolean>, previous: Record<PrefKey, boolean>) => {
     if (!userIdRef.current) return
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(async () => {
-      const token = await getToken()
-      if (!token) return
-      const client = getAuthClient(token)
-      await client
-        .from('notification_preferences')
-        .upsert({ user_id: userIdRef.current!, ...next }, { onConflict: 'user_id' })
+      try {
+        const token = await getToken()
+        if (!token) throw new Error('no token')
+        const client = getAuthClient(token)
+        const { error } = await client
+          .from('notification_preferences')
+          .upsert({ user_id: userIdRef.current!, ...next }, { onConflict: 'user_id' })
+        if (error) throw error
+      } catch {
+        setToggles(previous)
+        Alert.alert(t('profileSaveError'), t('tryAgain'))
+      }
     }, 600)
   }
 
@@ -121,7 +131,7 @@ export default function NotificationSettingsScreen() {
   const toggle = (id: string) => {
     setToggles((prev) => {
       const next = { ...prev, [id]: !prev[id] } as Record<PrefKey, boolean>
-      savePrefs(next)
+      savePrefs(next, prev)
       return next
     })
   }
@@ -131,7 +141,7 @@ export default function NotificationSettingsScreen() {
     const enabled = !allEnabled
     setToggles((prev) => {
       const next = Object.fromEntries(Object.keys(prev).map((k) => [k, enabled])) as Record<PrefKey, boolean>
-      savePrefs(next)
+      savePrefs(next, prev)
       return next
     })
   }

@@ -26,6 +26,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { formatDoctorName } from '@/lib/nameFormat'
+import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { validatePickedFile, safeFilename } from '@/lib/fileValidation'
@@ -85,6 +86,20 @@ export default function MedicalRecordsScreen() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string } | null>(null)
+  const recordsCacheKey = user?.id ? `patient-medical-records:${user.id}` : null
+
+  // Paint the last-known record list from disk immediately on mount so
+  // returning to this screen shows real cards instead of a full-screen
+  // spinner every time — the fetch below still runs and replaces it with
+  // fresh data.
+  useEffect(() => {
+    if (!recordsCacheKey) return
+    let cancelled = false
+    getCachedJson<MedicalRecord[]>(recordsCacheKey).then((cached) => {
+      if (cached && !cancelled) setRecords(cached)
+    })
+    return () => { cancelled = true }
+  }, [recordsCacheKey])
 
   useEffect(() => {
     if (!user?.id) return
@@ -172,6 +187,7 @@ export default function MedicalRecordsScreen() {
         }
 
         setRecords(result)
+        if (recordsCacheKey) setCachedJson(recordsCacheKey, result)
       } finally {
         setLoading(false)
       }
@@ -417,7 +433,7 @@ export default function MedicalRecordsScreen() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {loading ? (
+        {loading && records.length === 0 ? (
           <ActivityIndicator color={colors.careBlue} style={{ marginTop: 60 }} />
         ) : filtered.length === 0 ? (
           <View style={styles.emptyWrap}>
