@@ -611,12 +611,34 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         // real Chapa refund API if this consultation is later cancelled or
         // declined. No real money was collected here, so no refund must ever
         // be attempted, and no Chapa endpoint must ever be contacted.
-        await client
-          .from('consultations')
-          .update({ payment_status: 'paid' })
-          .eq('id', consultationId)
-          .eq('status', 'pending_payment')
-          .neq('payment_status', 'paid')
+        //
+        // The payment_status flip itself must go through the dev-payment-
+        // bypass edge function (service-role), not a direct client update —
+        // migration 089's financial-column guard trigger rejects any
+        // non-service-role write to payment_status, which used to make this
+        // write fail silently (never checked) and leave the patient stuck on
+        // the verification screen forever.
+        //
+        // Fetches a fresh token rather than reusing the one captured before
+        // the confirmation Alert above — the user can leave that dialog open
+        // arbitrarily long, and this mirrors the live Chapa path's own
+        // just-in-time token fetch right before initialize-payment below.
+        const bypassToken = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+        const bypassResp = await fetch(`${supabaseUrl}/functions/v1/dev-payment-bypass`, {
+          method: 'POST',
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${bypassToken}`,
+            'apikey':        supabaseAnonKey,
+          },
+          body: JSON.stringify({ consultation_id: consultationId }),
+        })
+
+        if (!bypassResp.ok) {
+          let bypassMsg = 'Dev payment bypass failed.'
+          try { bypassMsg = (await bypassResp.json())?.error ?? bypassMsg } catch {}
+          throw new Error(bypassMsg)
+        }
 
         navigateToReturn('success', consultationId, scheduledAt)
         return
@@ -738,10 +760,17 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       if (consultationId) {
         const token = await getToken().catch(() => null)
         if (token) {
+          // Guarded to payment_status='pending': an exception here (e.g. a
+          // network blip while opening the checkout) doesn't mean the Chapa
+          // payment itself failed — initialize-payment above may have already
+          // succeeded and chapa-webhook may confirm it moments later. Without
+          // this guard a booking that actually got paid could be cancelled
+          // out from under a payment already in flight.
           getAuthClient(token)
             .from('consultations')
             .update({ status: 'cancelled' })
             .eq('id', consultationId)
+            .eq('payment_status', 'pending')
             .then(() => {})
         }
       }
@@ -980,7 +1009,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
                         <Text style={styles.pickerLabel}>Select Time</Text>
                         {slots.length === 0 ? (
                           <View style={styles.noSlotsWrap}>
-                            <Text style={styles.noSlotsText}>No time slots available for this day.</Text>
+                            <Text style={styles.noSlotsText}>Doctor is not available on this day.</Text>
                           </View>
                         ) : (
                           <>

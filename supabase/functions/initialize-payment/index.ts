@@ -170,7 +170,7 @@ Deno.serve(async (req: Request) => {
   // ── Verify ownership of consultation_id and derive the real amount ────────
   const { data: consult, error: consultErr } = await supabase
     .from('consultations')
-    .select('id, patient_amount, payment_status, type, patient:users!patient_id(clerk_id)')
+    .select('id, patient_amount, payment_status, type, chapa_tx_ref, patient:users!patient_id(clerk_id)')
     .eq('id', consultation_id)
     .single()
 
@@ -243,11 +243,21 @@ Deno.serve(async (req: Request) => {
     )
   }
 
+  // Reuse the tx_ref already on this consultation if one is active — minting a
+  // fresh one on every call (double-tap, retry after a slow/timed-out request,
+  // app relaunch mid-checkout) orphaned the old tx_ref, which chapa-webhook
+  // looks up with an exact match. Chapa's callback for the abandoned tx_ref
+  // then silently matched nothing and the payment confirmation was lost.
+  // Safe to reuse unconditionally here: payment_status === 'paid' already
+  // returned 409 above, so any existing chapa_tx_ref belongs to a still-open
+  // (or failed/expired) session that hasn't been confirmed yet.
+  //
   // tx_ref must be ≤ 50 chars (Chapa limit).
   // Strip UUID hyphens (36→32 chars), take first 20, append base-36 timestamp (~9 chars).
   // Format: dw-{20 hex chars}-{base36 ts} = 3+20+1+9 = 33 chars max.
+  const existingTxRef = (consult as any).chapa_tx_ref as string | null
   const shortId = consultation_id.replace(/-/g, '').slice(0, 20)
-  const tx_ref  = `dw-${shortId}-${Date.now().toString(36)}`
+  const tx_ref  = existingTxRef || `dw-${shortId}-${Date.now().toString(36)}`
 
   const chapaPayload = {
     amount:   amount.toString(),

@@ -199,24 +199,54 @@ Deno.serve(async (req: Request) => {
   // in that window, the row is stuck at 'pending_payment' forever — invisible
   // to every doctor-facing query (Upcoming Appointments, Today's Schedule)
   // and no booking/reschedule notification ever fires. Attempt the same flip
-  // here too, guarded to only ever touch a row still at 'pending_payment' —
-  // a no-op once the client's own fast path already ran.
+  // here too.
+  //
+  // Also covers 'cancelled': the client gives up and writes status='cancelled'
+  // whenever it can't confirm payment itself (crash, timeout, dropped network,
+  // the user's own "I didn't complete payment" button) — all of that happens
+  // on the client's own incomplete view of the world, racing against Chapa's
+  // real settlement, which can still land here afterward. Without this, that
+  // race leaves a row permanently stuck at payment_status='paid' AND
+  // status='cancelled': the patient was actually charged but the doctor was
+  // never notified, no waiting room ever appears, and nothing is scheduled —
+  // silent money-captured-nothing-happens, requiring manual support to find
+  // and fix. Recoverable here because every client-side cancel path only ever
+  // fires from 'pending_payment' (before the consultation ever went live), so
+  // waiting_started_at is guaranteed still null; a cancel of a consultation
+  // that *had* already reached the waiting room (a deliberate, later,
+  // unrelated cancellation) always has waiting_started_at set and is
+  // correctly left alone.
+  //
+  // cancelled_by IS NULL is the second, independent guard: every payment-race
+  // auto-cancel above (BookingModal.tsx catch block, payment-return.tsx
+  // cancelConsultationById) writes status='cancelled' WITHOUT cancelled_by —
+  // it's the client giving up on its own uncertain view, not an attributed
+  // decision. A genuine cancellation — patient's own waiting-room "Cancel"
+  // button, or an admin cancelling via carehub-web's admin console — always
+  // sets cancelled_by (migration 040) to the acting user's id. Admin cancels
+  // in particular can hit a 'scheduled' (future, paid, pre-waiting-room) row,
+  // which also has waiting_started_at still null, so without this check a
+  // delayed webhook could resurrect a consultation an admin deliberately
+  // cancelled. Once cancelled_by is set, this fallback must never touch the
+  // row again — the cancellation was intentional, not a race artifact.
   try {
-    const { data: pendingRow } = await supabase
+    const { data: recoverableRow } = await supabase
       .from('consultations')
       .select('id, created_at, scheduled_at, is_on_demand')
       .eq('chapa_tx_ref', trx_ref)
-      .eq('status', 'pending_payment')
+      .in('status', ['pending_payment', 'cancelled'])
+      .is('waiting_started_at', null)
+      .is('cancelled_by', null)
       .maybeSingle()
 
-    if (pendingRow?.scheduled_at && pendingRow?.created_at) {
+    if (recoverableRow?.scheduled_at && recoverableRow?.created_at) {
       // is_on_demand is set once, authoritatively, by book_appointment_slot()
       // at booking time — read directly. Falls back to the proximity
       // heuristic only for rows booked before that column existed.
-      const isOnDemand = pendingRow.is_on_demand != null
-        ? pendingRow.is_on_demand
+      const isOnDemand = recoverableRow.is_on_demand != null
+        ? recoverableRow.is_on_demand
         : Math.abs(
-            new Date(pendingRow.scheduled_at).getTime() - new Date(pendingRow.created_at).getTime()
+            new Date(recoverableRow.scheduled_at).getTime() - new Date(recoverableRow.created_at).getTime()
           ) < 60_000
 
       await supabase
@@ -225,8 +255,10 @@ Deno.serve(async (req: Request) => {
           status: isOnDemand ? 'waiting_for_doctor' : 'scheduled',
           ...(isOnDemand ? { waiting_started_at: new Date().toISOString() } : {}),
         })
-        .eq('id', pendingRow.id)
-        .eq('status', 'pending_payment')
+        .eq('id', recoverableRow.id)
+        .in('status', ['pending_payment', 'cancelled'])
+        .is('waiting_started_at', null)
+        .is('cancelled_by', null)
     }
   } catch (err) {
     console.error('[chapa-webhook] status-flip fallback failed:', err)
