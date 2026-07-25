@@ -30,7 +30,7 @@ const SECTIONS = [
   },
   {
     title: '5. Your Rights',
-    body: `Consistent with data protection principles including the EU General Data Protection Regulation (GDPR), you have the right to:\n\n• Access: Request a copy of all personal data we hold about you.\n• Rectification: Correct inaccurate or incomplete information via the Edit Profile screen, or by contacting us for fields that are locked pending admin review (e.g. license number, country).\n• Erasure: Permanently delete your account and associated personal data via Profile → Delete Account, subject to the retention exceptions in Section 8.\n• Portability: Request your data in a machine-readable format.\n• Restriction & Objection: Ask us to limit or object to certain processing of your data.\n• Withdrawal of Consent: Revoke consent for non-essential data processing at any time.\n\nTo exercise a right that isn't available directly in the app, email privacy@dawa.app and we will act on your request within 30 days. If you are located in the EEA/UK and believe we have not adequately addressed your request, you have the right to lodge a complaint with your local data protection supervisory authority.`,
+    body: `Consistent with data protection principles including the EU General Data Protection Regulation (GDPR), you have the right to:\n\n• Access: Request a copy of all personal data we hold about you.\n• Rectification: Correct inaccurate or incomplete information via the Edit Profile screen, or by contacting us for fields that are locked pending admin review (e.g. license number, country).\n• Erasure: Permanently delete your account and associated personal data via Profile → Delete Account, subject to the retention exceptions in Section 8.\n• Portability: Request your data in a machine-readable format.\n• Restriction & Objection: Ask us to limit or object to certain processing of your data.\n• Withdrawal of Consent: Revoke consent for non-essential data processing at any time.\n\nTo exercise a right that isn't available directly in the app, email dawasupport@gmail.com and we will act on your request within 30 days. If you are located in the EEA/UK and believe we have not adequately addressed your request, you have the right to lodge a complaint with your local data protection supervisory authority.`,
   },
   {
     title: '6. Health Data Handling',
@@ -54,7 +54,7 @@ const SECTIONS = [
   },
   {
     title: '11. Contact Us',
-    body: `If you have questions, concerns, or requests about this Privacy Policy, please contact:\n\nDawa Privacy Team\nEmail: privacy@dawa.app\nSupport: support@dawa.app\nAddress: Addis Ababa, Ethiopia`,
+    body: `If you have questions, concerns, or requests about this Privacy Policy, please contact:\n\nDawa Privacy Team\nEmail: dawasupport@gmail.com\nAddress: Addis Ababa, Ethiopia`,
   },
 ]
 

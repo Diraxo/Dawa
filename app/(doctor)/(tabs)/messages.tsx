@@ -99,6 +99,7 @@ export default function DoctorMessagesScreen() {
               peerName: patientMember?.user?.name ?? 'Patient',
               peerSubtitle: '',
               peerPhotoUrl: (patientMember?.user?.image as string | undefined) ?? null,
+              isVerified: false,
               lastMessage:
                 lastMsg?.text || attachmentPreview(lastMsg?.attachments) || 'No messages yet',
               lastMessageTime: formatTime(lastMsg?.created_at),

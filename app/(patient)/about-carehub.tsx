@@ -110,7 +110,7 @@ export default function AboutDawaScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>{t('contactInformation')}</Text>
           {[
-            { icon: 'mail-outline',     text: 'support@dawa.app' },
+            { icon: 'mail-outline',     text: 'dawasupport@gmail.com' },
             { icon: 'globe-outline',    text: 'www.dawa.app' },
             { icon: 'location-outline', text: 'Addis Ababa, Ethiopia' },
           ].map((item) => (

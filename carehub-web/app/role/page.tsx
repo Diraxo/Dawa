@@ -11,6 +11,19 @@ import LogoMark from '@/components/ui/LogoMark'
 
 type Role = 'patient' | 'doctor'
 
+// A stale `users` row from a previous account (deleted via Clerk Dashboard,
+// or a client-side delete interrupted before its own anonymization update
+// ran) can still hold this email under a different clerk_id — the upsert's
+// onConflict: 'clerk_id' then tries an INSERT, which collides with the
+// separate users_email_key constraint. Not something retrying fixes.
+function describeUpsertError(upsertError: { code?: string; message?: string }): string {
+  const msg = upsertError.message?.toLowerCase() ?? ''
+  if (upsertError.code === '23505' && msg.includes('email')) {
+    return 'This email is already linked to a Dawa account that could not be fully removed. Please contact support to finish clearing it before signing up again.'
+  }
+  return 'Something went wrong while saving your profile. Please try again or contact support.'
+}
+
 export default function RolePage() {
   const { user, isLoaded } = useUser()
   const { getToken } = useAuth()
@@ -57,7 +70,7 @@ export default function RolePage() {
         const token = await getToken()
         if (token) {
           const client = getAuthClient(token)
-          await client.from('users').upsert({
+          const { error: upsertError } = await client.from('users').upsert({
             clerk_id: user.id,
             email: user.emailAddresses[0]?.emailAddress ?? '',
             full_name: user.fullName ?? '',
@@ -66,13 +79,18 @@ export default function RolePage() {
             country: '',
             language: 'en',
           }, { onConflict: 'clerk_id' })
+          if (upsertError) {
+            console.error('[role] users upsert failed:', upsertError)
+            setError(describeUpsertError(upsertError))
+            return
+          }
         }
         router.push(selected === 'patient' ? '/patient' : '/doctor/register')
         return
       }
       const { data: { session } } = await supabaseEmailAuth.auth.getSession()
       if (session?.user) {
-        await supabase.from('users').upsert({
+        const { error: upsertError } = await supabase.from('users').upsert({
           clerk_id: session.user.id,
           email: session.user.email ?? '',
           full_name: (session.user.user_metadata?.full_name as string) ?? '',
@@ -80,6 +98,11 @@ export default function RolePage() {
           country: '',
           language: 'en',
         }, { onConflict: 'clerk_id' })
+        if (upsertError) {
+          console.error('[role] users upsert failed:', upsertError)
+          setError(describeUpsertError(upsertError))
+          return
+        }
       }
       router.push(selected === 'patient' ? '/patient' : '/doctor/register')
     } catch {

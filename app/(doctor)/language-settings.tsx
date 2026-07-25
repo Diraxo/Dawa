@@ -47,7 +47,7 @@ export default function DoctorLanguageSettingsScreen() {
       setAlertState({
         variant: 'success',
         title: 'Language Updated',
-        message: `App language set to ${LANGUAGES.find((l) => l.id === selected)?.englishName}.`,
+        message: `App language set to ${LANGUAGES.find((l) => l.id === selected)?.nativeName}.`,
         onOk: () => router.back(),
       })
     } catch {
@@ -71,11 +71,7 @@ export default function DoctorLanguageSettingsScreen() {
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.banner}>
-          <Text style={styles.bannerFlag}>{currentLang?.flag}</Text>
-          <View>
-            <Text style={styles.bannerTitle}>{currentLang?.nativeName}</Text>
-            <Text style={styles.bannerSub}>{currentLang?.englishName} · {currentLang?.region}</Text>
-          </View>
+          <Text style={styles.bannerTitle}>{currentLang?.nativeName}</Text>
         </LinearGradient>
 
         <Text style={styles.sectionLabel}>{t('selectLanguage')}</Text>
@@ -85,10 +81,8 @@ export default function DoctorLanguageSettingsScreen() {
             return (
               <View key={lang.id}>
                 <Pressable style={({ pressed }) => [styles.langRow, pressed && { backgroundColor: '#F9FAFB' }]} onPress={() => handleSelect(lang.id)}>
-                  <Text style={styles.langFlag}>{lang.flag}</Text>
                   <View style={styles.langTextWrap}>
                     <Text style={[styles.langName, isSelected && styles.langNameSel]}>{lang.nativeName}</Text>
-                    <Text style={styles.langSub}>{lang.englishName} · {lang.region}</Text>
                   </View>
                   {isSelected ? (
                     <LinearGradient colors={gradients.interactive} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.checkCircle}>
@@ -137,18 +131,14 @@ const styles = StyleSheet.create({
   headerTitle: { fontFamily: fonts.bold, fontSize: 18, color: colors.inkBlack },
 
   banner: { borderRadius: 16, padding: 20, flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 24, ...shadow(colors.careBlue, 0, 3, 10, 0.2, 4) },
-  bannerFlag: { fontSize: 40 },
   bannerTitle: { fontFamily: fonts.bold, fontSize: 22, color: colors.mistWhite, marginBottom: 2 },
-  bannerSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.85)' },
 
   sectionLabel: { fontFamily: fonts.semiBold, fontSize: 12, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 10, marginLeft: 4 },
   card: { backgroundColor: colors.mistWhite, borderRadius: 16, overflow: 'hidden', marginBottom: 16, ...shadow('#000', 0, 1, 5, 0.05, 2) },
   langRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 16, gap: 14 },
-  langFlag: { fontSize: 28 },
   langTextWrap: { flex: 1 },
   langName: { fontFamily: fonts.semiBold, fontSize: 16, color: colors.inkBlack, marginBottom: 2 },
   langNameSel: { color: colors.tealGreen },
-  langSub: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
   checkCircle: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   emptyCircle: { width: 28, height: 28, borderRadius: 14, borderWidth: 2, borderColor: colors.steelGrey },
   divider: { height: 1, backgroundColor: colors.cloudGrey, marginLeft: 68 },

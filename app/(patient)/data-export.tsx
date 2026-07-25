@@ -67,7 +67,7 @@ export default function DataExportScreen() {
         .order('created_at', { ascending: false })
 
       const rows = (data ?? []) as any[]
-      const headers = 'ID,Type,Status,Doctor,Specialty,Date,Duration (min),Amount (ETB),Chief Complaint,Diagnosis'
+      const headers = 'ID,Type,Status,Doctor,Specialty,Date,Duration (min),Amount (ETB),Chief Complaint,Diagnosis,Prescription,Follow-up Recommendation,Referral Needed'
       const csv = [
         headers,
         ...rows.map((r: any) => {
@@ -81,6 +81,9 @@ export default function DataExportScreen() {
             r.patient_amount ?? '',
             sum?.chief_complaint ?? '',
             sum?.diagnosis ?? '',
+            sum?.prescription ?? '',
+            sum?.followup_recommendation ?? '',
+            sum?.referral_needed ? 'Yes' : 'No',
           ].map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
         }),
       ].join('\n')

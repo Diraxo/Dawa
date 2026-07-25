@@ -1,8 +1,8 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import { useLocalSearchParams, useRouter } from 'expo-router'
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import { Image } from 'expo-image'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Modal,
@@ -148,6 +148,25 @@ export default function MyReviewsScreen() {
       }
     })()
   }, [user?.id])
+
+  // Patient name/photo were only ever fetched once at mount (loadReviews
+  // above), so a patient editing their profile mid-list-lifetime stayed
+  // stale here even on revisit — unlike the realtime effect below, which
+  // only watches the `reviews` table, not `users`. Refetch on focus so
+  // returning to this screen always shows current patient identity.
+  useFocusEffect(
+    useCallback(() => {
+      if (!doctorId) return
+      ;(async () => {
+        const token = await getToken()
+        if (!token) return
+        await loadReviews(getAuthClient(token), doctorId)
+      })()
+      // getToken deliberately excluded — see the same pattern/comment on
+      // app/(doctor)/(tabs)/consultations.tsx's useFocusEffect.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [doctorId])
+  )
 
   // Live-update when a new review comes in or an existing one is
   // hidden/edited by moderation — without this the doctor only saw a new

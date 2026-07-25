@@ -1,4 +1,4 @@
-import { useUser } from '@clerk/clerk-expo'
+import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
@@ -79,6 +79,7 @@ export default function RoleScreen() {
   const router = useRouter()
   const { top } = useSafeAreaInsets()
   const { user, isLoaded: userLoaded } = useUser()
+  const { signOut } = useAuth()
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage, selectedCountry } = useAppStore()
   const { setUserRole } = useAuthStore()
@@ -153,6 +154,22 @@ export default function RoleScreen() {
     }
   }
 
+  // Reaching this screen always means the signed-in account has no completed
+  // profile yet (the effects above redirect away as soon as one exists), so
+  // "back" means abandoning onboarding. Signing out here — instead of just
+  // navigating to sign-in while the Clerk session is still active — is what
+  // stops sign-in/sign-up's own isSignedIn auto-redirect from immediately
+  // bouncing the user straight back to this screen, trapping them.
+  const handleBack = async () => {
+    try {
+      await signOut()
+    } catch {}
+    try {
+      await supabaseEmailAuth.auth.signOut()
+    } catch {}
+    router.replace('/(auth)/sign-in' as never)
+  }
+
   const handleSelect = (role: Role) => {
     const next = selectedRole === role ? null : role
     setSelectedRole(next)
@@ -189,7 +206,28 @@ export default function RoleScreen() {
           }
       const { error: upsertError } = await supabase.from('users').upsert(record, { onConflict: 'clerk_id' })
       if (upsertError) {
-        setGlobalError('Failed to save your profile. Please check your connection and try again.')
+        // Don't blame "your connection" for a server-side rejection (RLS,
+        // constraint violation, etc.) — log the real cause so it's
+        // diagnosable, and only show the connection message when the error
+        // actually looks like a network failure.
+        console.error('[role] users upsert failed:', upsertError)
+        const msg = upsertError.message?.toLowerCase() ?? ''
+        const isNetworkError = msg.includes('network') || msg.includes('fetch') || !upsertError.code
+        // A stale `users` row from a previous account (deleted via Clerk
+        // Dashboard, or a client-side delete that got interrupted before its
+        // own anonymization update ran) can still hold this email under a
+        // different clerk_id — onConflict: 'clerk_id' then tries an INSERT,
+        // which collides with the separate users_email_key constraint. This
+        // is a data-cleanup issue support needs to resolve, not something the
+        // user can fix by retrying.
+        const isEmailConflict = upsertError.code === '23505' && msg.includes('email')
+        setGlobalError(
+          isEmailConflict
+            ? 'This email is already linked to a Dawa account that could not be fully removed. Please contact support at dawasupport@gmail.com to finish clearing it before signing up again.'
+            : isNetworkError
+              ? 'Failed to save your profile. Please check your connection and try again.'
+              : `Something went wrong while saving your profile (${upsertError.code}). Please try again or contact support.`
+        )
         return
       }
       setUserRole(selectedRole)
@@ -199,7 +237,8 @@ export default function RoleScreen() {
         clearReg()
         router.replace('/(doctor)/registration/step-1' as never)
       }
-    } catch {
+    } catch (err) {
+      console.error('[role] handleContinue threw:', err)
       setGlobalError('Something went wrong. Please try again.')
     } finally {
       setLoading(false)
@@ -260,7 +299,7 @@ export default function RoleScreen() {
         <View style={styles.container}>
           {/* ── TOP NAV ── */}
           <View style={styles.topNav}>
-            <Pressable onPress={() => router.canGoBack() ? router.back() : router.replace('/(auth)/sign-in' as never)} hitSlop={8} style={styles.backBtn}>
+            <Pressable onPress={handleBack} hitSlop={8} style={styles.backBtn}>
               <Ionicons name="chevron-back" size={24} color={colors.inkBlack} />
             </Pressable>
             <Pressable style={styles.langBtn} onPress={() => setLangDropdown(true)}>

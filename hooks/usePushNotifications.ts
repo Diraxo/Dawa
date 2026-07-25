@@ -203,12 +203,29 @@ async function _register(clerkUserId: string) {
       logger.warn('[PushNotifications] Failed to save push_token:', error.message)
     }
 
-    // Register the Expo push token with Stream Chat so Stream can send
-    // push notifications when a new message arrives and the app is offline.
+    // Register the platform-native device token with Stream Chat so Stream
+    // can send push notifications when a new message arrives and the app is
+    // offline. Stream's addDevice only accepts 'firebase' | 'apn' | 'huawei'
+    // | 'xiaomi' as push_provider — passing the literal string 'expo' (as
+    // this used to) is rejected outright ("push_provider must be one of
+    // [firebase apn huawei xiaomi]"), so this registration always failed
+    // silently and Stream chat push notifications never actually worked.
+    // The Expo push token (`pushToken` above) isn't valid here either — it's
+    // Expo's own routing token, not the raw FCM/APNs device token Stream
+    // needs to call Firebase/APNs directly, so a separate native token is
+    // fetched for this call.
+    //
+    // NOTE: Stream must also have Firebase (Android) / APNs (iOS) push
+    // credentials configured under Chat → Overview → Push Notifications in
+    // the Stream dashboard — addDevice will accept a valid provider here
+    // regardless, but Stream can't actually deliver a push without those
+    // credentials on file.
     try {
       const { streamClient } = await import('@/lib/stream')
-      if (streamClient.userID) {
-        await streamClient.addDevice(pushToken, 'expo', streamClient.userID)
+      if (streamClient.userID && Platform.OS !== 'web') {
+        const nativeToken = (await Notifications.getDevicePushTokenAsync()).data
+        const provider = Platform.OS === 'ios' ? 'apn' : 'firebase'
+        await streamClient.addDevice(nativeToken as string, provider, streamClient.userID)
       }
     } catch (streamErr) {
       logger.warn('[PushNotifications] Stream device registration failed:', streamErr)

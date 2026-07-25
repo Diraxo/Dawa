@@ -428,6 +428,22 @@ export default function VideoConsultationScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ringPhase])
 
+  // This screen is always reached via router.push (Home, Appointments, an
+  // incoming-call CallKeep answer, a notification deep link), so a prior
+  // screen is normally already on the stack — router.back() pops straight
+  // back to that already-mounted instance. router.replace() instead pushes a
+  // *second*, brand-new (tabs) navigator instance on top of the existing one
+  // (replace swaps only the current stack entry, it doesn't reuse an earlier
+  // matching one further down), leaving the original — with Home's realtime
+  // subscriptions/poll interval still live — orphaned underneath, permanently
+  // mounted and invisible. Every call taken during a session leaked one more
+  // orphaned tabs instance this way. Only cold-start/deep-link entry (no
+  // prior screen) has nothing to pop to.
+  const goToAppointments = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(patient)/(tabs)/appointments' as any)
+  }
+
   const handleMissedCall = async () => {
     if (ringTimerRef.current) { clearInterval(ringTimerRef.current); ringTimerRef.current = null }
     // Dismiss any OS call screen that may still be showing
@@ -444,7 +460,7 @@ export default function VideoConsultationScreen() {
           .eq('id', consultationId)
       }
     } catch {}
-    router.replace('/(patient)/(tabs)/appointments' as any)
+    goToAppointments()
   }
 
   // Explicit decline tap — distinct from a silent ring timeout (handleMissedCall
@@ -462,7 +478,7 @@ export default function VideoConsultationScreen() {
         await getAuthClient(token).from('consultations').update({ status: 'call_declined' }).eq('id', consultationId)
       }
     } catch {}
-    router.replace('/(patient)/(tabs)/appointments' as any)
+    goToAppointments()
   }
 
   const handleAnswer = () => {
@@ -896,6 +912,8 @@ export default function VideoConsultationScreen() {
     // is set into the auth store slightly before that resolves.
     if (!isStreamConnected) return
     let cancelled = false
+    let watchedChannel: Awaited<ReturnType<typeof watchConsultationChannel>> | null = null
+    let msgSub: { unsubscribe: () => void } | null = null
     setChannelLoading(true)
     ;(async () => {
       try {
@@ -909,7 +927,8 @@ export default function VideoConsultationScreen() {
         const doctorClerkId = (data as any)?.doctor?.user?.clerk_id as string | undefined
         const members = userId && doctorClerkId ? [userId, doctorClerkId] : undefined
         const ch = await watchConsultationChannel(consultationId, members)
-        if (cancelled) return
+        if (cancelled) { ch.stopWatching().catch(() => {}); return }
+        watchedChannel = ch
         setActiveChannel(ch)
         // Seed from Stream's own persisted unread state (not just messages
         // that arrive after this listener attaches) so a badge survives a
@@ -919,7 +938,7 @@ export default function VideoConsultationScreen() {
         } else {
           setUnreadCount(ch.countUnread())
         }
-        ch.on('message.new', () => {
+        msgSub = ch.on('message.new', () => {
           if (!chatOpenRef.current) setUnreadCount(c => c + 1)
           else ch.markRead().catch(() => {})
         })
@@ -929,7 +948,14 @@ export default function VideoConsultationScreen() {
         if (!cancelled) setChannelLoading(false)
       }
     })()
-    return () => { cancelled = true }
+    // Watched channels and their listeners live on the module-level
+    // streamClient singleton, not this component — without this, every call
+    // taken during a session leaks one more watched channel + listener.
+    return () => {
+      cancelled = true
+      msgSub?.unsubscribe()
+      watchedChannel?.stopWatching().catch(() => {})
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [consultationId, userId, isStreamConnected])
 
@@ -980,7 +1006,7 @@ export default function VideoConsultationScreen() {
           // in app/_layout.tsx) pointed at this same consultation, so
           // reopening the app or tapping the ongoing-call notification takes
           // the patient straight back in instead of to a "call ended" screen.
-          router.replace('/(patient)/(tabs)/appointments' as any)
+          goToAppointments()
         },
       },
     ])
@@ -1024,7 +1050,7 @@ export default function VideoConsultationScreen() {
           </View>
           <Pressable
             style={({ pressed }) => [styles.waitingLeaveBtn, pressed && { opacity: 0.82 }]}
-            onPress={() => router.replace('/(patient)/(tabs)/appointments' as any)}
+            onPress={goToAppointments}
           >
             <Text style={styles.waitingLeaveBtnText}>Leave Waiting Room</Text>
           </Pressable>

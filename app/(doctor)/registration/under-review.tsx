@@ -6,7 +6,6 @@ import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -24,6 +23,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
+import { openSupportEmail } from '@/lib/whatsapp'
 import { useDoctorStore } from '@/store/doctorStore'
 
 export default function UnderReviewScreen() {
@@ -58,8 +58,12 @@ export default function UnderReviewScreen() {
   useEffect(() => {
     if (!profileId) return
 
+    // Guards against the recurring stale-channel race (see history).
+    const approvalTopic = `doctor-approval-${profileId}`
+    const staleApproval = supabase.getChannels().find((c) => c.topic === `realtime:${approvalTopic}`)
+    if (staleApproval) supabase.removeChannel(staleApproval)
     const channel = supabase
-      .channel(`doctor-approval-${profileId}`)
+      .channel(approvalTopic)
       .on(
         'postgres_changes',
         {
@@ -127,7 +131,7 @@ export default function UnderReviewScreen() {
   }
 
   const handleSupport = () => {
-    Linking.openURL('mailto:support@dawa.app?subject=Doctor%20Application%20Help')
+    openSupportEmail('Doctor Application Help')
   }
 
   return (

@@ -279,8 +279,14 @@ export default function ConsultationSummaryScreen() {
 
     // Live-refresh if the doctor edits the summary while this screen is
     // open — always show the latest version, never a stale cached copy.
+    // Guards against the recurring stale-channel race (see history) — a user
+    // mashing the manual retry button can re-run this effect before the
+    // prior mount's async removeChannel() for this topic has finished.
+    const summaryTopic = `patient-summary-${consultationId}`
+    const staleSummary = supabase.getChannels().find((c) => c.topic === `realtime:${summaryTopic}`)
+    if (staleSummary) supabase.removeChannel(staleSummary)
     const channel = supabase
-      .channel(`patient-summary-${consultationId}`)
+      .channel(summaryTopic)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'consultation_summaries', filter: `consultation_id=eq.${consultationId}` }, () => {
         attempts = 0
         fetchSummary()

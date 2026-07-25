@@ -9,6 +9,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { openSupportEmail, openWhatsAppSupport, SUPPORT_EMAIL } from '@/lib/whatsapp'
 
 if (Platform.OS === 'android') {
   UIManager.setLayoutAnimationEnabledExperimental?.(true)
@@ -58,8 +59,14 @@ const FAQ_SECTIONS: Section[] = [
 ]
 
 const CONTACT_OPTIONS = [
-  { icon: 'mail-outline', label: 'Email Support', value: 'support@dawa.app', action: () => Linking.openURL('mailto:support@dawa.app') },
+  { icon: 'mail-outline', label: 'Email Support', value: SUPPORT_EMAIL, action: () => openSupportEmail() },
 ]
+
+const HELP_SUPPORT_DESCRIPTION = `Need help with Dawa?
+
+If you experience a bug, need technical assistance, have questions about your account or consultations, or would like to suggest a new feature or improvement, please contact our support team.
+
+You can email us at ${SUPPORT_EMAIL} or tap the Message Us on WhatsApp button to message us directly.`
 
 function FaqItem({ item, isOpen, onToggle }: { item: FaqItem; isOpen: boolean; onToggle: () => void }) {
   return (
@@ -134,6 +141,16 @@ export default function DoctorHelpSupportScreen() {
         </View>
 
         <Text style={styles.sectionLabel}>Contact Us</Text>
+        <Text style={styles.supportDescription}>{HELP_SUPPORT_DESCRIPTION}</Text>
+
+        <Pressable
+          style={({ pressed }) => [styles.whatsappButton, pressed && { opacity: 0.85 }]}
+          onPress={openWhatsAppSupport}
+        >
+          <Ionicons name="logo-whatsapp" size={22} color={colors.mistWhite} />
+          <Text style={styles.whatsappButtonText}>Message Us on WhatsApp</Text>
+        </Pressable>
+
         {CONTACT_OPTIONS.map((opt) => (
           <Pressable key={opt.label} style={({ pressed }) => [styles.contactCard, pressed && { opacity: 0.85 }]} onPress={opt.action}>
             <View style={styles.contactIcon}>
@@ -202,6 +219,26 @@ const styles = StyleSheet.create({
   contactText: { flex: 1 },
   contactLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 2 },
   contactValue: { fontFamily: fonts.regular, fontSize: 13, color: colors.tealGreen },
+
+  supportDescription: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: '#4B5563',
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  whatsappButton: {
+    backgroundColor: '#25D366',
+    borderRadius: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 10,
+    ...shadow('#25D366', 0, 3, 8, 0.25, 4),
+  },
+  whatsappButtonText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.mistWhite },
 
   legalRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 16 },
   legalText: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack },

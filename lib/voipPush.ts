@@ -118,8 +118,9 @@ async function _registerVoIPToken(
   // ② Incoming VoIP push — fires even when the app is killed (PushKit wakes it).
   //   MUST call displayIncomingCall SYNCHRONOUSLY (CallKit requirement).
   RNVoipPush.addEventListener('notification', (notification: any) => {
-    logger.log('[VoIP] Incoming VoIP push received')
     const data = notification?.getData?.() ?? notification ?? {}
+    if (data?.callType === 'cancel_call') return _handleCallCancelData(data)
+    logger.log('[VoIP] Incoming VoIP push received')
     if (currentOnIncoming) handleIncomingCallData(data, currentOnIncoming)
   })
 

@@ -63,6 +63,20 @@ export default function WaitingRoomScreen() {
   const router = useRouter()
   const { getToken, userId: clerkUserId } = useAuth()
 
+  // This screen is normally reached via router.push (doctor-profile booking,
+  // an active-consultation recovery redirect), so a prior screen is usually
+  // already on the stack — router.back() pops straight back to that already-
+  // mounted instance instead of router.replace() pushing a *second*, brand-
+  // new (tabs) navigator instance on top of the existing one (replace swaps
+  // only the current stack entry, it doesn't reuse an earlier matching one
+  // further down), leaving the original orphaned underneath, permanently
+  // mounted and invisible. Falls back to replace when there's nothing to pop
+  // to (e.g. a cold-start recovery redirect straight into this screen).
+  const goToDoctorsTab = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(patient)/(tabs)/doctors' as any)
+  }
+
   const {
     consultationId,
     doctorId,
@@ -409,7 +423,7 @@ export default function WaitingRoomScreen() {
           <Text style={styles.creditSub}>{issueCopy}</Text>
           <Pressable
             style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
-            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+            onPress={goToDoctorsTab}
           >
             <Ionicons name="search" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Choose Another Doctor</Text>
@@ -462,7 +476,7 @@ export default function WaitingRoomScreen() {
 
           <Pressable
             style={({ pressed }) => [styles.creditBtn, { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.steelGrey, marginTop: 12 }, pressed && { opacity: 0.75 }]}
-            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+            onPress={goToDoctorsTab}
           >
             <Ionicons name="search" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Choose Another Doctor</Text>
@@ -502,7 +516,7 @@ export default function WaitingRoomScreen() {
 
           <Pressable
             style={({ pressed }) => [styles.creditBtn, pressed && { opacity: 0.85 }]}
-            onPress={() => router.replace('/(patient)/(tabs)/doctors' as any)}
+            onPress={goToDoctorsTab}
           >
             <Ionicons name="search" size={18} color={colors.mistWhite} />
             <Text style={styles.creditBtnText}>Choose Another Doctor</Text>

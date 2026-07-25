@@ -140,8 +140,16 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
   // event is identical for both parties.
   useEffect(() => {
     if (!consultationId) return
+    // Guards against the recurring stale-channel race (see history) — this
+    // hook mounts on every phone/video/chat screen for both roles, and its
+    // screens can remount quickly enough (fast back-then-forward nav, active-
+    // consultation recovery re-entering the same call) that a prior mount's
+    // async removeChannel() may still be in flight.
+    const topic = `consultation-state-${role}-${consultationId}`
+    const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
+    if (stale) supabase.removeChannel(stale)
     const ch = supabase
-      .channel(`consultation-state-${role}-${consultationId}`)
+      .channel(topic)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },

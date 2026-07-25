@@ -167,7 +167,7 @@ export default function MySpecialtiesScreen() {
                 {licenseNumber || '—'}
               </Text>
             </View>
-            <Text style={styles.lockedNote}>To update this, contact support@dawa.app.</Text>
+            <Text style={styles.lockedNote}>To update this, contact dawasupport@gmail.com.</Text>
           </View>
 
           <Pressable style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]} onPress={handleSave} disabled={saving}>

@@ -338,8 +338,18 @@ function AppInitializer() {
     //    listener also ends up handling the same push once its own listener registers.
     if (Platform.OS === 'ios' && RNVoipPush) {
       RNVoipPush.addEventListener('notification', (notification: any) => {
-        logger.log('[VoIP] Foreground/recovery VoIP push received')
         const data = notification?.getData?.() ?? notification ?? {}
+        // Patient/doctor cancelled before the ringing call was answered — end
+        // whatever CallKit call is tracked for this uuid instead of treating
+        // this push as a new incoming call. Belt-and-suspenders alongside
+        // lib/voipPush.ts's own listener for the case where this cold-start
+        // listener is the only one alive when the cancel push arrives.
+        if (data.callType === 'cancel_call') {
+          const cancelUuid = data.uuid || data.consultationId
+          if (cancelUuid) callkeep.reportCallEnded(cancelUuid, 'answeredElsewhere')
+          return
+        }
+        logger.log('[VoIP] Foreground/recovery VoIP push received')
         if (data.callType !== 'incoming_call') return
         // Navigation is handled by callkeep.onAnswer below when the user
         // actually answers — mirrors registerCallTokens' no-op onIncoming in
@@ -592,8 +602,14 @@ function AppInitializer() {
           .maybeSingle()
         if (!me || cancelled) return
 
+        // Guards against the recurring stale-channel race (see history) —
+        // this effect re-runs on clerkUser?.id changes, which can fire again
+        // before a prior mount's async removeChannel() for this topic finishes.
+        const recoveryTopic = `patient-consultation-recovery-${me.id}`
+        const staleRecovery = supabase.getChannels().find((c) => c.topic === `realtime:${recoveryTopic}`)
+        if (staleRecovery) supabase.removeChannel(staleRecovery)
         channel = supabase
-          .channel(`patient-consultation-recovery-${me.id}`)
+          .channel(recoveryTopic)
           .on(
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `patient_id=eq.${me.id}` },
@@ -686,8 +702,15 @@ function AppInitializer() {
           .maybeSingle()
         if (!me || cancelled) return
 
+        // Guards against the recurring stale-channel race (see history) —
+        // this effect re-runs whenever the patient enters/leaves a waiting-
+        // room or live-call screen, which can flip fast enough to race a
+        // prior mount's async removeChannel() for this topic.
+        const activationTopic = `patient-waiting-room-activation-${me.id}`
+        const staleActivation = supabase.getChannels().find((c) => c.topic === `realtime:${activationTopic}`)
+        if (staleActivation) supabase.removeChannel(staleActivation)
         channel = supabase
-          .channel(`patient-waiting-room-activation-${me.id}`)
+          .channel(activationTopic)
           .on(
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `patient_id=eq.${me.id}` },

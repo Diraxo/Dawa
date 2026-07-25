@@ -88,9 +88,18 @@ export function useConsultationCompletion({
     setShowCompletedModal(false)
     // Chat stays in place, read-only, on top of the (now frozen) transcript —
     // phone/video have no "in place" screen left to show once the call has
-    // torn down, so they navigate back to the messages tab.
+    // torn down, so they navigate back to the messages tab. router.back()
+    // pops to the already-mounted tabs instance that pushed this call screen
+    // in the first place — router.replace() would instead push a *second*
+    // (tabs) navigator instance on top (replace swaps only the current stack
+    // entry, it doesn't reuse an earlier matching one further down), leaving
+    // the original — with Home's realtime subscriptions/poll interval or
+    // Messages' Stream listeners still live — orphaned underneath,
+    // permanently mounted and invisible. This path runs on every single
+    // phone/video call a patient dismisses without viewing the summary.
     if (kind === 'chat') return
-    router.replace('/(patient)/(tabs)/messages' as never)
+    if (router.canGoBack()) router.back()
+    else router.replace('/(patient)/(tabs)/messages' as never)
   }, [kind])
 
   return {

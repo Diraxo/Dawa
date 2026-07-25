@@ -22,6 +22,7 @@ import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { clearPushTokens } from '@/lib/pushTokens'
 import { shadow } from '@/lib/shadow'
+import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
@@ -117,18 +118,46 @@ export default function ProfileScreen() {
         // leaving the consultation records intact (as our Privacy Policy's
         // Data Retention section already promises for medical compliance).
         const anonEmail = `deleted-${user.id}@dawa.invalid`
-        await client.from('users').update({
-          full_name: 'Deleted Patient',
-          email: anonEmail,
-          phone: null,
-          profile_photo_url: null,
-          push_token: null,
-          fcm_token: null,
-          voip_token: null,
-          address: null,
-          is_suspended: true,
-        })
-        await client.from('patient_profiles').update({ date_of_birth: null, gender: null })
+        // Explicit .eq('clerk_id', ...) below is defense-in-depth, not the
+        // only thing scoping this update to the caller's own row — RLS
+        // (users_update_own) already restricts it — but a bare .update()
+        // with no filter at all relies entirely on RLS staying correct
+        // forever with zero client-side backstop, which is exactly the kind
+        // of "could touch more than one row" risk worth closing off here.
+        // Must throw on failure rather than continue silently — a failed
+        // update here would otherwise go unnoticed and the Clerk account
+        // below would still get deleted, permanently orphaning this row
+        // under the real email/name and locking that email out of ever
+        // signing up again (see app/(auth)/role.tsx's isEmailConflict path).
+        const { data: anonUserRow, error: anonUserError } = await client
+          .from('users')
+          .update({
+            full_name: 'Deleted Patient',
+            email: anonEmail,
+            phone: null,
+            profile_photo_url: null,
+            push_token: null,
+            fcm_token: null,
+            voip_token: null,
+            address: null,
+            is_suspended: true,
+          })
+          .eq('clerk_id', user.id)
+          .select('id')
+          .single()
+        if (anonUserError) throw anonUserError
+        const { error: anonProfileError } = await client
+          .from('patient_profiles')
+          .update({ date_of_birth: null, gender: null })
+          .eq('user_id', anonUserRow.id)
+        if (anonProfileError) throw anonProfileError
+
+        // Stream only learns a user's name/photo at connectUser() time, so
+        // without pushing the anonymized values explicitly, any doctor with
+        // an existing chat thread would keep seeing this patient's real name
+        // and photo indefinitely after "deletion".
+        await pushOwnNameToStream('Deleted Patient')
+        await pushOwnPhotoToStream(null)
       }
       await supabaseEmailAuth.auth.signOut()
       await user?.delete()
@@ -230,7 +259,7 @@ export default function ProfileScreen() {
         visible={showDeactivateAlert}
         variant="warning"
         title="Deactivate Account"
-        message="You will be signed out on this device. Your account and data stay intact — to fully deactivate or reactivate your account, contact support at support@dawa.app."
+        message="You will be signed out on this device. Your account and data stay intact — to fully deactivate or reactivate your account, contact support at dawasupport@gmail.com."
         buttons={[
           { text: 'Cancel', style: 'outline', onPress: () => setShowDeactivateAlert(false) },
           { text: 'Deactivate', style: 'danger', onPress: confirmDeactivate },
@@ -263,7 +292,7 @@ export default function ProfileScreen() {
         visible={showDeleteErrorAlert}
         variant="error"
         title="Unable to Delete"
-        message="We couldn't delete your account. Please contact support at support@dawa.app"
+        message="We couldn't delete your account. Please contact support at dawasupport@gmail.com"
         buttons={[
           { text: 'OK', style: 'primary', onPress: () => setShowDeleteErrorAlert(false) },
         ]}

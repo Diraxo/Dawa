@@ -38,9 +38,13 @@ type Props = {
   onPress: (id: string) => void
   onBook?: (doctor: Doctor) => void
   mode?: 'grid' | 'list'
+  // Grid mode only — lets a caller fit an exact number of cards in a fixed
+  // viewport (e.g. Home's "show 2 full cards" carousels) instead of the
+  // component's own fixed default width.
+  cardWidth?: number
 }
 
-function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid' }: Props) {
+function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: Props) {
   if (mode === 'list') {
     return (
       <View style={L.card}>
@@ -111,10 +115,11 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid' }: Props) {
   }
 
   // Grid mode (used on Home screen)
+  const lowestPrice = Math.min(doctor.chat_price, doctor.phone_price, doctor.video_price)
   return (
     <Pressable
       onPress={() => onPress(doctor.id)}
-      style={({ pressed }) => [G.card, pressed && G.pressed]}
+      style={({ pressed }) => [G.card, cardWidth ? { width: cardWidth } : null, pressed && G.pressed]}
     >
       <View style={G.photoWrap}>
         {doctor.profile_photo_url ? (
@@ -128,22 +133,31 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid' }: Props) {
           />
         ) : (
           <View style={G.photoPlaceholder}>
-            <Ionicons name="person" size={42} color={colors.steelGrey} />
+            <Ionicons name="person" size={30} color={colors.steelGrey} />
           </View>
         )}
         {doctor.is_online && <View style={G.onlineDot} />}
       </View>
       <View style={G.nameRow}>
         <Text style={G.name} numberOfLines={1}>{doctor.name}</Text>
-        {doctor.status === 'approved' && <VerifiedBadge size={13} />}
+        {doctor.status === 'approved' && <VerifiedBadge size={12} />}
       </View>
       {doctor.subtitle ? (
         <Text style={G.subtitle} numberOfLines={1}>{doctor.subtitle}</Text>
       ) : null}
       <Text style={G.specialty} numberOfLines={1}>{doctor.specialty}</Text>
+      <View style={G.metaRow}>
+        <View style={G.ratingPill}>
+          <Ionicons name="star" size={11} color={colors.warning} />
+          <Text style={G.ratingText} numberOfLines={1}>
+            {doctor.rating_average > 0 ? doctor.rating_average.toFixed(1) : '—'}
+          </Text>
+        </View>
+        <Text style={G.priceText} numberOfLines={1}>ETB {lowestPrice}</Text>
+      </View>
       {doctor.languages && doctor.languages.length > 0 ? (
         <View style={G.languageRow}>
-          <Ionicons name="language-outline" size={12} color={colors.tealGreen} />
+          <Ionicons name="language-outline" size={11} color={colors.tealGreen} />
           <Text style={G.languageText} numberOfLines={1}>{doctor.languages.join(', ')}</Text>
         </View>
       ) : null}
@@ -218,34 +232,37 @@ const L = StyleSheet.create({
 const G = StyleSheet.create({
   card: {
     backgroundColor: colors.mistWhite,
-    // Widened from 172 — at that width a doctor's full name (e.g. "Dr.
-    // Alexander Abrahamson") routinely wrapped to a second line even at
-    // numberOfLines={1}'s minimum readable size. 208 comfortably fits a
-    // typical two-part name at this font size without shrinking it.
-    borderRadius: 16, padding: 14, width: 208, marginRight: 14,
+    // Default (unconstrained) width — Home's carousels override this via the
+    // `cardWidth` prop so exactly 2 cards fit the viewport; this fallback
+    // only applies if a caller renders DoctorCard in grid mode without it.
+    borderRadius: 16, padding: 12, width: 208, marginRight: 12,
     ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
-  photoWrap: { alignSelf: 'center', marginBottom: 12, position: 'relative' },
-  photo: { width: 90, height: 90, borderRadius: 45 },
+  photoWrap: { alignSelf: 'center', marginBottom: 8, position: 'relative' },
+  photo: { width: 64, height: 64, borderRadius: 32 },
   photoPlaceholder: {
-    width: 90, height: 90, borderRadius: 45,
+    width: 64, height: 64, borderRadius: 32,
     backgroundColor: colors.cloudGrey,
     alignItems: 'center', justifyContent: 'center',
   },
   onlineDot: {
-    position: 'absolute', bottom: 3, right: 3,
-    width: 16, height: 16, borderRadius: 8,
+    position: 'absolute', bottom: 2, right: 2,
+    width: 14, height: 14, borderRadius: 7,
     backgroundColor: colors.success,
-    borderWidth: 2.5, borderColor: colors.mistWhite,
+    borderWidth: 2, borderColor: colors.mistWhite,
   },
   nameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 2 },
-  name: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, flexShrink: 1 },
-  subtitle: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 2 },
-  specialty: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
-  languageRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 10 },
-  languageText: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', flexShrink: 1 },
+  name: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.inkBlack, flexShrink: 1 },
+  subtitle: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginBottom: 2 },
+  specialty: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginBottom: 6 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  ratingPill: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 1 },
+  ratingText: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.inkBlack },
+  priceText: { fontFamily: fonts.bold, fontSize: 12, color: colors.tealGreen, flexShrink: 0 },
+  languageRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 8 },
+  languageText: { fontFamily: fonts.regular, fontSize: 10, color: '#6B7280', flexShrink: 1 },
   bookWrap: { borderRadius: 10, overflow: 'hidden' },
-  bookBtn: { height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
-  bookBtnText: { fontFamily: fonts.bold, fontSize: 13, color: colors.mistWhite },
+  bookBtn: { height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+  bookBtnText: { fontFamily: fonts.bold, fontSize: 12, color: colors.mistWhite },
 })

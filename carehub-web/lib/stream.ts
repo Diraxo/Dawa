@@ -78,6 +78,21 @@ export async function pushOwnPhotoToStream(photoUrl: string | null): Promise<voi
   }
 }
 
+// Same rationale as pushOwnPhotoToStream, for `name` — Stream also only
+// learns a user's `name` at `connectUser()` time. Without this, renaming
+// (or anonymizing on account deletion) leaves Stream's own user object
+// showing the old name until a full reconnect. Best-effort: must never
+// block a profile save.
+export async function pushOwnNameToStream(name: string): Promise<void> {
+  const client = getStreamClient()
+  if (!client.userID || !name) return
+  try {
+    await client.partialUpdateUser({ id: client.userID, set: { name } })
+  } catch {
+    // Non-fatal — the next full reconnect will pick up the fresh DB value anyway.
+  }
+}
+
 export async function fetchStreamToken(clerkToken: string): Promise<string> {
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/generate-stream-token`,

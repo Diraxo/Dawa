@@ -7,7 +7,6 @@ import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -23,6 +22,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { openSupportEmail } from '@/lib/whatsapp'
 import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
 
@@ -191,10 +191,10 @@ export default function MyDocumentsScreen() {
   const requestUpdate = () => {
     Alert.alert(
       'Update Documents',
-      'Document updates aren’t enabled for your account yet. Contact support at support@dawa.app to request access.',
+      'Document updates aren’t enabled for your account yet. Contact support at dawasupport@gmail.com to request access.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Email Support', onPress: () => Linking.openURL('mailto:support@dawa.app?subject=Document%20Update%20Request') },
+        { text: 'Email Support', onPress: () => openSupportEmail('Document Update Request') },
       ]
     )
   }

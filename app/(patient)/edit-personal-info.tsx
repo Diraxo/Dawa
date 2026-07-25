@@ -793,9 +793,9 @@ export default function EditPersonalInfoScreen() {
         .from('users')
         .update({
           full_name: `${firstName} ${lastName}`.trim(),
-          phone,
-          country,
-          address: address.trim() || null,
+          ...(phone !== initialPhoneRef.current ? { phone } : {}),
+          ...(country !== initialCountryRef.current ? { country } : {}),
+          ...(address !== initialAddressRef.current ? { address: address.trim() || null } : {}),
           ...(profilePhotoUrl !== undefined ? { profile_photo_url: profilePhotoUrl } : {}),
         })
         .eq('clerk_id', user.id)

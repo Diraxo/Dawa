@@ -4,7 +4,7 @@ import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getAuthClient, supabase } from '@/lib/supabase'
-import { pushOwnPhotoToStream } from '@/lib/stream'
+import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { stripDrPrefix } from '@/lib/utils'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import { MessageCircle, Phone, Video, Camera } from 'lucide-react'
@@ -276,7 +276,12 @@ export default function DoctorProfilePage() {
       // Mirrors app/(doctor)/(tabs)/profile.tsx exactly so mobile and web
       // leave the same anonymized state behind.
       const anonEmail = `deleted-${user.id}@dawa.invalid`
-      await client.from('users').update({
+      // Must throw on failure rather than continue silently — a failed
+      // update here would otherwise go unnoticed and the Clerk account
+      // below would still get deleted, permanently orphaning this row under
+      // the real email/name and locking that email out of ever signing up
+      // again (see app/(auth)/role.tsx's isEmailConflict path).
+      const { error: anonUserError } = await client.from('users').update({
         full_name: 'Deleted Doctor',
         email: anonEmail,
         phone: null,
@@ -287,7 +292,8 @@ export default function DoctorProfilePage() {
         address: null,
         is_suspended: true,
       }).eq('id', userRowId)
-      await client.from('doctor_profiles').update({
+      if (anonUserError) throw anonUserError
+      const { error: anonProfileError } = await client.from('doctor_profiles').update({
         bio: null,
         license_number: null,
         license_doc_url: null,
@@ -295,6 +301,14 @@ export default function DoctorProfilePage() {
         hospital_name: null,
         is_online: false,
       }).eq('id', profileId)
+      if (anonProfileError) throw anonProfileError
+
+      // Stream only learns a user's name/photo at connectUser() time, so
+      // without pushing the anonymized values explicitly, any patient with
+      // an existing chat thread would keep seeing this doctor's real name
+      // and photo indefinitely after "deletion".
+      await pushOwnNameToStream('Deleted Doctor')
+      await pushOwnPhotoToStream(null)
 
       await user.delete()
       router.replace('/sign-up')

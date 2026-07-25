@@ -4,7 +4,7 @@ import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { getAuthClient, supabase } from '@/lib/supabase'
-import { pushOwnPhotoToStream } from '@/lib/stream'
+import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getInitials } from '@/lib/utils'
 import { COUNTRIES } from '@/lib/countries'
 
@@ -249,7 +249,12 @@ export default function PatientProfilePage() {
       // while keeping consultation records intact (see Privacy Policy ->
       // Data Retention).
       const anonEmail = `deleted-${userId}@dawa.invalid`
-      await client.from('users').update({
+      // Must throw on failure rather than continue silently — a failed
+      // update here would otherwise go unnoticed and the Clerk account
+      // below would still get deleted, permanently orphaning this row under
+      // the real email/name and locking that email out of ever signing up
+      // again (see app/(auth)/role.tsx's isEmailConflict path).
+      const { error: anonUserError } = await client.from('users').update({
         full_name: 'Deleted Patient',
         email: anonEmail,
         phone: null,
@@ -260,7 +265,19 @@ export default function PatientProfilePage() {
         address: null,
         is_suspended: true,
       }).eq('id', userId)
-      await client.from('patient_profiles').update({ date_of_birth: null, gender: null }).eq('user_id', userId)
+      if (anonUserError) throw anonUserError
+      const { error: anonProfileError } = await client
+        .from('patient_profiles')
+        .update({ date_of_birth: null, gender: null })
+        .eq('user_id', userId)
+      if (anonProfileError) throw anonProfileError
+
+      // Stream only learns a user's name/photo at connectUser() time, so
+      // without pushing the anonymized values explicitly, any doctor with
+      // an existing chat thread would keep seeing this patient's real name
+      // and photo indefinitely after "deletion".
+      await pushOwnNameToStream('Deleted Patient')
+      await pushOwnPhotoToStream(null)
 
       await user.delete()
       router.replace('/sign-up')

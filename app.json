@@ -26,9 +26,11 @@
           "voip"
         ],
         "NSMicrophoneUsageDescription": "Dawa needs microphone access for voice and video consultations.",
-        "NSCameraUsageDescription": "Dawa needs camera access for video consultations.",
+        "NSCameraUsageDescription": "Dawa needs camera access for video consultations and profile photos.",
+        "NSPhotoLibraryUsageDescription": "Dawa needs photo access to upload profile photos and medical documents.",
         "UIUserInterfaceStyle": "Light",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationQueriesSchemes": ["whatsapp"]
       },
       "entitlements": {
         "aps-environment": "production",
@@ -74,6 +76,7 @@
     "plugins": [
       "./plugins/withFirebaseMessagingManifestFix.js",
       "./plugins/withScopedStoragePermissions.js",
+      "./plugins/withWhatsAppQueries.js",
       "expo-router",
       "expo-font",
       "@react-native-community/datetimepicker",

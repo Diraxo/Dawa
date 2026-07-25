@@ -160,8 +160,15 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
     // open must flip that slot's availability live — mirrors BookingModal's
     // identical subscription (this modal previously fetched once and never
     // updated until re-opened).
+    // Guards against the recurring stale-channel race (see history) —
+    // selectedDayValue changes on every day-picker tap, and tapping back to a
+    // previously-selected day can re-run this effect before the prior
+    // mount's async removeChannel() for that same topic has finished.
+    const rescheduleTopic = `reschedule-slot-locks-${appointment.doctorId}-${selectedDayValue}`
+    const staleReschedule = supabase.getChannels().find((c) => c.topic === `realtime:${rescheduleTopic}`)
+    if (staleReschedule) supabase.removeChannel(staleReschedule)
     const channel = supabase
-      .channel(`reschedule-slot-locks-${appointment.doctorId}-${selectedDayValue}`)
+      .channel(rescheduleTopic)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${appointment.doctorId}` },

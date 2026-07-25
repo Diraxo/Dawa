@@ -46,6 +46,19 @@ export default function PaymentReturnScreen() {
   const router = useRouter()
   const { getToken } = useAuth()
 
+  // If this screen was pushed on top of an already-mounted tabs instance
+  // (e.g. booking flow: doctor-profile → payment webview → here), router.
+  // back() pops straight back to it instead of router.replace() pushing a
+  // *second* (tabs) navigator instance on top (replace swaps only the
+  // current stack entry, it doesn't reuse an earlier matching one further
+  // down), orphaning the original underneath, permanently mounted and
+  // invisible. Falls back to replace for a cold external-payment-browser
+  // redirect with nothing on the stack to pop to.
+  const goToAppointments = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(patient)/(tabs)/appointments')
+  }
+
   // Normal in-app navigation provides all params.
   // Fresh app launch from deep link (after external bank app redirect) only
   // provides tx_ref and status — we resolve the rest from the DB.
@@ -447,7 +460,7 @@ export default function PaymentReturnScreen() {
           })
         }
       } else {
-        router.replace('/(patient)/(tabs)/appointments')
+        goToAppointments()
       }
     } finally {
       setRecheckInFlight(false)
@@ -469,7 +482,7 @@ export default function PaymentReturnScreen() {
 
   function handleContinueToAppointments() {
     cancelledRef.current = true
-    router.replace('/(patient)/(tabs)/appointments')
+    goToAppointments()
   }
 
   async function handleManualCancel() {

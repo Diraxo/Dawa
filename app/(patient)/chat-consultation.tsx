@@ -76,6 +76,7 @@ import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { formatDoctorName, stripDrPrefix } from '@/lib/nameFormat'
 import { useAuthStore } from '@/store/authStore'
@@ -212,6 +213,23 @@ export default function ChatConsultationScreen() {
     doctorInitialName ?? doctorName ?? null,
     doctorInitialPhotoUrl
   )
+
+  // Verified badge kept live — an admin approving/suspending the doctor while
+  // the patient is sitting on this screen must flip the badge immediately,
+  // same as the Messages list (see patient-messages-doctor-status subscription
+  // in app/(patient)/(tabs)/messages.tsx). doctorStatus above is otherwise a
+  // one-time fetch from the tryWatch effect.
+  useEffect(() => {
+    if (!doctorUserId) return
+    return subscribeRealtime(
+      `doctor_profiles:user_id=eq.${doctorUserId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `user_id=eq.${doctorUserId}` }],
+      (_event, payload) => {
+        const row = payload.new as any
+        if (row?.status !== undefined) setDoctorStatus(row.status ?? null)
+      },
+    )
+  }, [doctorUserId])
 
   // ── Background notification ────────────────────────────────────────────────
   // Mirrors the phone/video screens' "Ongoing Consultation" notification so
@@ -381,7 +399,13 @@ export default function ChatConsultationScreen() {
     setChannelWatchFailed(false)
 
     let retries = 0
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     const tryWatch = async () => {
+      // An unmount during the retry delay below doesn't clear this scheduled
+      // call — without this guard it would still run the query and open a
+      // Stream watch after cleanup already ran, leaking a watched channel
+      // nothing will ever stopWatching().
+      if (!mounted) return
       try {
         // Pass members so watch() self-heals channel membership instead of
         // relying solely on membership set up elsewhere at accept-time.
@@ -413,9 +437,9 @@ export default function ChatConsultationScreen() {
           if ((ch as any)._data) delete (ch as any)._data.members
           await ch.watch({ presence: true } as any)
         }
-        if (!mounted) return
+        if (!mounted) { ch.stopWatching().catch(() => {}); return }
         await preloadImages(getMessageImageUrls(ch.state.messages as any[]))
-        if (!mounted) return
+        if (!mounted) { ch.stopWatching().catch(() => {}); return }
         setActiveChannel(ch)
         if (doctorClerkId) setPeerOnline(!!ch.state.members[doctorClerkId]?.user?.online)
         if (consultationState !== 'completed') ch.markRead().catch(() => {})
@@ -431,7 +455,7 @@ export default function ChatConsultationScreen() {
         if (!mounted) return
         if (retries < 5) {
           retries++
-          setTimeout(tryWatch, 1200)
+          retryTimer = setTimeout(tryWatch, 1200)
         } else {
           logger.error('[Chat] channel watch failed after retries:', err)
           setChannelWatchFailed(true)
@@ -444,6 +468,7 @@ export default function ChatConsultationScreen() {
 
     return () => {
       mounted = false
+      if (retryTimer) clearTimeout(retryTimer)
       connSub?.unsubscribe()
       currentChannel?.stopWatching().catch(() => {})
       setActiveChannel(null)
@@ -510,6 +535,22 @@ export default function ChatConsultationScreen() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
+  // This screen is always reached via router.push (Messages tab, Home,
+  // Appointments, a notification deep link), so a prior screen is normally
+  // already on the stack — router.back() pops straight back to that
+  // already-mounted instance. router.replace() instead pushes a *second*,
+  // brand-new (tabs) navigator instance on top of the existing one (replace
+  // swaps only the current stack entry, it doesn't reuse an earlier matching
+  // one further down), leaving the original — with Home's realtime
+  // subscriptions/poll interval or Messages' Stream listeners still live —
+  // orphaned underneath, permanently mounted and invisible. Matches the
+  // doctor screen's equivalent fix. Only cold-start/deep-link entry (no
+  // prior screen) has nothing to pop to.
+  const goToMessages = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(patient)/(tabs)/messages' as never)
+  }
+
   const handleBack = () => {
     if (consultationState === 'active') {
       Alert.alert(t('leaveConsultation'), t('leaveConsultationMsg'), [
@@ -517,11 +558,11 @@ export default function ChatConsultationScreen() {
         {
           text: t('leave'),
           style: 'destructive',
-          onPress: () => router.replace('/(patient)/(tabs)/messages' as never),
+          onPress: goToMessages,
         },
       ])
     } else {
-      router.replace('/(patient)/(tabs)/messages' as never)
+      goToMessages()
     }
   }
 
@@ -686,7 +727,7 @@ export default function ChatConsultationScreen() {
         {
           text: 'Leave',
           style: 'destructive',
-          onPress: () => router.replace('/(patient)/(tabs)/messages' as never),
+          onPress: goToMessages,
         },
       ],
     )

@@ -21,6 +21,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { openSupportEmail, openWhatsAppSupport, SUPPORT_EMAIL } from '@/lib/whatsapp'
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
@@ -120,8 +121,8 @@ export default function HelpSupportScreen() {
     {
       icon: 'mail-outline',
       label: t('emailSupport'),
-      value: 'support@dawa.app',
-      action: () => Linking.openURL('mailto:support@dawa.app'),
+      value: SUPPORT_EMAIL,
+      action: () => openSupportEmail(),
     },
   ]
 
@@ -217,6 +218,16 @@ export default function HelpSupportScreen() {
 
         {/* Contact Support */}
         <Text style={styles.sectionLabel}>{t('contactUs')}</Text>
+        <Text style={styles.supportDescription}>{t('helpSupportDescription')}</Text>
+
+        <Pressable
+          style={({ pressed }) => [styles.whatsappButton, pressed && { opacity: 0.85 }]}
+          onPress={openWhatsAppSupport}
+        >
+          <Ionicons name="logo-whatsapp" size={22} color={colors.mistWhite} />
+          <Text style={styles.whatsappButtonText}>{t('chatOnWhatsapp')}</Text>
+        </Pressable>
+
         {CONTACT_OPTIONS.map((opt) => (
           <Pressable
             key={opt.label}
@@ -379,6 +390,26 @@ const styles = StyleSheet.create({
   contactText: { flex: 1 },
   contactLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 2 },
   contactValue: { fontFamily: fonts.regular, fontSize: 13, color: colors.tealGreen },
+
+  supportDescription: {
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    color: '#4B5563',
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  whatsappButton: {
+    backgroundColor: '#25D366',
+    borderRadius: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 10,
+    ...shadow('#25D366', 0, 3, 8, 0.25, 4),
+  },
+  whatsappButtonText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.mistWhite },
 
   legalRow: {
     flexDirection: 'row',

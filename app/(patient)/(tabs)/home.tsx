@@ -13,6 +13,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
@@ -51,6 +52,13 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState('')
   const [bookingDoctor, setBookingDoctor] = useState<Doctor | null>(null)
   const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
+
+  // Sized so exactly 2 full doctor cards are visible in the Available Now /
+  // Top Rated carousels on any screen width, instead of the ~1.5 cards the
+  // old fixed 208pt card showed (screenWidth - 40 = scrollContent's 20pt
+  // side padding × 2; - 12 = the one gap between the two visible cards).
+  const { width: windowWidth } = useWindowDimensions()
+  const doctorCardWidth = (windowWidth - 40 - 12) / 2
 
   // Single source of truth, shared with the Appointments screen's
   // Upcoming/Past tabs — see hooks/usePatientAppointments.ts. `isLoading` is
@@ -241,7 +249,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredOnline.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} onBook={setBookingDoctor} />
+              <DoctorCard key={doc.id} doctor={doc} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}
@@ -270,7 +278,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredTop.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} onPress={handleDoctorPress} onBook={setBookingDoctor} />
+              <DoctorCard key={doc.id} doctor={doc} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}

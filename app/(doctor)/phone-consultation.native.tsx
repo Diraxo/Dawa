@@ -282,6 +282,22 @@ export default function DoctorPhoneConsultationScreen() {
   const ringPulse = useRef(new Animated.Value(1)).current
   const chatOpenRef = useRef(false)
 
+  // This screen is always reached via router.push (incoming-request accept,
+  // Home, Consultations, a notification deep link), so a prior screen is
+  // normally already on the stack — router.back() pops straight back to that
+  // already-mounted instance. router.replace() instead pushes a *second*,
+  // brand-new (tabs) navigator instance on top of the existing one (replace
+  // swaps only the current stack entry, it doesn't reuse an earlier matching
+  // one further down), leaving the original — with Home's realtime
+  // subscriptions/poll interval still live — orphaned underneath,
+  // permanently mounted and invisible. Every call taken during a session
+  // leaked one more orphaned tabs instance this way. Only cold-start/deep-
+  // link entry (no prior screen) has nothing to pop to.
+  const goToConsultations = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(doctor)/(tabs)/consultations' as any)
+  }
+
   // Single source of truth for the "call ended" reaction — release Agora
   // resources exactly once, then navigate away. Doctor gets no completion
   // modal (a deliberate, preserved asymmetry vs. the patient side); the
@@ -299,15 +315,15 @@ export default function DoctorPhoneConsultationScreen() {
       setActive(null)
       if (state.rawStatus === 'call_declined') {
         Alert.alert('Call Declined', 'The patient has declined the call.', [
-          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+          { text: 'OK', onPress: goToConsultations },
         ])
       } else if (state.rawStatus === 'missed') {
         Alert.alert('Missed Call', 'The patient did not answer the call.', [
-          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+          { text: 'OK', onPress: goToConsultations },
         ])
       } else {
         Alert.alert('Call Ended', 'The consultation has ended.', [
-          { text: 'OK', onPress: () => router.replace('/(doctor)/(tabs)/consultations' as any) },
+          { text: 'OK', onPress: goToConsultations },
         ])
       }
     },
@@ -619,6 +635,8 @@ export default function DoctorPhoneConsultationScreen() {
     // is set into the auth store slightly before that resolves.
     if (!isStreamConnected) return
     let cancelled = false
+    let watchedChannel: Awaited<ReturnType<typeof watchConsultationChannel>> | null = null
+    let msgSub: { unsubscribe: () => void } | null = null
     setChannelLoading(true)
     ;(async () => {
       try {
@@ -632,7 +650,8 @@ export default function DoctorPhoneConsultationScreen() {
         const patientClerkId = (data as any)?.patient?.clerk_id as string | undefined
         const members = userId && patientClerkId ? [userId, patientClerkId] : undefined
         const ch = await watchConsultationChannel(consultationId, members)
-        if (cancelled) return
+        if (cancelled) { ch.stopWatching().catch(() => {}); return }
+        watchedChannel = ch
         setActiveChannel(ch)
         // Seed from Stream's own persisted unread state (not just messages
         // that arrive after this listener attaches) so a badge survives a
@@ -642,7 +661,7 @@ export default function DoctorPhoneConsultationScreen() {
         } else {
           setUnreadCount(ch.countUnread())
         }
-        ch.on('message.new', () => {
+        msgSub = ch.on('message.new', () => {
           if (!chatOpenRef.current) setUnreadCount(c => c + 1)
           else ch.markRead().catch(() => {})
         })
@@ -652,7 +671,14 @@ export default function DoctorPhoneConsultationScreen() {
         if (!cancelled) setChannelLoading(false)
       }
     })()
-    return () => { cancelled = true }
+    // Watched channels and their listeners live on the module-level
+    // streamClient singleton, not this component — without this, every call
+    // taken during a session leaks one more watched channel + listener.
+    return () => {
+      cancelled = true
+      msgSub?.unsubscribe()
+      watchedChannel?.stopWatching().catch(() => {})
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [consultationId, userId, isStreamConnected])
 
@@ -696,7 +722,7 @@ export default function DoctorPhoneConsultationScreen() {
     clearPersistedMute(consultationId)
     setShowEndSheet(false)
     setActive(null)
-    router.replace('/(doctor)/(tabs)/consultations' as any)
+    goToConsultations()
   }
 
   const handleEnd = () => {
@@ -724,7 +750,7 @@ export default function DoctorPhoneConsultationScreen() {
           onPress: () => {
             try { getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
             setActive(null)
-            router.replace('/(doctor)/(tabs)/consultations' as any)
+            goToConsultations()
           },
         },
       ])

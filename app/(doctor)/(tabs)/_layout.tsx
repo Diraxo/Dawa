@@ -118,8 +118,12 @@ export default function DoctorTabsLayout() {
 
         // Listen for admin approval/rejection/suspension in real time.
         // Incoming-consultation detection lives solely in home.tsx now.
+        // Guards against the recurring stale-channel race (see history).
+        const tabsTopic = `doctor-tabs-${dp.id}`
+        const staleTabs = supabase.getChannels().find((c) => c.topic === `realtime:${tabsTopic}`)
+        if (staleTabs) supabase.removeChannel(staleTabs)
         const profileChannel = supabase
-          .channel(`doctor-tabs-${dp.id}`)
+          .channel(tabsTopic)
           .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${dp.id}` },
             (payload) => {
               const newStatus = (payload.new as any)?.status

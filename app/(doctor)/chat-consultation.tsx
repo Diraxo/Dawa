@@ -196,6 +196,27 @@ export default function DoctorChatConsultationScreen() {
   const nameInitial = displayName.charAt(0).toUpperCase()
   const effectiveChannelId = channelId ?? consultationId
 
+  // This screen is always reached via router.push from the Messages tab (or
+  // Home/Consultations/Schedule/incoming-request/a notification deep link),
+  // so a prior screen is normally already on the stack — router.back() pops
+  // straight back to that already-mounted instance instantly. The previous
+  // router.replace('/(doctor)/(tabs)/messages') instead pushed a *second*,
+  // brand-new (tabs) navigator instance on top of the existing one (replace
+  // swaps only the current stack entry, it doesn't reuse an earlier matching
+  // one), leaving the original — with Home's realtime subscriptions/poll
+  // interval and the Messages list's 5 Stream listeners still live — orphaned
+  // underneath, permanently mounted and invisible. That's what caused the
+  // back button's multi-second freeze (the new Messages instance starts from
+  // an empty list and blocks on a fresh streamClient.queryChannels() network
+  // round trip before showing anything) and, compounding across every
+  // chat-then-back cycle in a session, growing JS-thread contention from the
+  // pile of orphaned listeners that delayed live message delivery elsewhere.
+  // Only cold-start/deep-link entry (no prior screen) has nothing to pop to.
+  const handleBack = () => {
+    if (router.canGoBack()) router.back()
+    else router.replace('/(doctor)/(tabs)/messages' as never)
+  }
+
   // Auto-clear: reaching this chat directly (tab nav, deep link, resume)
   // rather than by tapping the notification still means it's been "handled"
   // — mark any unread notification for this consultation read so it doesn't
@@ -303,7 +324,13 @@ export default function DoctorChatConsultationScreen() {
     setChannelWatchFailed(false)
 
     let retries = 0
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     const tryWatch = async () => {
+      // An unmount during the retry delay below doesn't clear this scheduled
+      // call — without this guard it would still run the query and open a
+      // Stream watch after cleanup already ran, leaking a watched channel
+      // nothing will ever stopWatching().
+      if (!mounted) return
       try {
         // Pass members so watch() self-heals channel membership instead of
         // relying solely on membership set up elsewhere at accept-time.
@@ -331,9 +358,9 @@ export default function DoctorChatConsultationScreen() {
           if ((ch as any)._data) delete (ch as any)._data.members
           await ch.watch({ presence: true })
         }
-        if (!mounted) return
+        if (!mounted) { ch.stopWatching().catch(() => {}); return }
         await preloadImages(getMessageImageUrls(ch.state.messages as any[]))
-        if (!mounted) return
+        if (!mounted) { ch.stopWatching().catch(() => {}); return }
         setActiveChannel(ch)
         if (!ended) {
           ch.markRead().catch(() => {})
@@ -351,7 +378,7 @@ export default function DoctorChatConsultationScreen() {
         if (!mounted) return
         if (retries < 5) {
           retries++
-          setTimeout(tryWatch, 1200)
+          retryTimer = setTimeout(tryWatch, 1200)
         } else {
           logger.error('[DoctorChat] channel watch failed after retries:', err)
           setChannelWatchFailed(true)
@@ -364,6 +391,7 @@ export default function DoctorChatConsultationScreen() {
 
     return () => {
       mounted = false
+      if (retryTimer) clearTimeout(retryTimer)
       connSub?.unsubscribe()
       currentChannel?.stopWatching().catch(() => {})
       setActiveChannel(null)
@@ -665,7 +693,7 @@ export default function DoctorChatConsultationScreen() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.header}>
           <Pressable
-            onPress={() => router.replace('/(doctor)/(tabs)/messages' as never)}
+            onPress={handleBack}
             style={styles.backBtn}
             hitSlop={12}
           >
@@ -858,15 +886,19 @@ export default function DoctorChatConsultationScreen() {
             ) : (
               <ScrollView showsVerticalScrollIndicator={false}>
                 <View style={styles.profileAvatarWrap}>
-                  {patientProfile?.profile_photo_url ? (
-                    <Image source={{ uri: patientProfile.profile_photo_url }} style={styles.profileAvatarImg} />
+                  {(patientPhotoUrl ?? patientProfile?.profile_photo_url) ? (
+                    <Image source={{ uri: (patientPhotoUrl ?? patientProfile?.profile_photo_url) as string }} style={styles.profileAvatarImg} />
                   ) : (
                     <View style={styles.profileAvatarFallback}>
                       <Text style={styles.profileAvatarInitial}>{nameInitial}</Text>
                     </View>
                   )}
                 </View>
-                <Text style={styles.profileName}>{patientProfile?.full_name ?? displayName}</Text>
+                {/* Name/photo read from the live useUserProfileRealtime values
+                    (already subscribed above for the chat header) rather than
+                    the one-time patientProfile fetch, so an edit mid-consultation
+                    shows here immediately instead of only after reopening the chat. */}
+                <Text style={styles.profileName}>{displayName}</Text>
                 <Text style={styles.profileSubtitle}>Patient</Text>
                 {patientProfile?.gender ? (
                   <View style={styles.profileRow}>
@@ -967,7 +999,7 @@ export default function DoctorChatConsultationScreen() {
       {/* ── Header ── */}
       <View style={styles.header}>
         <Pressable
-          onPress={() => router.replace('/(doctor)/(tabs)/messages' as never)}
+          onPress={handleBack}
           style={styles.backBtn}
           hitSlop={12}
         >
@@ -1003,7 +1035,7 @@ export default function DoctorChatConsultationScreen() {
             </Pressable>
           ) : (
             <Pressable
-              onPress={() => router.replace('/(doctor)/(tabs)/consultations')}
+              onPress={handleBack}
               style={({ pressed }) => [styles.doneBtn, pressed && { opacity: 0.8 }]}
             >
               <Text style={styles.doneBtnText}>{t('done')}</Text>

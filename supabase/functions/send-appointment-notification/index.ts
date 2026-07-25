@@ -619,7 +619,19 @@ Deno.serve(async (req: Request) => {
   const doctorPhoto = doctorUser.profile_photo_url || undefined
 
   const isReminder = kind === 'reminder' || kind === 'reminder_30' || kind === 'reminder_10' || kind === 'reminder_5'
-  const minutesOut = kind === 'reminder_30' ? 30 : kind === 'reminder_10' ? 10 : kind === 'reminder_5' ? 5 : 15
+  const tierDefaultMinutes = kind === 'reminder_30' ? 30 : kind === 'reminder_10' ? 10 : kind === 'reminder_5' ? 5 : 15
+  // Root cause of the "13 minutes left but says 10 minutes" bug: this used to
+  // be a hardcoded number derived purely from `kind`. The cron windows
+  // (migration 095) deliberately allow a tier to fire a little late to catch
+  // up after a missed/delayed tick, so by send-time the real gap to
+  // scheduled_at can differ from the tier's nominal label. Compute the actual
+  // remaining time from the server-side scheduled_at/now() instead, so the
+  // text is never wrong — it can only ever read the same or lower than the
+  // tier label, never higher (never early).
+  const scheduledAtMs = consult.scheduled_at ? new Date(consult.scheduled_at as string).getTime() : NaN
+  const minutesOut = Number.isFinite(scheduledAtMs)
+    ? Math.max(1, Math.round((scheduledAtMs - Date.now()) / 60000))
+    : tierDefaultMinutes
 
   const TYPE_LABEL: Record<string, string> = { chat: 'Chat Consultation', phone: 'Voice Consultation', video: 'Video Consultation' }
   const typeLabel = TYPE_LABEL[consult.type] ?? 'Consultation'

@@ -1,10 +1,11 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useRouter } from 'expo-router'
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { openSupportEmail } from '@/lib/whatsapp'
 
 const LAST_UPDATED = 'July 17, 2026'
 
@@ -150,7 +151,7 @@ const SECTIONS: Section[] = [
           'Opt out of non-essential communications',
         ],
       },
-      { type: 'text', text: 'To exercise these rights, contact us at: privacy@dawa.app' },
+      { type: 'text', text: 'To exercise these rights, contact us at: dawasupport@gmail.com' },
     ],
   },
   {
@@ -204,7 +205,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         type: 'text',
-        text: 'Dawa Support Team\nEmail: privacy@dawa.app\nWebsite: www.dawa.app/privacy',
+        text: 'Dawa Support Team\nEmail: dawasupport@gmail.com\nWebsite: www.dawa.app/privacy',
       },
     ],
   },
@@ -287,12 +288,12 @@ export default function PrivacyPolicyScreen() {
 
         <Pressable
           style={({ pressed }) => [styles.footerCard, pressed && { opacity: 0.8 }]}
-          onPress={() => Linking.openURL('mailto:privacy@dawa.app')}
+          onPress={() => openSupportEmail()}
         >
           <Ionicons name="mail-outline" size={18} color={colors.tealGreen} />
           <Text style={styles.footerText}>
             Contact us:{' '}
-            <Text style={styles.footerLink}>privacy@dawa.app</Text>
+            <Text style={styles.footerLink}>dawasupport@gmail.com</Text>
           </Text>
         </Pressable>
 

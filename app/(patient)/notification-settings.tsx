@@ -1,9 +1,11 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useAuth } from '@clerk/clerk-expo'
 import { useRouter } from 'expo-router'
+import * as Notifications from 'expo-notifications'
 import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -45,6 +47,7 @@ export default function NotificationSettingsScreen() {
   const { t } = useTranslation()
   const { getToken } = useAuth()
   const userIdRef = useRef<string | null>(null)
+  const pushTokenRef = useRef<string | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [toggles, setToggles] = useState<Record<PrefKey, boolean>>(DEFAULTS)
@@ -60,10 +63,11 @@ export default function NotificationSettingsScreen() {
 
       const { data: me } = await client
         .from('users')
-        .select('id')
+        .select('id, push_token')
         .maybeSingle()
       if (!me || cancelled) return
       userIdRef.current = (me as any).id
+      pushTokenRef.current = (me as any).push_token ?? null
 
       const { data } = await client
         .from('notification_preferences')
@@ -128,10 +132,39 @@ export default function NotificationSettingsScreen() {
     { label: t('security'),             ids: ['account'] },
   ]
 
+  // Stream Chat delivers background/killed-app message pushes through its own
+  // registered device token, entirely outside notification_preferences — so
+  // flipping the "New Messages" switch off previously only silenced the
+  // foreground in-app toast (app/_layout.tsx) while push kept arriving.
+  // Actually add/remove the device on Stream's side so the switch is
+  // enforced at the source, not just suppressed client-side while visible.
+  const syncStreamDeviceForMessages = async (enabled: boolean) => {
+    // pushTokenRef only gates "has this device registered for push at all" —
+    // the actual id Stream tracks a device by is the platform-native
+    // FCM/APNs token (see usePushNotifications.ts), not the Expo push token
+    // stored in users.push_token, so it's re-fetched here to match.
+    if (!pushTokenRef.current || Platform.OS === 'web') return
+    try {
+      const { streamClient } = await import('@/lib/stream')
+      if (!streamClient.userID) return
+      const nativeToken = (await Notifications.getDevicePushTokenAsync()).data as string
+      if (enabled) {
+        const provider = Platform.OS === 'ios' ? 'apn' : 'firebase'
+        await streamClient.addDevice(nativeToken, provider, streamClient.userID)
+      } else {
+        await streamClient.removeDevice(nativeToken, streamClient.userID)
+      }
+    } catch {
+      // Best-effort — Stream device sync failing shouldn't block the
+      // preference save itself (which already succeeded via savePrefs).
+    }
+  }
+
   const toggle = (id: string) => {
     setToggles((prev) => {
       const next = { ...prev, [id]: !prev[id] } as Record<PrefKey, boolean>
       savePrefs(next, prev)
+      if (id === 'messages') syncStreamDeviceForMessages(next.messages)
       return next
     })
   }
@@ -142,6 +175,7 @@ export default function NotificationSettingsScreen() {
     setToggles((prev) => {
       const next = Object.fromEntries(Object.keys(prev).map((k) => [k, enabled])) as Record<PrefKey, boolean>
       savePrefs(next, prev)
+      syncStreamDeviceForMessages(enabled)
       return next
     })
   }

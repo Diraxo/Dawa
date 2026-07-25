@@ -80,12 +80,20 @@ export default function MessagesScreen() {
   // (also session-stale) user object. Persisted in a ref so a realtime
   // UPDATE received between focus-effect re-runs isn't lost to the next
   // Stream refetch clobbering it back to stale data.
-  const latestDoctorProfilesRef = useRef<Map<string, { name: string; photoUrl: string | null }>>(new Map())
+  const latestDoctorProfilesRef = useRef<
+    Map<string, { name: string; photoUrl: string | null; isVerified?: boolean }>
+  >(new Map())
 
   const applyLatestDoctorProfiles = (convos: Conversation[]): Conversation[] =>
     convos.map((c) => {
       const known = latestDoctorProfilesRef.current.get(c.peerId)
-      return known ? { ...c, peerName: known.name, peerPhotoUrl: known.photoUrl } : c
+      if (!known) return c
+      return {
+        ...c,
+        peerName: known.name,
+        peerPhotoUrl: known.photoUrl,
+        isVerified: known.isVerified ?? c.isVerified,
+      }
     })
 
   // ── Focus effect: fetch + real-time subscriptions ─────────────────────────
@@ -103,15 +111,19 @@ export default function MessagesScreen() {
       const syncDoctorIdentities = async (convos: Conversation[]) => {
         const peerIds = Array.from(new Set(convos.map((c) => c.peerId).filter(Boolean)))
         if (peerIds.length === 0) return
-        const { data, error } = await supabase
-          .from('users')
-          .select('id, full_name, profile_photo_url')
-          .in('id', peerIds)
+        const [{ data, error }, { data: statusRows }] = await Promise.all([
+          supabase.from('users').select('id, full_name, profile_photo_url').in('id', peerIds),
+          supabase.from('doctor_profiles').select('user_id, status').in('user_id', peerIds),
+        ])
         if (error || !data || cancelled.value) return
+        const statusByUserId = new Map(
+          ((statusRows ?? []) as any[]).map((r) => [r.user_id as string, r.status as string])
+        )
         for (const row of data as any[]) {
           latestDoctorProfilesRef.current.set(row.id, {
             name: formatDoctorName(row.full_name, 'Doctor'),
             photoUrl: row.profile_photo_url ?? null,
+            isVerified: statusByUserId.get(row.id) === 'approved',
           })
         }
         setConversations((prev) => applyLatestDoctorProfiles(prev))
@@ -149,11 +161,20 @@ export default function MessagesScreen() {
                 (doctorMember?.user?.image as string | undefined) ??
                 (d?.doctorPhotoUrl as string | null | undefined) ??
                 null,
+              // Overlaid with the real value once syncDoctorIdentities resolves —
+              // Stream channel data has no notion of doctor approval status.
+              isVerified: false,
               lastMessage:
                 lastMsg?.text ||
                 attachmentPreview(lastMsg?.attachments) ||
                 'No messages yet',
-              lastMessageTime: formatMsgTime(lastMsg?.created_at),
+              // Falls back to the channel's own creation time (≈ consultation
+              // creation time, since createConsultationChannel uses the
+              // consultation id as the channel id) when no message has been
+              // sent yet — otherwise this rendered blank.
+              lastMessageTime: formatMsgTime(
+                lastMsg?.created_at ?? (d?.created_at as string | undefined)
+              ),
               unreadCount: ch.countUnread(),
               isOnline: doctorMember?.user?.online ?? false,
               isPinned: !!(d as any)?.pinned,
@@ -265,9 +286,43 @@ export default function MessagesScreen() {
             const updated = payload.new as any
             setConversations((prev) => {
               if (!prev.some((c) => c.peerId === updated.id)) return prev
+              const existing = latestDoctorProfilesRef.current.get(updated.id)
               latestDoctorProfilesRef.current.set(updated.id, {
                 name: formatDoctorName(updated.full_name, 'Doctor'),
                 photoUrl: updated.profile_photo_url ?? null,
+                isVerified: existing?.isVerified,
+              })
+              return applyLatestDoctorProfiles(prev)
+            })
+          }
+        )
+        .subscribe()
+
+      // Live verified-badge updates — e.g. an admin approves/suspends a
+      // doctor while this list is open. Same broad-subscribe-then-filter
+      // pattern as sub6 (no per-row filter possible with multiple peer ids).
+      const DOCTOR_STATUS_CHANNEL = `patient-messages-doctor-status-${userId}`
+      const staleStatusChannel = supabase
+        .getChannels()
+        .find((c) => c.topic === `realtime:${DOCTOR_STATUS_CHANNEL}`)
+      if (staleStatusChannel) supabase.removeChannel(staleStatusChannel)
+      const sub7 = supabase
+        .channel(DOCTOR_STATUS_CHANNEL)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'doctor_profiles' },
+          (payload) => {
+            const updated = payload.new as any
+            const doctorUserId = updated.user_id as string | undefined
+            if (!doctorUserId) return
+            setConversations((prev) => {
+              const convo = prev.find((c) => c.peerId === doctorUserId)
+              if (!convo) return prev
+              const existing = latestDoctorProfilesRef.current.get(doctorUserId)
+              latestDoctorProfilesRef.current.set(doctorUserId, {
+                name: existing?.name ?? convo.peerName,
+                photoUrl: existing?.photoUrl ?? convo.peerPhotoUrl,
+                isVerified: updated.status === 'approved',
               })
               return applyLatestDoctorProfiles(prev)
             })
@@ -283,6 +338,7 @@ export default function MessagesScreen() {
         sub4.unsubscribe()
         sub5.unsubscribe()
         supabase.removeChannel(sub6)
+        supabase.removeChannel(sub7)
       }
     }, [isStreamConnected, userId])
   )

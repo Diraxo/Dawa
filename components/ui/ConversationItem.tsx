@@ -13,6 +13,7 @@ import {
 import { colors } from '@/constants/colors'
 import { shadow } from '@/lib/shadow'
 import { fonts } from '@/constants/fonts'
+import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ export type Conversation = {
   peerName: string
   peerSubtitle: string
   peerPhotoUrl: string | null
+  isVerified: boolean
   lastMessage: string
   lastMessageTime: string
   unreadCount: number
@@ -107,6 +109,7 @@ export function ConversationItem({
               <Text style={styles.peerName} numberOfLines={1}>
                 {item.peerName}
               </Text>
+              {item.isVerified && <VerifiedBadge size={13} />}
             </View>
             <Text style={styles.time}>{item.lastMessageTime}</Text>
           </View>

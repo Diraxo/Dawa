@@ -65,7 +65,7 @@ export default function LanguageSettingsScreen() {
             .eq('clerk_id', user.id)
         }
       }
-      Alert.alert(t('languageUpdated'), t('languageUpdatedMsg', { langName: LANGUAGES.find((l) => l.id === selected)?.englishName }), [
+      Alert.alert(t('languageUpdated'), t('languageUpdatedMsg', { langName: LANGUAGES.find((l) => l.id === selected)?.nativeName }), [
         { text: t('ok'), onPress: () => router.back() },
       ])
     } catch {
@@ -104,13 +104,7 @@ export default function LanguageSettingsScreen() {
           end={{ x: 1, y: 0 }}
           style={styles.banner}
         >
-          <Text style={styles.bannerFlag}>{currentLang?.flag}</Text>
-          <View>
-            <Text style={styles.bannerTitle}>{currentLang?.nativeName}</Text>
-            <Text style={styles.bannerSub}>
-              {currentLang?.englishName} · {currentLang?.region}
-            </Text>
-          </View>
+          <Text style={styles.bannerTitle}>{currentLang?.nativeName}</Text>
         </LinearGradient>
 
         <Text style={styles.sectionLabel}>{t('selectLanguage')}</Text>
@@ -127,13 +121,9 @@ export default function LanguageSettingsScreen() {
                   ]}
                   onPress={() => handleSelect(lang.id)}
                 >
-                  <Text style={styles.langFlag}>{lang.flag}</Text>
                   <View style={styles.langTextWrap}>
                     <Text style={[styles.langName, isSelected && styles.langNameSel]}>
                       {lang.nativeName}
-                    </Text>
-                    <Text style={styles.langSub}>
-                      {lang.englishName} · {lang.region}
                     </Text>
                   </View>
                   {isSelected ? (
@@ -205,9 +195,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     ...shadow(colors.careBlue, 0, 3, 10, 0.2, 4),
   },
-  bannerFlag: { fontSize: 40 },
   bannerTitle: { fontFamily: fonts.bold, fontSize: 22, color: colors.mistWhite, marginBottom: 2 },
-  bannerSub: { fontFamily: fonts.regular, fontSize: 13, color: 'rgba(255,255,255,0.85)' },
 
   sectionLabel: {
     fontFamily: fonts.semiBold,
@@ -232,7 +220,6 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     gap: 14,
   },
-  langFlag: { fontSize: 28 },
   langTextWrap: { flex: 1 },
   langName: {
     fontFamily: fonts.semiBold,
@@ -241,7 +228,6 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   langNameSel: { color: colors.tealGreen },
-  langSub: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
   checkCircle: {
     width: 28,
     height: 28,

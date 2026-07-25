@@ -70,10 +70,10 @@ We never sell your data to third parties.`,
 • Access: Request a copy of all personal data we hold about you.
 • Correction: Update incorrect or incomplete information via the "Edit Personal Info" screen.
 • Deletion: Permanently delete your personal information (name, email, phone, profile photo) via Profile → Delete Account. Consultation records are retained afterward as described in Section 8 (Data Retention).
-• Portability: Request your data in a machine-readable format by emailing privacy@dawa.app.
+• Portability: Request your data in a machine-readable format by emailing dawasupport@gmail.com.
 • Withdrawal of Consent: You can revoke consent for non-essential data processing at any time.
 
-To exercise these rights, contact us at privacy@dawa.app.`,
+To exercise these rights, contact us at dawasupport@gmail.com.`,
   },
   {
     title: '6. Age Requirements & Eligibility',
@@ -91,7 +91,7 @@ Dawa is not directed at, and does not knowingly collect personal information fro
 False Age Information
 Providing a false date of birth to circumvent these requirements is a violation of our Terms of Service and may result in immediate account termination and deletion of all data.
 
-If you believe a minor has registered on Dawa, please contact us immediately at privacy@dawa.app and we will investigate and act promptly.`,
+If you believe a minor has registered on Dawa, please contact us immediately at dawasupport@gmail.com and we will investigate and act promptly.`,
   },
   {
     title: '7. Third-Party Links',
@@ -110,8 +110,7 @@ If you believe a minor has registered on Dawa, please contact us immediately at 
     body: `If you have questions, concerns, or requests about this Privacy Policy, please contact:
 
 Dawa Privacy Team
-Email: privacy@dawa.app
-Support: support@dawa.app
+Email: dawasupport@gmail.com
 Address: Addis Ababa, Ethiopia`,
   },
 ]

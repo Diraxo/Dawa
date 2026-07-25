@@ -461,27 +461,42 @@ async function sendFCMDataMessage(
   return true
 }
 
-// ── Android: best-effort "stop ringing" signal ─────────────────────────────────
+// ── Best-effort "stop ringing" signal (Android FCM + iOS APNs VoIP) ────────────
 // Sent (in addition to the normal notification for that event) whenever a
 // ringing call-type consultation leaves the state its ring represents
 // without the callee having answered from the OS call UI — e.g. a patient's
 // ringing-after-accept call going missed/timed-out/cancelled, or a doctor's
-// ringing on-demand request being cancelled by the patient before the
-// doctor responds. Without this, a device whose CallKeep/ConnectionService
-// incoming-call screen is still up has no way to learn the call is no
-// longer valid until the OS's own ~60s ring timeout, which reads as a
-// stray/ghost incoming call in the meantime. Works for either direction —
-// the client only needs the uuid to end the right call.
-async function sendCallCancelSignal(fcmToken: string | null, consultationId: string): Promise<void> {
-  if (!fcmToken) return
-  try {
-    await sendFCMDataMessage(fcmToken, {
-      callType:       'cancel_call',
-      uuid:           consultationId,
-      consultationId,
-    })
-  } catch (e) {
-    console.warn('[FCM] cancel_call signal failed:', e)
+// ringing on-demand/scheduled request being cancelled before they respond.
+// Without this, a device whose CallKeep/ConnectionService incoming-call
+// screen is still up has no way to learn the call is no longer valid until
+// the OS's own ~60s ring timeout, which reads as a stray/ghost incoming call
+// in the meantime. Works for either direction — the client only needs the
+// uuid to end the right call.
+//
+// iOS previously had no equivalent at all (this was Android/FCM-only) — a
+// doctor/patient on iOS whose CallKit screen was already ringing when the
+// other party cancelled had no way to learn that short of the 60s CallKit
+// timeout in lib/callkeep.ts. Mirrors the FCM-vs-VoIP fallback pattern used
+// for the 'start' call-ring in send-appointment-notification.
+async function sendCallCancelSignal(
+  recipient: { fcm_token?: string | null; voip_token?: string | null },
+  consultationId: string,
+): Promise<void> {
+  const payload = { callType: 'cancel_call', uuid: consultationId, consultationId }
+  if (recipient.fcm_token) {
+    try {
+      await sendFCMDataMessage(recipient.fcm_token, payload)
+      return
+    } catch (e) {
+      console.warn('[FCM] cancel_call signal failed:', e)
+    }
+  }
+  if (recipient.voip_token) {
+    try {
+      await sendAPNsVoIPPush(recipient.voip_token, payload)
+    } catch (e) {
+      console.warn('[APNs] cancel_call signal failed:', e)
+    }
   }
 }
 
@@ -679,6 +694,7 @@ Deno.serve(async (req: Request) => {
       waiting_started_at,
       scheduled_at,
       previous_scheduled_at,
+      cancelled_by,
       consultation_credit,
       credit_amount,
       patient_amount,
@@ -1032,65 +1048,84 @@ Deno.serve(async (req: Request) => {
       break
     }
 
-    // ── Patient: cancelled their own consultation ────────────────────────────
+    // ── Consultation cancelled (by patient, doctor, or admin) ────────────────
+    // Whoever *initiated* the cancellation already knows it happened — they
+    // must not get a push telling them their own action occurred. Only the
+    // other party (who wasn't consulted) needs to be told. `cancelled_by`
+    // (migration 040) records who did it; unknown/admin-initiated (null)
+    // falls back to notifying both, same as before this fix existed.
     case 'cancelled': {
-      const patientId    = patient.id         ?? null
-      const patientToken = patient.push_token ?? null
-      const title = 'Consultation Cancelled'
-      const body  = `Your ${typeLabel} with ${formatDoctorName(doctorUser.full_name, 'your doctor')} has been cancelled.`
+      const cancelledBy       = (consult as any).cancelled_by ?? null
+      const patientId         = patient.id         ?? null
+      const doctorId          = doctorUser.id      ?? null
+      const cancelledByPatient = !!patientId && cancelledBy === patientId
+      const cancelledByDoctor  = !!doctorId  && cancelledBy === doctorId
 
-      if (isCallType) await sendCallCancelSignal(patient.fcm_token ?? null, consultation_id)
-
-      let patientNotifId: string | null = null
-      if (patientId) {
-        patientNotifId = await insertNotification(supabase, {
-          user_id:   patientId,
-          title,
-          body,
-          type:      'cancelled',
-          data_json: { ...sharedData, screen: 'appointments' },
-        })
-      }
-      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_request')) {
-        await sendPushNotification(patientToken, title, body, { screen: 'appointments', notificationId: patientNotifId ?? '', ...sharedData }, 'consultations', 'normal', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
-      }
-      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
-        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('appointments', consultation_id, String(consult.type)) })
+      // If this was a phone/video request, the other party's device may
+      // still be mid-ring on the incoming-call UI — dismiss it immediately
+      // instead of letting it ring out to its own ~60s timeout for a request
+      // that no longer exists.
+      if (isCallType) {
+        await sendCallCancelSignal({ fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
+        await sendCallCancelSignal({ fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
       }
 
-      // Doctor: the patient left/cancelled before the doctor responded — the
-      // doctor's own consultations list/queue already updates live via its
-      // Realtime subscription, but that only helps while the app is open.
-      // Without an explicit notification here, a doctor whose app is
-      // backgrounded/closed never learns the request they were about to see
-      // is gone until they happen to reopen the app.
-      const doctorId    = doctorUser.id         ?? null
-      const doctorToken = doctorUser.push_token ?? null
-      const doctorTitle = 'Request Cancelled'
-      const doctorBody  = `${patient.full_name ?? 'The patient'} cancelled the ${typeLabel} request before you responded.`
-      const doctorPushBody = `A ${typeLabel} request was cancelled before you responded.`
+      // ── Patient side — skipped entirely if the patient is the one who cancelled ──
+      if (!cancelledByPatient) {
+        const patientToken = patient.push_token ?? null
+        const title = 'Consultation Cancelled'
+        const body  = cancelledByDoctor
+          ? `${formatDoctorName(doctorUser.full_name, 'Your doctor')} cancelled your consultation.`
+          : `Your ${typeLabel} with ${formatDoctorName(doctorUser.full_name, 'your doctor')} has been cancelled.`
 
-      // If this was a phone/video request, the doctor's device may still be
-      // mid-ring on the ConnectionService incoming-call UI (see 'new_request'
-      // above) — dismiss it immediately instead of letting it ring out to
-      // its own ~60s timeout for a request that no longer exists.
-      if (isCallType) await sendCallCancelSignal(doctorUser.fcm_token ?? null, consultation_id)
+        let patientNotifId: string | null = null
+        if (patientId) {
+          patientNotifId = await insertNotification(supabase, {
+            user_id:   patientId,
+            title,
+            body,
+            type:      'cancelled',
+            data_json: { ...sharedData, screen: 'appointments' },
+          })
+        }
+        if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+          await sendPushNotification(patientToken, title, body, { screen: 'appointments', notificationId: patientNotifId ?? '', ...sharedData }, 'consultations', 'normal', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+        }
+        if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+          await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('appointments', consultation_id, String(consult.type)) })
+        }
+      }
 
-      let doctorNotifId: string | null = null
-      if (doctorId) {
-        doctorNotifId = await insertNotification(supabase, {
-          user_id:   doctorId,
-          title:     doctorTitle,
-          body:      doctorBody,
-          type:      'cancelled',
-          data_json: { ...sharedData, screen: 'consultations' },
-        })
-      }
-      if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, { screen: 'consultations', notificationId: doctorNotifId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
-      }
-      if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
-        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('consultations', consultation_id) })
+      // ── Doctor side — skipped entirely if the doctor is the one who cancelled ──
+      // (no doctor-initiated cancel exists in the mobile app today, but this
+      // keeps the rule symmetric for any future/admin path that sets
+      // cancelled_by to the doctor's user id.)
+      if (!cancelledByDoctor) {
+        const doctorToken = doctorUser.push_token ?? null
+        const doctorTitle = cancelledByPatient ? 'Appointment Cancelled' : 'Request Cancelled'
+        const doctorBody  = cancelledByPatient
+          ? `${patient.full_name ?? 'The patient'} cancelled the consultation.`
+          : `${patient.full_name ?? 'The patient'} cancelled the ${typeLabel} request before you responded.`
+        const doctorPushBody = cancelledByPatient
+          ? 'A patient cancelled their consultation.'
+          : `A ${typeLabel} request was cancelled before you responded.`
+
+        let doctorNotifId: string | null = null
+        if (doctorId) {
+          doctorNotifId = await insertNotification(supabase, {
+            user_id:   doctorId,
+            title:     doctorTitle,
+            body:      doctorBody,
+            type:      'cancelled',
+            data_json: { ...sharedData, screen: 'consultations' },
+          })
+        }
+        if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
+          await sendPushNotification(doctorToken, doctorTitle, doctorPushBody, { screen: 'consultations', notificationId: doctorNotifId ?? '', ...sharedData }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+        }
+        if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
+          await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('consultations', consultation_id) })
+        }
       }
       break
     }
@@ -1103,7 +1138,7 @@ Deno.serve(async (req: Request) => {
       const body  = `${patient.full_name ?? 'A patient'} missed your ${typeLabel}. The request has been marked as missed.`
       const pushBody = `A patient missed your ${typeLabel}. The request has been marked as missed.`
 
-      if (isCallType) await sendCallCancelSignal(patient.fcm_token ?? null, consultation_id)
+      if (isCallType) await sendCallCancelSignal({ fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
 
       let notificationId: string | null = null
       if (doctorId) {
