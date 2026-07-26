@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delete Your Account — Dawa</title>
+<meta name="description" content="How to request deletion of your Dawa account and the personal data associated with it." />
+<style>
+  :root {
+    --teal: #00BFA5;
+    --ink: #111827;
+    --grey: #D4D9E1;
+    --muted: #9CA3AF;
+    --bg: #FFFFFF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  header.page-header {
+    margin-bottom: 32px;
+  }
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    line-height: 1.2;
+  }
+  .updated {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  section {
+    padding: 28px 0;
+    border-top: 1px solid var(--grey);
+  }
+  section:first-of-type {
+    border-top: none;
+  }
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--teal);
+    margin: 0 0 14px;
+  }
+  p {
+    font-size: 14px;
+    margin: 0 0 12px;
+    white-space: pre-line;
+  }
+  h3.sub {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  ul, ol {
+    margin: 0 0 14px;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    display: flex;
+    gap: 10px;
+    font-size: 14px;
+    margin-bottom: 7px;
+  }
+  li::before {
+    content: "•";
+    color: var(--teal);
+    flex-shrink: 0;
+  }
+  ol li {
+    counter-increment: step;
+  }
+  ol { counter-reset: step; }
+  ol li::before {
+    content: counter(step) ".";
+    color: var(--teal);
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 18px;
+  }
+  a { color: var(--teal); }
+  .contact-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 191, 165, 0.06);
+    border: 1px solid rgba(0, 191, 165, 0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    text-decoration: none;
+    color: var(--ink);
+    font-size: 14px;
+    margin-top: 20px;
+  }
+  .contact-card strong { color: var(--teal); }
+  .note {
+    background: rgba(41, 98, 255, 0.06);
+    border: 1px solid rgba(41, 98, 255, 0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    font-size: 13px;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page-header">
+    <h1>Delete Your Dawa Account</h1>
+    <div class="updated">Last updated: July 26, 2026 · Dawa, developed by Diraxo</div>
+  </header>
+
+  <section>
+    <h2>OPTION 1: DELETE IN THE APP</h2>
+    <p>If you still have the Dawa app installed and can sign in, this is the fastest way to delete your account:</p>
+    <ol>
+      <li>Open the Dawa app and sign in.</li>
+      <li>Go to the <strong>Profile</strong> tab.</li>
+      <li>Tap <strong>Delete Account</strong>.</li>
+      <li>Confirm the deletion when prompted.</li>
+    </ol>
+    <p>Your account is deleted immediately and you are signed out. This action cannot be undone.</p>
+  </section>
+
+  <section>
+    <h2>OPTION 2: REQUEST DELETION WITHOUT THE APP</h2>
+    <p>If you no longer have the app installed, can't sign in, or would prefer to request deletion by email, send a request to:</p>
+    <a class="contact-card" href="mailto:dawasupport@gmail.com?subject=Account%20Deletion%20Request">
+      <strong>dawasupport@gmail.com</strong>
+    </a>
+    <p style="margin-top: 14px;">Please send the request from the email address associated with your Dawa account, or include your registered phone number, so we can verify your identity. We will confirm your identity and process the request within 30 days.</p>
+  </section>
+
+  <section>
+    <h2>WHAT GETS DELETED</h2>
+    <p>When your account is deleted, the following personal data is permanently removed:</p>
+    <ul>
+      <li>Full name, email address, phone number</li>
+      <li>Profile photo</li>
+      <li>Date of birth and gender</li>
+      <li>Push notification tokens and device identifiers</li>
+      <li>Login credentials (your Clerk authentication account is also deleted)</li>
+      <li>For doctors: uploaded license/ID verification documents, if your application was never approved</li>
+    </ul>
+    <p>All personal data is fully removed within 30 days of your request.</p>
+  </section>
+
+  <section>
+    <h2>WHAT IS RETAINED, AND WHY</h2>
+    <p>Some records are kept after account deletion, as disclosed in our <a href="./privacy-policy.html">Privacy Policy</a>:</p>
+    <ul>
+      <li><strong>Consultation records</strong> (consultation summaries, diagnoses, prescriptions) are retained for 5 years for medical record-keeping and healthcare compliance obligations. These records are de-identified from your account after deletion and are not accessible through the app.</li>
+      <li><strong>Financial transaction logs</strong> (e.g. payment amounts and dates, not card details) are retained as required for tax and accounting compliance.</li>
+      <li><strong>Approved doctor verification documents</strong> are retained as required by applicable medical licensing regulations.</li>
+    </ul>
+    <div class="note">Dawa does not collect or store your payment card details — consultation payments are processed directly by Chapa, our third-party payment processor.</div>
+  </section>
+
+  <section>
+    <h2>QUESTIONS</h2>
+    <p>Dawa Support Team</p>
+    <a class="contact-card" href="mailto:dawasupport@gmail.com">
+      Contact us: <strong>dawasupport@gmail.com</strong>
+    </a>
+  </section>
+
+</div>
+</body>
+</html>
