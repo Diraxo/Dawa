@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
-import { getGreeting, stripDrPrefix } from '@/lib/utils'
+import { getGreeting, stripDrPrefix, capitalizeLanguage } from '@/lib/utils'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { MessageCircle, Phone, Video, Stethoscope, CalendarDays } from 'lucide-react'
@@ -17,6 +17,7 @@ interface Doctor {
   video_price: number
   rating_average: number
   is_online: boolean
+  last_seen_at: string | null
   languages: string[] | null
   availability: Record<string, unknown> | null
   user: { full_name: string; profile_photo_url: string | null } | null
@@ -64,14 +65,17 @@ export default function PatientHomePage() {
     Promise.all([
       supabase
         .from('doctor_profiles')
-        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, languages, availability, user:users(full_name, profile_photo_url)')
+        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, last_seen_at, languages, availability, user:users(full_name, profile_photo_url)')
         .eq('status', 'approved')
         .eq('is_online', true)
-        .order('rating_average', { ascending: false })
+        // Most-recently-online first — a patient picking who to talk to
+        // *right now* cares about freshness more than rating (contrast with
+        // the Top Rated query below, which keeps the rating sort).
+        .order('last_seen_at', { ascending: false, nullsFirst: false })
         .limit(8),
       supabase
         .from('doctor_profiles')
-        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, languages, availability, user:users(full_name, profile_photo_url)')
+        .select('id, specialty, chat_price, phone_price, video_price, rating_average, is_online, last_seen_at, languages, availability, user:users(full_name, profile_photo_url)')
         .eq('status', 'approved')
         .order('rating_average', { ascending: false })
         .limit(8),
@@ -398,7 +402,7 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
         <p className="font-montserrat font-bold text-sm text-ink-black">Dr. {stripDrPrefix(doctor.user?.full_name ?? '')}</p>
         <p className="text-ink-black/50 text-xs">{doctor.specialty}</p>
         {doctor.languages && doctor.languages.length > 0 && (
-          <p className="text-ink-black/40 text-[11px] truncate mt-0.5">{doctor.languages.join(', ')}</p>
+          <p className="text-ink-black/40 text-[11px] truncate mt-0.5">{doctor.languages.map(capitalizeLanguage).join(', ')}</p>
         )}
         {doctor.is_online && (
           <div className="flex items-center gap-2 mt-1">

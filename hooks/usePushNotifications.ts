@@ -1,7 +1,7 @@
 import * as Notifications from 'expo-notifications'
 import Constants from 'expo-constants'
-import { useEffect } from 'react'
-import { Alert, Linking, Platform } from 'react-native'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, AppState, AppStateStatus, Linking, Platform } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useUser } from '@clerk/clerk-expo'
 
@@ -61,16 +61,54 @@ Notifications.setNotificationHandler({
   },
 })
 
-export function usePushNotifications() {
+export interface NotificationPermissionPrompt {
+  visible: boolean
+  dismiss: () => void
+  openSettings: () => void
+}
+
+// userRole (patient/doctor) only changes what the dialog's body copy says —
+// doctors get an extra line about missing consultations. Passing it is
+// optional so callers that don't yet know the role (e.g. before sign-in)
+// still get the base copy.
+export function usePushNotifications(userRole?: 'patient' | 'doctor' | null): NotificationPermissionPrompt {
   const { user } = useUser()
+  const [promptVisible, setPromptVisible] = useState(false)
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState)
 
   useEffect(() => {
     if (!user) return
-    _register(user.id)
+    _register(user.id, () => setPromptVisible(true))
   }, [user?.id])
+
+  // Detect the user coming back from the OS Settings screen (or just
+  // resuming the app) and re-check permission status — if it's now granted,
+  // dismiss the dialog automatically; if still disabled, leave it to
+  // reappear on the next cold app open (handled by the _register effect
+  // above running again on mount).
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      const wasBackgrounded = appStateRef.current.match(/inactive|background/)
+      appStateRef.current = next
+      if (!user || !wasBackgrounded || next !== 'active') return
+      Notifications.getPermissionsAsync().then(({ status }) => {
+        if (status === 'granted') setPromptVisible(false)
+      })
+    })
+    return () => sub.remove()
+  }, [user?.id])
+
+  return {
+    visible: promptVisible,
+    dismiss: () => setPromptVisible(false),
+    openSettings: () => {
+      setPromptVisible(false)
+      Linking.openSettings().catch(() => {})
+    },
+  }
 }
 
-async function _register(clerkUserId: string) {
+async function _register(clerkUserId: string, onPermissionDenied: () => void) {
   try {
     // Android requires explicit notification channels
     if (Platform.OS === 'android') {
@@ -151,6 +189,7 @@ async function _register(clerkUserId: string) {
 
     if (finalStatus !== 'granted') {
       logger.warn('[PushNotifications] Permission denied by user')
+      onPermissionDenied()
       return
     }
 

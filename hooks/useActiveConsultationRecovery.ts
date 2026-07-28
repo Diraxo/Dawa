@@ -5,6 +5,7 @@ import { AppState, AppStateStatus } from 'react-native'
 import NetInfo, { NetInfoState } from '@react-native-community/netinfo'
 
 import { getAuthClient } from '@/lib/supabase'
+import { ghostDebug } from '@/lib/logger'
 import { resolveActiveConsultationRoute, type Role } from '@/lib/activeConsultationRecovery'
 
 // Screens that already own their own realtime/poll-driven navigation for
@@ -62,6 +63,9 @@ export function useActiveConsultationRecovery(role: Role, enabled: boolean) {
 
         const key = `${resolved.consultationId}:${resolved.status}`
         if (lastRedirectKeyRef.current === key) return
+        ghostDebug('[active-consultation-restoration] useActiveConsultationRecovery redirecting', {
+          role, consultationId: resolved.consultationId, status: resolved.status, pathname: resolved.pathname,
+        })
         lastRedirectKeyRef.current = key
 
         router.replace({ pathname: resolved.pathname as any, params: resolved.params })

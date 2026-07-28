@@ -64,8 +64,10 @@ import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
+import { useActiveChatStore } from '@/store/activeChatStore'
 import { logger } from '@/lib/logger'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 
 const GRACE_PERIOD_MS = 90_000
 const CONNECTION_TIMEOUT_MS = 90_000
@@ -102,6 +104,12 @@ export default function DoctorVideoConsultationScreen() {
   const [speakerOn, setSpeakerOn] = useState(true)
   const [showEndSheet, setShowEndSheet] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // Issue 17: DawaAlert (design-system dialog) replaces native Alert.alert
+  // for the completion-flow/peer-termination dialogs below — a native alert
+  // reads as "the app crashed" against the rest of the app's branded UI.
+  const [simpleAlert, setSimpleAlert] = useState<{ variant: AlertVariant; title: string; message: string; buttons?: AlertButton[] } | null>(null)
+  const showSimpleAlert = (variant: AlertVariant, title: string, message: string, buttons?: AlertButton[]) =>
+    setSimpleAlert({ variant, title, message, buttons })
   // Driven by Agora's audio volume indication — who's currently talking, for
   // the speaking-indicator pulse (self view when it's the doctor, the
   // patient's avatar/video area when it's the patient).
@@ -233,6 +241,19 @@ export default function DoctorVideoConsultationScreen() {
     return () => setActiveConsultationId(null)
   }, [channelName, setActiveConsultationId])
 
+  // Same store the standalone chat screen writes to (channel id ==
+  // consultation id here) — without this, app/_layout.tsx's global chat
+  // listener never recognises "already viewing this conversation" while on
+  // this call screen's embedded in-call chat, and fires a full Android
+  // notification for a message the user is already in the middle of seeing
+  // update live in the in-call panel (Issue 15).
+  const setActiveChatChannelId = useActiveChatStore((s) => s.setActiveChannelId)
+  useEffect(() => {
+    if (!channelName) return
+    setActiveChatChannelId(channelName)
+    return () => setActiveChatChannelId(null)
+  }, [channelName, setActiveChatChannelId])
+
   const phaseRef = useRef(state.phase)
   useEffect(() => { phaseRef.current = state.phase }, [state.phase])
   const seconds = state.elapsedSeconds ?? 0
@@ -327,16 +348,16 @@ export default function DoctorVideoConsultationScreen() {
       releaseAgoraEngine()
       setActive(null)
       if (state.rawStatus === 'call_declined') {
-        Alert.alert('Call Declined', 'The patient has declined the call.', [
-          { text: 'OK', onPress: goToConsultations },
+        showSimpleAlert('info', 'Call Declined', 'The patient has declined the call.', [
+          { text: 'OK', onPress: () => { setSimpleAlert(null); goToConsultations() } },
         ])
       } else if (state.rawStatus === 'missed') {
-        Alert.alert('Missed Call', 'The patient did not answer the call.', [
-          { text: 'OK', onPress: goToConsultations },
+        showSimpleAlert('info', 'Missed Call', 'The patient did not answer the call.', [
+          { text: 'OK', onPress: () => { setSimpleAlert(null); goToConsultations() } },
         ])
       } else {
-        Alert.alert('Call Ended', 'The consultation has ended.', [
-          { text: 'OK', onPress: goToConsultations },
+        showSimpleAlert('info', 'Call Ended', 'The consultation has ended.', [
+          { text: 'OK', onPress: () => { setSimpleAlert(null); goToConsultations() } },
         ])
       }
     },
@@ -827,14 +848,14 @@ export default function DoctorVideoConsultationScreen() {
         if (!result.ok) {
           logger.error('[Video][Doctor] completion failed at stage:', result.failedAt)
           setSubmitting(false)
-          Alert.alert('Error', 'Could not save the consultation summary. Please try again.')
+          showSimpleAlert('error', 'Error', 'Could not save the consultation summary. Please try again.')
           return
         }
       }
     } catch (err) {
       logger.error('[Video][Doctor] save summary failed:', err)
       setSubmitting(false)
-      Alert.alert('Error', 'Could not save the consultation summary. Please try again.')
+      showSimpleAlert('error', 'Error', 'Could not save the consultation summary. Please try again.')
       return
     }
     setSubmitting(false)
@@ -1032,6 +1053,15 @@ export default function DoctorVideoConsultationScreen() {
         channelLoading={channelLoading}
         userId={userId}
         consultationTypeIcon="videocam"
+      />
+
+      <DawaAlert
+        visible={!!simpleAlert}
+        variant={simpleAlert?.variant ?? 'info'}
+        title={simpleAlert?.title ?? ''}
+        message={simpleAlert?.message ?? ''}
+        buttons={simpleAlert?.buttons ?? [{ text: 'OK', onPress: () => setSimpleAlert(null) }]}
+        onClose={() => setSimpleAlert(null)}
       />
     </SafeAreaView>
   )

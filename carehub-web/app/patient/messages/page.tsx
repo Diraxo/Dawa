@@ -83,7 +83,7 @@ export default function PatientMessagesPage() {
               (d?.doctorPhotoUrl as string | null | undefined) ??
               null,
             lastMessage: lastMsg?.text || attachmentPreview(lastMsg?.attachments) || null,
-            lastMessageAt: lastMsg?.created_at ? new Date(lastMsg.created_at as string) : null,
+            lastMessageAt: lastMsg?.created_at ?? null,
             unreadCount: isChannelReadThrough(ch.id ?? '', lastMsg?.id) ? 0 : ch.countUnread(),
             isOnline: otherMember?.user?.online ?? false,
           }

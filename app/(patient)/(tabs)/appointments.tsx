@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons'
 import { useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useLocalSearchParams, useRouter } from 'expo-router'
+import { useLocalSearchParams, useNavigationContainerRef, useRouter } from 'expo-router'
 import { Image } from 'expo-image'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -22,6 +22,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { usePatientAppointments, type PatientAppointment } from '@/hooks/usePatientAppointments'
+import { navigateFamilyRoute } from '@/lib/notificationNav'
 import { shadow } from '@/lib/shadow'
 import { useTranslation } from 'react-i18next'
 
@@ -623,6 +624,7 @@ const emptyStyles = StyleSheet.create({
 export default function AppointmentsScreen() {
   const { t } = useTranslation()
   const router = useRouter()
+  const navContainerRef = useNavigationContainerRef()
   const { tab: tabParam } = useLocalSearchParams<{ tab?: string }>()
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
@@ -695,15 +697,22 @@ export default function AppointmentsScreen() {
   })
 
   const handleWaitingRoom = guardNav((item: Appointment) => {
-    router.push({
-      pathname: '/(patient)/waiting-room' as any,
-      params: {
+    // A waiting-room instance opened earlier via booking/notification/
+    // recovery may already be mounted elsewhere on the stack — reuse it
+    // instead of stacking a duplicate (Issue 2: repeated Waiting Room
+    // screens).
+    navigateFamilyRoute(
+      router,
+      navContainerRef.current?.getRootState(),
+      '/(patient)/waiting-room',
+      {
         consultationId: item.id,
         doctorId: item.doctorId,
         doctorName: item.doctorName,
         consultationType: item.type,
       },
-    })
+      'push',
+    )
   })
 
   const [rescheduleTarget, setRescheduleTarget] = useState<Appointment | null>(null)

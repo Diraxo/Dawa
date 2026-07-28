@@ -79,12 +79,22 @@ export default function HomeScreen() {
   }, [nextAppointment])
 
   // Single source of truth, shared with the Doctors tab's full list — see
-  // hooks/usePatientDoctors.ts. Both widgets below are pure slices of the
-  // same rating-sorted list, so they can never disagree with the Doctors tab
-  // about a given doctor's live is_online/price/bio/etc.
+  // hooks/usePatientDoctors.ts. Both widgets below read from the same list,
+  // so they can never disagree with the Doctors tab about a given doctor's
+  // live is_online/price/bio/etc — but each re-sorts by its own criterion:
+  // "Top Rated" by rating (the list's native order), "Available Now" by most
+  // recently online, since a patient picking who to talk to *right now* cares
+  // more about freshness than rating.
   const { doctors: allDoctors, isLoading: loadingDoctors, refresh: refreshDoctors } = usePatientDoctors()
   const topDoctors = useMemo(() => allDoctors.slice(0, 8), [allDoctors])
-  const onlineDoctors = useMemo(() => allDoctors.filter(d => d.is_online).slice(0, 8), [allDoctors])
+  const onlineDoctors = useMemo(
+    () =>
+      allDoctors
+        .filter(d => d.is_online)
+        .sort((a, b) => new Date(b.last_seen_at ?? 0).getTime() - new Date(a.last_seen_at ?? 0).getTime())
+        .slice(0, 8),
+    [allDoctors]
+  )
 
   // The booking modal is handed a one-shot snapshot when opened; keep its
   // is_online AND availability (hours/blocked days/on-demand-vs-scheduled
@@ -157,9 +167,8 @@ export default function HomeScreen() {
         {/* ── Header ── */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <Text style={styles.greeting}>
-              {getGreeting()}, {firstName}
-            </Text>
+            <Text style={styles.greeting}>{getGreeting()}</Text>
+            <Text style={styles.greetingName}>{firstName}</Text>
             <Text style={styles.dateText}>{getFormattedDate()}</Text>
           </View>
           <Pressable
@@ -366,10 +375,16 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   greeting: {
+    fontFamily: fonts.medium,
+    fontSize: 15,
+    color: '#6B7280',
+    lineHeight: 20,
+  },
+  greetingName: {
     fontFamily: fonts.bold,
-    fontSize: 20,
+    fontSize: 22,
     color: colors.inkBlack,
-    lineHeight: 26,
+    lineHeight: 28,
   },
   dateText: {
     fontFamily: fonts.regular,
@@ -406,7 +421,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mistWhite,
     borderRadius: 14,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 15,
     marginBottom: 24,
     gap: 10,
     ...shadow('#000', 0, 1, 4, 0.05, 1),
@@ -546,7 +561,7 @@ const styles = StyleSheet.create({
 
   // Spacing utilities
   mt12: { marginTop: 12 },
-  mt24: { marginTop: 24 },
-  mt28: { marginTop: 28 },
+  mt24: { marginTop: 34 },
+  mt28: { marginTop: 38 },
   bottomPad: { height: 28 },
 })

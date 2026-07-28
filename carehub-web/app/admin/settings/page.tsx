@@ -33,13 +33,13 @@ export default function AdminSettingsPage() {
     min_required_version: '1.0.0',
     latest_version: '1.0.0',
     update_message: 'A new version of Dawa is available. Please update to continue using the app.',
-    store_url: 'https://play.google.com/store/apps/details?id=com.carehub',
+    store_url: 'https://play.google.com/store/apps/details?id=com.dawa.app',
   })
   const [iosConfig, setIosConfig] = useState({
     min_required_version: '1.0.0',
     latest_version: '1.0.0',
     update_message: 'A new version of Dawa is available. Please update to continue using the app.',
-    store_url: 'https://apps.apple.com/app/carehub',
+    store_url: 'https://apps.apple.com/app/dawa',
   })
   const [saving, setSaving] = useState<string | null>(null)
   const [savedSections, setSavedSections] = useState<string[]>([])

@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next'
 
 import Constants from 'expo-constants'
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -57,7 +57,7 @@ export default function AboutDawaScreen() {
           style={styles.hero}
         >
           <View style={{ marginBottom: 14 }}>
-            <CareHubLogo size={80} />
+            <DawaLogo size={80} />
           </View>
           <Text style={styles.heroTagline}>TRUSTED CARE. ANYWHERE. ALWAYS.</Text>
           <Text style={styles.heroVersion}>{t('versionLabel')} {APP_VERSION}</Text>

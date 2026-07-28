@@ -64,7 +64,7 @@ Shown at the top of the store listing page.
 - [ ] Built with `eas build --platform android --profile production`
 - [ ] Version: 1.0.0
 - [ ] Version Code: 1
-- [ ] Package: `com.carehub.app`
+- [ ] Package: `com.dawa.app`
 - [ ] Signed with your upload keystore
 
 ---

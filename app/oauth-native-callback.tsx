@@ -15,6 +15,15 @@ export default function OAuthNativeCallback() {
   const router = useRouter()
   const { setUserRole } = useAuthStore()
 
+  // Confirms the deep link was actually received and what state Clerk
+  // resolved it to — if this never logs, the redirect never made it back
+  // into the app (Clerk dashboard redirect allowlist / scheme mismatch);
+  // if it logs with isSignedIn=false, the deep link arrived but Clerk
+  // didn't complete the session from it.
+  useEffect(() => {
+    console.log('[OAuth callback] mounted, isSignedIn:', isSignedIn, 'userId:', userId ?? null)
+  }, [isSignedIn, userId])
+
   useEffect(() => {
     if (!isSignedIn || !userId) return
     ;(async () => {
@@ -22,6 +31,7 @@ export default function OAuthNativeCallback() {
         const token = await getToken()
         const client = token ? getAuthClient(token) : supabase
         const { data } = await client.from('users').select('role').eq('clerk_id', userId).single()
+        console.log('[OAuth callback] role lookup resolved:', data?.role ?? null)
         if (data?.role === 'doctor') {
           setUserRole('doctor')
           router.replace('/(doctor)/(tabs)/home' as never)
@@ -31,7 +41,8 @@ export default function OAuthNativeCallback() {
         } else {
           router.replace('/(auth)/role' as never)
         }
-      } catch {
+      } catch (err) {
+        console.error('[OAuth callback] role lookup failed:', err)
         router.replace('/(auth)/role' as never)
       }
     })()

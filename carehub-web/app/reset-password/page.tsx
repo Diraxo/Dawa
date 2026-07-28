@@ -1,16 +1,14 @@
 'use client'
 
 import { Suspense, useState } from 'react'
-import { useSignIn, useAuth } from '@clerk/nextjs'
+import { useSignIn } from '@clerk/nextjs'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Lock, Eye, EyeOff } from 'lucide-react'
 import { AuthCard } from '@/components/ui/AuthCard'
-import { getAuthClient, supabase } from '@/lib/supabase'
 
 function ResetPasswordContent() {
   const { isLoaded, signIn, setActive } = useSignIn()
-  const { getToken } = useAuth()
   const router = useRouter()
   const params = useSearchParams()
   const email = params.get('email') ?? ''
@@ -50,15 +48,9 @@ function ResetPasswordContent() {
       const result = await signIn!.resetPassword({ password })
       if (result.status === 'complete') {
         await setActive!({ session: result.createdSessionId! })
-        const clerkId = result.createdUserId
-        if (!clerkId) { router.push('/role'); return }
-        const token = await getToken()
-        const client = token ? getAuthClient(token) : supabase
-        const { data } = await client.from('users').select('role').eq('clerk_id', clerkId).single()
-        if (data?.role === 'patient') router.push('/patient')
-        else if (data?.role === 'doctor') router.push('/doctor')
-        else if (data?.role === 'admin') router.push('/admin')
-        else router.push('/role')
+        // SignInResource doesn't carry the Clerk user id — let /dashboard
+        // resolve role-based routing once the session is active.
+        router.push('/dashboard')
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''

@@ -6,7 +6,6 @@ import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
-  Alert,
   AppState,
   AppStateStatus,
   KeyboardAvoidingView,
@@ -68,6 +67,7 @@ import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
 import { PdfViewerModal } from '@/components/shared/PdfViewerModal'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 import { logger } from '@/lib/logger'
 import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
@@ -146,6 +146,12 @@ export default function DoctorChatConsultationScreen() {
   const [channelWatchFailed, setChannelWatchFailed] = useState(false)
   const [channelRetryTick, setChannelRetryTick] = useState(0)
   const [pdfViewer, setPdfViewer] = useState<{ url: string; title: string; size?: number } | null>(null)
+  // Issue 17: DawaAlert (design-system dialog) replaces native Alert.alert
+  // for the completion/error dialogs below — a native alert reads as "the
+  // app crashed" against the rest of the app's branded UI.
+  const [simpleAlert, setSimpleAlert] = useState<{ variant: AlertVariant; title: string; message: string; buttons?: AlertButton[] } | null>(null)
+  const showSimpleAlert = (variant: AlertVariant, title: string, message: string, buttons?: AlertButton[]) =>
+    setSimpleAlert({ variant, title, message, buttons })
   const [peerTyping, setPeerTyping] = useState(false)
   const [peerOnline, setPeerOnline] = useState<boolean | null>(null)
   const [peerReadAt, setPeerReadAt] = useState<string | null>(null)
@@ -668,21 +674,22 @@ export default function DoctorChatConsultationScreen() {
         if (!result.ok) {
           logger.error('[DoctorChat] completion failed at stage:', result.failedAt)
           setSubmitting(false)
-          Alert.alert(t('profileSaveError'), t('somethingWentWrong'))
+          showSimpleAlert('error', t('profileSaveError'), t('somethingWentWrong'))
           return
         }
       }
     } catch (err) {
       logger.error('[DoctorChat] failed to save summary:', err)
       setSubmitting(false)
-      Alert.alert(t('profileSaveError'), t('somethingWentWrong'))
+      showSimpleAlert('error', t('profileSaveError'), t('somethingWentWrong'))
       return
     }
     setSubmitting(false)
     setShowEndSheet(false)
     completion.markHandled()
     setEnded(true)
-    Alert.alert(
+    showSimpleAlert(
+      'success',
       'Consultation Completed',
       'The summary has been saved. The patient has been notified and this conversation is now read-only.',
     )
@@ -1149,6 +1156,15 @@ export default function DoctorChatConsultationScreen() {
         title={pdfViewer?.title}
         fileSize={pdfViewer?.size}
         onClose={() => setPdfViewer(null)}
+      />
+
+      <DawaAlert
+        visible={!!simpleAlert}
+        variant={simpleAlert?.variant ?? 'info'}
+        title={simpleAlert?.title ?? ''}
+        message={simpleAlert?.message ?? ''}
+        buttons={simpleAlert?.buttons ?? [{ text: 'OK', onPress: () => setSimpleAlert(null) }]}
+        onClose={() => setSimpleAlert(null)}
       />
     </SafeAreaView>
   )

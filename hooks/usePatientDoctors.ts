@@ -23,6 +23,7 @@ function mapDoctor(d: any): Doctor {
     phone_price: Number(d.phone_price) ?? 0,
     video_price: Number(d.video_price) ?? 0,
     is_online: d.is_online ?? false,
+    last_seen_at: d.last_seen_at ?? null,
     profile_photo_url: d.users?.profile_photo_url ?? null,
     availability: d.availability ?? null,
     languages: d.languages ?? null,
@@ -123,6 +124,7 @@ function subscribeChannels() {
       if (updated.status !== 'approved') return
       const p: Partial<Doctor> = {
         is_online: updated.is_online as boolean,
+        last_seen_at: (updated.last_seen_at ?? null) as string | null,
         languages: (updated.languages ?? undefined) as string[] | null | undefined,
         availability: (updated.availability ?? null) as Doctor['availability'],
         bio: (updated.bio ?? undefined) as string | undefined,

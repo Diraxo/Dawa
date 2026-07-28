@@ -22,7 +22,7 @@ export function QuickActionCard({ label, icon, variant, onPress }: Props) {
         onPress={onPress}
         style={({ pressed }) => [styles.card, styles.outlineCard, pressed && styles.pressed]}
       >
-        <Ionicons name={icon} size={26} color={colors.tealGreen} />
+        <Ionicons name={icon} size={30} color={colors.tealGreen} />
         <Text style={[styles.label, styles.darkLabel]}>{label}</Text>
       </Pressable>
     )
@@ -44,7 +44,7 @@ export function QuickActionCard({ label, icon, variant, onPress }: Props) {
         end={{ x: 1, y: 1 }}
         style={styles.solidCard}
       >
-        <Ionicons name={icon} size={26} color={colors.mistWhite} />
+        <Ionicons name={icon} size={30} color={colors.mistWhite} />
         <Text style={[styles.label, styles.lightLabel]}>{label}</Text>
       </LinearGradient>
     </Pressable>
@@ -76,7 +76,7 @@ const styles = StyleSheet.create({
   label: {
     fontFamily: fonts.semiBold,
     fontSize: 13,
-    marginTop: 8,
+    marginTop: 12,
     textAlign: 'center',
   },
   darkLabel: {

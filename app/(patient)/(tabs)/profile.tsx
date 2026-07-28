@@ -13,7 +13,7 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
-import { CareHubAlert } from '@/components/ui/CareHubAlert'
+import { DawaAlert } from '@/components/ui/DawaAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -163,6 +163,7 @@ export default function ProfileScreen() {
       await user?.delete()
       await disconnectStream()
       clearAuth()
+      await signOut()
       router.replace('/(auth)/sign-up')
     } catch {
       setShowDeleteErrorAlert(true)
@@ -224,7 +225,7 @@ export default function ProfileScreen() {
       icon: 'information-circle-outline',
       label: t('aboutDawa'),
       subtitle: t('ourMissionStory'),
-      onPress: () => router.push('/(patient)/about-carehub'),
+      onPress: () => router.push('/(patient)/about-dawa'),
     },
   ]
 
@@ -232,7 +233,7 @@ export default function ProfileScreen() {
 
   return (
     <>
-      <CareHubAlert
+      <DawaAlert
         visible={showLogoutAlert}
         variant="logout"
         title="Log Out"
@@ -255,7 +256,7 @@ export default function ProfileScreen() {
         ]}
         onClose={() => setShowLogoutAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeactivateAlert}
         variant="warning"
         title="Deactivate Account"
@@ -266,7 +267,7 @@ export default function ProfileScreen() {
         ]}
         onClose={() => setShowDeactivateAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteAlert}
         variant="error"
         title="Delete Account"
@@ -277,7 +278,7 @@ export default function ProfileScreen() {
         ]}
         onClose={() => setShowDeleteAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteConfirmAlert}
         variant="error"
         title="Final Confirmation"
@@ -288,7 +289,7 @@ export default function ProfileScreen() {
         ]}
         onClose={() => setShowDeleteConfirmAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteErrorAlert}
         variant="error"
         title="Unable to Delete"

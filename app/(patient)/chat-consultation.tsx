@@ -79,8 +79,10 @@ import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { formatDoctorName, stripDrPrefix } from '@/lib/nameFormat'
+import { capitalizeLanguage } from '@/lib/languageFormat'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveChatStore } from '@/store/activeChatStore'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -152,6 +154,12 @@ export default function ChatConsultationScreen() {
   const insets = useSafeAreaInsets()
   const isStreamConnected = useAuthStore((s) => s.isStreamConnected)
   const setActiveChannelId = useActiveChatStore((s) => s.setActiveChannelId)
+  // Issue 17: DawaAlert (design-system dialog) replaces native Alert.alert
+  // for the leave-consultation confirmations below — a native alert reads
+  // as "the app crashed" against the rest of the app's branded UI.
+  const [simpleAlert, setSimpleAlert] = useState<{ variant: AlertVariant; title: string; message: string; buttons?: AlertButton[] } | null>(null)
+  const showSimpleAlert = (variant: AlertVariant, title: string, message: string, buttons?: AlertButton[]) =>
+    setSimpleAlert({ variant, title, message, buttons })
 
   // Tracked so app/_layout.tsx's global message listener can tell "already
   // looking at this chat" apart from "elsewhere in the app" and skip a
@@ -553,12 +561,12 @@ export default function ChatConsultationScreen() {
 
   const handleBack = () => {
     if (consultationState === 'active') {
-      Alert.alert(t('leaveConsultation'), t('leaveConsultationMsg'), [
-        { text: t('stay'), style: 'cancel' },
+      showSimpleAlert('confirm', t('leaveConsultation'), t('leaveConsultationMsg'), [
+        { text: t('stay'), style: 'outline', onPress: () => setSimpleAlert(null) },
         {
           text: t('leave'),
-          style: 'destructive',
-          onPress: goToMessages,
+          style: 'danger',
+          onPress: () => { setSimpleAlert(null); goToMessages() },
         },
       ])
     } else {
@@ -719,15 +727,16 @@ export default function ChatConsultationScreen() {
   }
 
   const handleLeaveConsultation = () => {
-    Alert.alert(
+    showSimpleAlert(
+      'confirm',
       t('leaveConsultation'),
       'You can return to this consultation from the Messages tab at any time.',
       [
-        { text: t('stay'), style: 'cancel' },
+        { text: t('stay'), style: 'outline', onPress: () => setSimpleAlert(null) },
         {
           text: 'Leave',
-          style: 'destructive',
-          onPress: goToMessages,
+          style: 'danger',
+          onPress: () => { setSimpleAlert(null); goToMessages() },
         },
       ],
     )
@@ -945,7 +954,7 @@ export default function ChatConsultationScreen() {
                 {doctorProfile?.languages?.length ? (
                   <View style={styles.profileRow}>
                     <Ionicons name="language-outline" size={16} color={colors.tealGreen} />
-                    <Text style={styles.profileRowText}>{doctorProfile.languages.join(', ')}</Text>
+                    <Text style={styles.profileRowText}>{doctorProfile.languages.map(capitalizeLanguage).join(', ')}</Text>
                   </View>
                 ) : null}
                 {doctorProfile?.bio ? (
@@ -1273,6 +1282,15 @@ export default function ChatConsultationScreen() {
         rawStatus={completion.rawStatus}
         onViewSummary={completion.goToSummary}
         onClose={completion.dismissModal}
+      />
+
+      <DawaAlert
+        visible={!!simpleAlert}
+        variant={simpleAlert?.variant ?? 'info'}
+        title={simpleAlert?.title ?? ''}
+        message={simpleAlert?.message ?? ''}
+        buttons={simpleAlert?.buttons ?? [{ text: 'OK', onPress: () => setSimpleAlert(null) }]}
+        onClose={() => setSimpleAlert(null)}
       />
     </SafeAreaView>
   )

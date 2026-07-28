@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/server'
 import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 import { stripDrPrefix } from '@/lib/utils'
 import { sendDoctorStatusPush } from '@/lib/doctorStatusPush'
+import { parseLicensePaths, parseIdDocPaths } from '@/lib/doctorDocuments'
 
 async function getEmailTemplate(key: string): Promise<string | null> {
   const { data } = await supabaseAdmin
@@ -101,12 +102,28 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       return NextResponse.json({ error: 'Rejection reason required' }, { status: 400 })
     }
 
+    const { data: beforeUpdate } = await supabaseAdmin
+      .from('doctor_profiles')
+      .select('license_doc_url, id_doc_url')
+      .eq('id', id)
+      .single()
+
     const { error } = await supabaseAdmin
       .from('doctor_profiles')
-      .update({ status: 'rejected', rejection_reason: reason })
+      .update({ status: 'rejected', rejection_reason: reason, license_doc_url: null, id_doc_url: null })
       .eq('id', id)
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+    // Application is rejected — its submitted documents are no longer needed
+    // and our privacy policy commits to deleting them, not just hiding them.
+    const docPaths = [
+      ...parseLicensePaths(beforeUpdate?.license_doc_url ?? null),
+      ...parseIdDocPaths(beforeUpdate?.id_doc_url ?? null),
+    ]
+    if (docPaths.length > 0) {
+      await supabaseAdmin.storage.from('doctor-documents').remove(docPaths).catch(() => {})
+    }
 
     const { data: profile } = await supabaseAdmin
       .from('doctor_profiles')

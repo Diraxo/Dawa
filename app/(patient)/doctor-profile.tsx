@@ -21,6 +21,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { capitalizeLanguage } from '@/lib/languageFormat'
 import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
@@ -421,7 +422,7 @@ export default function DoctorProfileScreen() {
             <View style={styles.languagePillRow}>
               {doctor.languages.map(lang => (
                 <View key={lang} style={styles.languagePill}>
-                  <Text style={styles.languagePillText}>{lang}</Text>
+                  <Text style={styles.languagePillText}>{capitalizeLanguage(lang)}</Text>
                 </View>
               ))}
             </View>

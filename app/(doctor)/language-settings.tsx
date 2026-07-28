@@ -7,7 +7,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
-import { AlertVariant, CareHubAlert } from '@/components/ui/CareHubAlert'
+import { AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -109,7 +109,7 @@ export default function DoctorLanguageSettingsScreen() {
         <View style={{ height: 32 }} />
       </ScrollView>
 
-      <CareHubAlert
+      <DawaAlert
         visible={!!alertState}
         variant={alertState?.variant ?? 'info'}
         title={alertState?.title ?? ''}

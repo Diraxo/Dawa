@@ -5,6 +5,7 @@
 // two independently-maintained copies of the same switch.
 import { supabase } from '@/lib/supabase'
 import { callkeep } from '@/lib/callkeep'
+import { ghostDebug } from '@/lib/logger'
 import { useAuthStore } from '@/store/authStore'
 
 type RouterLike = {
@@ -55,6 +56,8 @@ const CONSULTATION_FAMILY_LEAF_NAMES = new Set([
   'phone-consultation',
   'waiting-room',
   'my-reviews',
+  'consultation-summary',
+  'payment-return',
 ])
 
 // Route groups (the "(doctor)" folder) never appear in usePathname()'s
@@ -92,7 +95,11 @@ export function navigateFamilyRoute(
   defaultAction: 'push' | 'replace',
 ) {
   const name = leafName(targetPathname)
-  if (CONSULTATION_FAMILY_LEAF_NAMES.has(name) && rootState && routeExistsInTree(rootState, name)) {
+  const alreadyOnStack = !!(CONSULTATION_FAMILY_LEAF_NAMES.has(name) && rootState && routeExistsInTree(rootState, name))
+  ghostDebug('[notification-routing] navigateFamilyRoute', {
+    targetPathname, consultationId: params.consultationId, defaultAction, alreadyOnStack, hasRootState: !!rootState,
+  })
+  if (alreadyOnStack) {
     router.dismissTo({ pathname: targetPathname as any, params })
     return
   }
@@ -206,6 +213,7 @@ export function navigateForNotification(
   rootState?: NavStateSnapshot,
 ) {
   const { screen, consultationId, consultationType, channelId } = data ?? {}
+  ghostDebug('[notification-routing] navigateForNotification', { screen, consultationId, consultationType, channelId, userRole })
 
   // Set synchronously, before any navigation below runs, so splash.tsx's
   // own (later-resolving) default-role redirect can see it was beaten to
@@ -372,7 +380,19 @@ export function navigateForNotification(
 
     case 'consultation_summary':
       if (consultationId) {
-        router.push({ pathname: '/(patient)/consultation-summary', params: { consultationId } })
+        // Routed through navigateFamilyRoute (not a raw push) so a summary
+        // already sitting on the stack — reached via the in-app "View
+        // Summary" button on the completion modal — is brought to the front
+        // instead of getting a second instance stacked on top of it, which
+        // is exactly what happened when the same "summary ready" event fired
+        // both the in-app modal and this push notification.
+        navigateFamilyRoute(
+          router,
+          rootState,
+          '/(patient)/consultation-summary',
+          { consultationId },
+          'push',
+        )
       } else {
         router.push('/(patient)/(tabs)/appointments')
       }

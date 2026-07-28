@@ -1,5 +1,5 @@
 {
-  "name": "carehub",
+  "name": "dawa",
   "main": "./index.js",
   "version": "1.0.0",
   "scripts": {
@@ -50,6 +50,7 @@
     "expo-print": "~15.0.8",
     "expo-router": "~6.0.23",
     "expo-screen-capture": "~8.0.9",
+    "expo-secure-store": "~15.0.8",
     "expo-sharing": "~14.0.8",
     "expo-splash-screen": "~31.0.13",
     "expo-status-bar": "~3.0.9",
@@ -102,6 +103,9 @@
       "minimatch": {
         "brace-expansion": "1.1.16"
       }
+    },
+    "minimatch": {
+      "brace-expansion": "1.1.16"
     }
   }
 }

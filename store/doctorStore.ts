@@ -109,7 +109,7 @@ export const useDoctorStore = create<DoctorState>()(
         }),
     }),
     {
-      name: 'carehub-doctor-storage',
+      name: 'dawa-doctor-storage',
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (s) => ({
         isOnline: s.isOnline,

@@ -22,10 +22,11 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { LANGUAGES } from '@/constants/languages'
+import { markOAuthInFlight } from '@/lib/oauthResume'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
@@ -185,8 +186,18 @@ export default function SignInScreen() {
         if (authUrl) { window.location.href = authUrl.toString(); return }
         setGlobalError('Google sign-in failed. Please try again.')
       } else {
+        // Marked right before handing off to Chrome — if Android kills this
+        // process while it's foregrounded (routine on a release build with
+        // no debugger attached; Expo Go/dev client are exempt from the
+        // low-memory killer, which is why this never reproduces there) and
+        // has to cold-relaunch us via the redirect deep link, app/index.tsx
+        // reads this to skip replaying the full branded splash — see
+        // lib/oauthResume.ts.
+        await markOAuthInFlight()
         const redirectUrl = Linking.createURL('/oauth-native-callback')
+        console.log('[Google SSO] starting flow, redirectUrl:', redirectUrl)
         const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
+        console.log('[Google SSO] startSSOFlow resolved, createdSessionId:', createdSessionId ?? null)
         if (createdSessionId && ssoSetActive) {
           await ssoSetActive({ session: createdSessionId })
         } else {
@@ -226,8 +237,12 @@ export default function SignInScreen() {
         if (authUrl) { window.location.href = authUrl.toString(); return }
         setGlobalError('Apple sign-in failed. Please try again.')
       } else {
+        // See the matching comment in handleGoogle above.
+        await markOAuthInFlight()
         const redirectUrl = Linking.createURL('/oauth-native-callback')
+        console.log('[Apple SSO] starting flow, redirectUrl:', redirectUrl)
         const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_apple', redirectUrl })
+        console.log('[Apple SSO] startSSOFlow resolved, createdSessionId:', createdSessionId ?? null)
         if (createdSessionId && ssoSetActive) {
           await ssoSetActive({ session: createdSessionId })
         } else {
@@ -316,7 +331,7 @@ export default function SignInScreen() {
 
         {/* ── LOGO ── */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={56} variant="dark" />
+          <DawaLogo size={56} variant="dark" />
           <Text style={styles.brandName}>DA<Text style={styles.brandHub}>WA</Text></Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>

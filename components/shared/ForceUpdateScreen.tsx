@@ -15,8 +15,8 @@ interface Props {
 export default function ForceUpdateScreen({
   message = 'A new version of Dawa is available. Please update to continue using the app.',
   storeUrl = Platform.OS === 'ios'
-    ? 'https://apps.apple.com/app/carehub'
-    : 'https://play.google.com/store/apps/details?id=com.carehub',
+    ? 'https://apps.apple.com/app/dawa'
+    : 'https://play.google.com/store/apps/details?id=com.dawa.app',
   latestVersion = '',
 }: Props) {
   const currentVersion = Constants.expoConfig?.version ?? ''

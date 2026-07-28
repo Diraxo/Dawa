@@ -20,9 +20,9 @@ Deno.serve(async (req: Request) => {
   // Always redirect to the app's registered URL scheme.
   // ASWebAuthenticationSession / Custom Tabs will intercept this and close
   // the in-app browser, resolving openAuthSessionAsync with type:'success'.
-  // carehub://payment-return maps to app/(patient)/payment-return.tsx in
+  // dawa://payment-return maps to app/(patient)/payment-return.tsx in
   // Expo Router (route groups are transparent in URL paths).
-  const deepLink = `carehub://payment-return?${fwd.toString()}`
+  const deepLink = `dawa://payment-return?${fwd.toString()}`
 
   return new Response(null, {
     status: 302,

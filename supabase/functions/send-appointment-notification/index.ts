@@ -292,7 +292,7 @@ async function sendFCMDataMessage(
 // exactly (duplicated, not shared — see the FCM helpers above for why).
 // Secrets required (set via `supabase secrets set`):
 //   APNS_KEY_ID / APNS_TEAM_ID / APNS_PRIVATE_KEY
-const BUNDLE_ID = 'com.carehub.app'
+const BUNDLE_ID = 'com.dawa.app'
 
 async function sendAPNsVoIPPush(
   voipToken: string,

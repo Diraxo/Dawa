@@ -55,8 +55,20 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
     };
   }
 
-  // codegenNativeComponent is used by native view specs (Agora, stream-chat-expo, etc.)
-  // and is not supported on web. Stub it out so web bundles don't crash.
+  // @react-native-firebase/messaging is native-only. index.js/lib/voipPush.ts only
+  // require() it behind `if (Platform.OS === 'android')`, but Metro still statically
+  // resolves the require() call into the web dependency graph, and the package's
+  // SharedEventEmitter imports react-native internals unavailable on web — stub it out.
+  if (platform === 'web' && moduleName === '@react-native-firebase/messaging') {
+    return {
+      filePath: path.resolve(__dirname, 'lib/firebase-messaging.web.js'),
+      type: 'sourceFile',
+    };
+  }
+
+  // codegenNativeComponent/codegenNativeCommands are used by native view specs
+  // (Agora, stream-chat-expo, react-native-pdf, etc.) and are not supported on
+  // web. Stub them out so web bundles don't crash.
   if (
     platform === 'web' &&
     (moduleName === 'react-native/Libraries/Utilities/codegenNativeComponent' ||
@@ -64,6 +76,16 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   ) {
     return {
       filePath: path.resolve(__dirname, 'lib/codegenNativeComponent.web.js'),
+      type: 'sourceFile',
+    };
+  }
+  if (
+    platform === 'web' &&
+    (moduleName === 'react-native/Libraries/Utilities/codegenNativeCommands' ||
+      moduleName.endsWith('/codegenNativeCommands'))
+  ) {
+    return {
+      filePath: path.resolve(__dirname, 'lib/codegenNativeCommands.web.js'),
       type: 'sourceFile',
     };
   }

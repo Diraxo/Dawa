@@ -41,6 +41,11 @@ yarn-error.*
 carehub-ce3e3-*.json
 google-services.json
 
+# Android release signing keystore — never commit, keep the only copy backed up offline
+credentials/
+*.keystore
+*.jks
+
 # typescript
 *.tsbuildinfo
 

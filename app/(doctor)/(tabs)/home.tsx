@@ -4,7 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useRootNavigationState, useRouter } from 'expo-router'
 import * as Notifications from 'expo-notifications'
 import { Image } from 'expo-image'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   AppState,
@@ -27,12 +27,14 @@ import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { callkeep } from '@/lib/callkeep'
+import { ghostDebug } from '@/lib/logger'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
-import { ethiopiaTodayRange } from '@/lib/slotGeneration'
+import { ethiopiaTodayRange, SLOT_DURATION_MINS } from '@/lib/slotGeneration'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useNotificationCenter } from '@/hooks/useNotificationCenter'
+import { navigateFamilyRoute } from '@/lib/notificationNav'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
@@ -72,8 +74,15 @@ function ringIncomingRequest(title: string, body: string, consultationId: string
 }
 
 interface ScheduleItem {
-  id: string; patientId: string; patientName: string; patientPhotoUrl: string | null; time: string; type: 'chat' | 'phone' | 'video'; status: string
+  id: string; patientId: string; patientName: string; patientPhotoUrl: string | null; time: string; scheduledAt: string; type: 'chat' | 'phone' | 'video'; status: string
 }
+
+// Statuses that mean "hasn't started yet" — once scheduledAt + the slot
+// duration has passed with no activity, these are stale and should drop off
+// Today's Schedule on their own (no manual refresh). A consultation that did
+// start (accepted/in_progress/active) stays until its own status changes —
+// a live call legitimately can run past its scheduled slot.
+const NOT_YET_STARTED_STATUSES = new Set(['pending', 'waiting_for_doctor', 'scheduled'])
 
 function getFormattedDate() {
   return new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
@@ -102,6 +111,18 @@ export default function DoctorHomeScreen() {
   const firstName = rawFirstName.replace(/^Dr\.?\s*/i, '').trim() || 'Doctor'
 
   const [schedule, setSchedule] = useState<ScheduleItem[]>([])
+  // Today's Schedule must drop an expired, never-started item purely because
+  // the clock ticked forward — no DB write, realtime event, or manual
+  // refresh happens in that case, so nothing else re-renders this list.
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  const visibleSchedule = useMemo(() => schedule.filter((item) => {
+    if (!NOT_YET_STARTED_STATUSES.has(item.status)) return true
+    return new Date(item.scheduledAt).getTime() + SLOT_DURATION_MINS * 60_000 > nowTick
+  }), [schedule, nowTick])
   const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
   const [stats, setStats] = useState({ totalConsultations: 0, completedToday: 0, earnings: 0, rating: 0 })
   const statsCacheKey = user?.id ? `doctor-dashboard-stats:${user.id}` : null
@@ -134,6 +155,7 @@ export default function DoctorHomeScreen() {
         patientName: (r.patient as any)?.full_name ?? 'Patient',
         patientPhotoUrl: (r.patient as any)?.profile_photo_url ?? null,
         time: new Date(r.scheduled_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        scheduledAt: r.scheduled_at,
         type: r.type ?? 'chat',
         status: r.status ?? 'scheduled',
       }))
@@ -294,6 +316,9 @@ export default function DoctorHomeScreen() {
       .order('waiting_started_at', { ascending: true })
 
     const list = waitingList ?? []
+    ghostDebug('[incoming-consultation] checkForWaitingRequest', {
+      profileId, busy, waitingIds: list.map((w) => w.id),
+    })
     if (list.length === 0) {
       setQueueList([])
     } else {
@@ -326,7 +351,10 @@ export default function DoctorHomeScreen() {
     // already has the single incoming-request full screen open for this
     // exact consultation — don't navigate there a second time. This is the
     // single source of truth check: see store/activeIncomingRequestStore.ts.
-    if (useActiveIncomingRequestStore.getState().shownRequestId === waiting.id) return
+    if (useActiveIncomingRequestStore.getState().shownRequestId === waiting.id) {
+      ghostDebug('[incoming-consultation] skipped — already shown elsewhere', { consultationId: waiting.id })
+      return
+    }
     // Phone/video requests already ring through the native ConnectionService
     // incoming-call UI (see lib/callkeep.ts + the 'new_request' case in
     // supabase/functions/handle-consultation-notification) as soon as the
@@ -355,10 +383,20 @@ export default function DoctorHomeScreen() {
       `${(patientData as any)?.full_name ?? 'A patient'} is waiting for you`,
       waiting.id,
     )
+    ghostDebug('[incoming-consultation] navigating to incoming-request from Home', { consultationId: waiting.id })
 
-    router.push({
-      pathname: '/(doctor)/incoming-request',
-      params: {
+    // Routed through the shared dedup helper (already used by the
+    // push-notification-tap path in notificationNav.ts) rather than a raw
+    // router.push — this surface's own Realtime/poll detection previously
+    // could stack a second live instance of this screen for the same
+    // consultation on top of one a notification tap (or the Consultations
+    // tab) had already pushed, since only the notification path checked the
+    // nav tree before navigating.
+    navigateFamilyRoute(
+      router,
+      rootNavigationState,
+      '/(doctor)/incoming-request',
+      {
         patientName:      (patientData as any)?.full_name ?? 'Patient',
         patientId:        waiting.patient_id ?? '',
         patientClerkId:   (patientData as any)?.clerk_id ?? '',
@@ -366,7 +404,8 @@ export default function DoctorHomeScreen() {
         consultationType: waiting.type ?? 'chat',
         consultationId:   waiting.id,
       },
-    })
+      'push',
+    )
   }
 
   useEffect(() => {
@@ -390,7 +429,13 @@ export default function DoctorHomeScreen() {
           table: 'consultations',
           filter: `doctor_id=eq.${doctorProfileId}`,
         },
-        async () => {
+        async (payload) => {
+          ghostDebug('[realtime] doctor-requests channel event', {
+            doctorProfileId,
+            eventType: (payload as any).eventType,
+            consultationId: (payload.new as any)?.id ?? (payload.old as any)?.id,
+            status: (payload.new as any)?.status,
+          })
           const token = await getToken()
           if (!token) return
           const client = getAuthClient(token)
@@ -609,13 +654,13 @@ export default function DoctorHomeScreen() {
 
           {/* ── Today's Schedule ── */}
           <Text style={[styles.sectionTitle, styles.mt20]}>{t('todaySchedule')}</Text>
-          {schedule.length === 0 ? (
+          {visibleSchedule.length === 0 ? (
             <View style={styles.emptyWrap}>
               <Ionicons name="calendar-outline" size={40} color={colors.steelGrey} />
               <Text style={styles.emptyText}>{t('noScheduledAppts')}</Text>
             </View>
           ) : (
-            schedule.map((item) => (
+            visibleSchedule.map((item) => (
               <Pressable
                 key={item.id}
                 style={({ pressed }) => [styles.scheduleItem, pressed && { opacity: 0.75 }]}

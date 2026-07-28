@@ -14,7 +14,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useTranslation } from 'react-i18next'
 
-import { CareHubAlert } from '@/components/ui/CareHubAlert'
+import { DawaAlert } from '@/components/ui/DawaAlert'
 import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -287,7 +287,7 @@ export default function DoctorProfileScreen() {
 
   return (
     <>
-      <CareHubAlert
+      <DawaAlert
         visible={showLogoutAlert}
         variant="logout"
         title="Log Out"
@@ -318,7 +318,7 @@ export default function DoctorProfileScreen() {
         ]}
         onClose={() => setShowLogoutAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showComingSoonAlert}
         variant="info"
         title="Account Pending"
@@ -328,7 +328,7 @@ export default function DoctorProfileScreen() {
         ]}
         onClose={() => setShowComingSoonAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteAlert}
         variant="error"
         title="Delete Account"
@@ -339,7 +339,7 @@ export default function DoctorProfileScreen() {
         ]}
         onClose={() => setShowDeleteAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteConfirmAlert}
         variant="error"
         title="Final Confirmation"
@@ -350,7 +350,7 @@ export default function DoctorProfileScreen() {
         ]}
         onClose={() => setShowDeleteConfirmAlert(false)}
       />
-      <CareHubAlert
+      <DawaAlert
         visible={showDeleteErrorAlert}
         variant="error"
         title="Unable to Delete"

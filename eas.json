@@ -16,7 +16,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_ZXhwZXJ0LWdhemVsbGUtMTkuY2xlcmsuYWNjb3VudHMuZGV2JA",
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZGF3YWFwcC5vbmxpbmUk",
         "EXPO_PUBLIC_SUPABASE_URL": "https://ulrgkqjjiclulnuotifh.supabase.co",
         "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVscmdrcWpqaWNsdWxudW90aWZoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTk2NzAsImV4cCI6MjA5NjU3NTY3MH0.Q68vTs6N5Cr51MdAEMjdZaBUo2M5fYN5RzoYQtu3Gs0",
         "EXPO_PUBLIC_STREAM_API_KEY": "j7n76nkuujht",
@@ -27,6 +27,20 @@
     "production": {
       "android": {
         "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuZGF3YWFwcC5vbmxpbmUk",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://ulrgkqjjiclulnuotifh.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVscmdrcWpqaWNsdWxudW90aWZoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTk2NzAsImV4cCI6MjA5NjU3NTY3MH0.Q68vTs6N5Cr51MdAEMjdZaBUo2M5fYN5RzoYQtu3Gs0",
+        "EXPO_PUBLIC_STREAM_API_KEY": "j7n76nkuujht",
+        "EXPO_PUBLIC_AGORA_APP_ID": "d87044d67812417aa2e0baf3029b1f8c",
+        "EXPO_PUBLIC_WEB_URL": "https://www.dawa.app"
+      }
+    },
+    "production-apk": {
+      "extends": "production",
+      "android": {
+        "buildType": "apk"
       }
     }
   },

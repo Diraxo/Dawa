@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/server'
 import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 import { stripDrPrefix } from '@/lib/utils'
 import { sendDoctorStatusPush } from '@/lib/doctorStatusPush'
+import { parseLicensePaths } from '@/lib/doctorDocuments'
 
 async function sendEmail(to: string, subject: string, body: string) {
   const apiKey = process.env.RESEND_API_KEY
@@ -62,11 +63,40 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (action === 'approve_document_update' || action === 'reject_document_update') {
     const newReviewStatus = action === 'approve_document_update' ? 'approved' : 'rejected'
+
+    const updatePayload: Record<string, unknown> = {
+      document_review_status: newReviewStatus,
+      document_reviewed_at: new Date().toISOString(),
+    }
+
+    // On rejection, drop the newly-submitted (still-unreviewed) file — it's
+    // always the last entry, since my-documents.tsx only ever appends — and
+    // delete it from storage rather than leaving a rejected doc retained
+    // alongside the doctor's still-approved documents.
+    let rejectedPath: string | null = null
+    if (action === 'reject_document_update') {
+      const { data: current } = await supabaseAdmin
+        .from('doctor_profiles')
+        .select('license_doc_url')
+        .eq('id', id)
+        .single()
+      const paths = parseLicensePaths(current?.license_doc_url ?? null)
+      if (paths.length > 0) {
+        rejectedPath = paths[paths.length - 1]
+        const remaining = paths.slice(0, -1)
+        updatePayload.license_doc_url = remaining.length > 0 ? JSON.stringify(remaining) : null
+      }
+    }
+
     const { error } = await supabaseAdmin
       .from('doctor_profiles')
-      .update({ document_review_status: newReviewStatus, document_reviewed_at: new Date().toISOString() })
+      .update(updatePayload)
       .eq('id', id)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+    if (rejectedPath) {
+      await supabaseAdmin.storage.from('doctor-documents').remove([rejectedPath]).catch(() => {})
+    }
 
     const { data: profile } = await supabaseAdmin
       .from('doctor_profiles')

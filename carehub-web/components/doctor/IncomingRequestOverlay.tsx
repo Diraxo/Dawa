@@ -26,7 +26,7 @@ const TYPE_META: Record<string, { icon: typeof MessageCircle; label: string; col
   video: { icon: Video,         label: 'Video Consultation', color: '#7C3AED', bg: 'rgba(124,58,237,0.12)' },
 }
 
-const NOTIF_BANNER_DISMISSED_KEY = 'carehub_notif_banner_dismissed'
+const NOTIF_BANNER_DISMISSED_KEY = 'dawa_notif_banner_dismissed'
 
 // Notification title wording — never call every consultation a "call".
 const NOTIF_TYPE_TITLE: Record<string, string> = {
@@ -277,8 +277,18 @@ export default function IncomingRequestOverlay() {
 
       // Realtime subscription — fires immediately when consultation row changes
       // (requires consultations to be in the supabase_realtime publication — migration 022)
+      // Guards against a stale same-topic channel left behind by a fast-
+      // refresh/remount (React StrictMode, auth-state transition) — without
+      // this, supabase-js's per-topic cache can throw "cannot add
+      // postgres_changes callbacks after subscribe()" on the leftover, or
+      // worse, leave two live subscriptions both calling checkForWaiting for
+      // the same doctor. Mirrors the mobile equivalents in
+      // app/(doctor)/(tabs)/home.tsx and app/(doctor)/incoming-request.tsx.
+      const overlayTopic = `incoming-overlay-${profile.id}`
+      const staleOverlayChannel = supabase.getChannels().find((c) => c.topic === `realtime:${overlayTopic}`)
+      if (staleOverlayChannel) supabase.removeChannel(staleOverlayChannel)
       channel = supabase
-        .channel(`incoming-overlay-${profile.id}`)
+        .channel(overlayTopic)
         .on('postgres_changes', {
           event:  '*',
           schema: 'public',

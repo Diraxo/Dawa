@@ -20,10 +20,11 @@ import { fonts } from '@/constants/fonts'
 import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { formatDoctorName } from '@/lib/nameFormat'
+import { ghostDebug } from '@/lib/logger'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
-const PENDING_KEY = 'carehub_pending_consultation'
+const PENDING_KEY = 'dawa_pending_consultation'
 
 const TYPE_META: Record<string, { icon: string; label: string; color: string }> = {
   chat:  { icon: 'chatbubble-ellipses', label: 'Chat Consultation',  color: colors.tealGreen },
@@ -110,6 +111,11 @@ export default function WaitingRoomScreen() {
   // patient cancels — never a countdown/timeout. There is no server-side
   // auto-expiry of a paid, waiting consultation; this screen only reacts to
   // a real status change (accepted/declined/cancelled).
+
+  useEffect(() => {
+    ghostDebug('[waiting-room] mounted', { consultationId, doctorId, consultationType })
+    return () => { ghostDebug('[waiting-room] unmounted', { consultationId }) }
+  }, [consultationId])
 
   // ── Save pending state for session recovery ──────────────────────────────
   useEffect(() => {
@@ -218,6 +224,7 @@ export default function WaitingRoomScreen() {
         },
         (payload) => {
           const newStatus: string = (payload.new as any)?.status ?? ''
+          ghostDebug('[realtime] waiting-room channel UPDATE', { consultationId, newStatus, navigatedAlready: navigated.current })
           setConsultStatus(newStatus)
 
           if (navigated.current) return
@@ -289,6 +296,7 @@ export default function WaitingRoomScreen() {
         .eq('id', consultationId)
         .single()
       if (!pollData || navigated.current) return
+      ghostDebug('[waiting-room] poll status', { consultationId, status: pollData.status })
       setConsultStatus(pollData.status)
       const s = pollData.status
       if (s === 'accepted' || s === 'in_progress' || s === 'active') {

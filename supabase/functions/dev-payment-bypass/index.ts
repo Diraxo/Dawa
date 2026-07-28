@@ -130,6 +130,29 @@ Deno.serve(async (req: Request) => {
     )
   }
 
+  // If this consultation is a partial-credit booking, mark the source credit
+  // as used now that the (simulated) difference payment is confirmed — mirrors
+  // chapa-webhook's identical step for the real payment path. Without this,
+  // a dev/staging booking that only partially covers its fee with a credit
+  // stays "paid" while the credit that funded it is left looking unused.
+  try {
+    const { data: paidConsult } = await supabase
+      .from('consultations')
+      .select('credit_source_id')
+      .eq('id', consultation_id)
+      .single()
+
+    if (paidConsult?.credit_source_id) {
+      await supabase
+        .from('consultations')
+        .update({ credit_used: true })
+        .eq('id', paidConsult.credit_source_id)
+        .eq('credit_used', false)
+    }
+  } catch {
+    // best effort — credit cleanup is not critical for payment confirmation
+  }
+
   return new Response(JSON.stringify({ ok: true }), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   })

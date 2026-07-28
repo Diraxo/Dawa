@@ -16,8 +16,8 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
-import { CareHubAlert } from '@/components/ui/CareHubAlert'
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaAlert } from '@/components/ui/DawaAlert'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { OTPInput } from '@/components/ui/OTPInput'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -210,7 +210,7 @@ export default function ForgotPasswordScreen() {
   return (
     <>
       {/* ── Success alert: password reset ── */}
-      <CareHubAlert
+      <DawaAlert
         visible={successAlert}
         variant="success"
         title={t('passwordResetSuccess')}
@@ -229,7 +229,7 @@ export default function ForgotPasswordScreen() {
       />
 
       {/* ── Info alert: code resent ── */}
-      <CareHubAlert
+      <DawaAlert
         visible={resendAlert}
         variant="info"
         title={t('codeResent')}
@@ -265,7 +265,7 @@ export default function ForgotPasswordScreen() {
 
         {/* Logo */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={68} variant="dark" />
+          <DawaLogo size={68} variant="dark" />
           <Text style={styles.brandName}>
             DA<Text style={styles.brandHub}>WA</Text>
           </Text>

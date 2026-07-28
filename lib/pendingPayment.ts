@@ -6,7 +6,7 @@
 // takes over. Kept in its own module (rather than exported from
 // BookingModal.tsx) so screens that only need the key don't have to pull in
 // the whole booking-modal component tree.
-export const PENDING_PAYMENT_KEY = 'carehub_pending_payment'
+export const PENDING_PAYMENT_KEY = 'dawa_pending_payment'
 
 export interface PendingPayment {
   consultationId: string

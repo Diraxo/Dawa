@@ -392,6 +392,9 @@ export default function BookingPage() {
         if (msg.includes('OUTSIDE_HOURS')) {
           throw new Error("This time is outside the doctor's working hours. Please pick another time.")
         }
+        if (msg.includes('RATE_LIMITED')) {
+          throw new Error('Too many booking attempts in a short time. Please wait a moment and try again.')
+        }
         throw new Error("We couldn't complete this booking. Please try again.")
       }
       createdConsultationId = newConsultationId as string

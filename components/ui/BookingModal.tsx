@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useRouter } from 'expo-router'
+import { useNavigationContainerRef, useRouter } from 'expo-router'
 import * as Linking from 'expo-linking'
 import * as WebBrowser from 'expo-web-browser'
 import { useRef, useEffect, useState } from 'react'
@@ -20,12 +20,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
-import { AlertButton, AlertVariant, CareHubAlert } from '@/components/ui/CareHubAlert'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 import { Doctor } from '@/components/ui/DoctorCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { navigateFamilyRoute } from '@/lib/notificationNav'
+import { ghostDebug } from '@/lib/logger'
 import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
 import { useServerNow } from '@/lib/serverClock'
 import {
@@ -90,10 +92,11 @@ const BOOKING_CONFLICT_TITLES: Record<string, string> = {
   DAY_OFF:               'Doctor Unavailable',
   DATE_BLOCKED:          'Doctor Unavailable',
   OUTSIDE_HOURS:         'Outside Working Hours',
+  RATE_LIMITED:          'Too Many Attempts',
 }
 
 // One conflict title reads as an error, the rest as a soft "try something
-// else" nudge — matches how CareHubAlert's variant governs icon/color.
+// else" nudge — matches how DawaAlert's variant governs icon/color.
 const BOOKING_CONFLICT_VARIANTS: Record<string, AlertVariant> = {
   SLOT_TAKEN: 'warning',
   DOCTOR_SCHEDULED_SOON: 'warning',
@@ -103,6 +106,7 @@ const BOOKING_CONFLICT_VARIANTS: Record<string, AlertVariant> = {
   DAY_OFF: 'warning',
   DATE_BLOCKED: 'warning',
   OUTSIDE_HOURS: 'warning',
+  RATE_LIMITED: 'warning',
 }
 
 // Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
@@ -122,6 +126,7 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): P
 export function BookingModal({ visible, doctor, onClose, initialStep, initialConsultType }: Props) {
   const insets = useSafeAreaInsets()
   const router = useRouter()
+  const navContainerRef = useNavigationContainerRef()
   const { getToken } = useAuth()
   const { user } = useUser()
   const slideAnim = useRef(new Animated.Value(300)).current
@@ -381,7 +386,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
 
   // Branded replacement for Alert.alert on booking-conflict paths (Issue 3 —
   // a native platform dialog for an expected business-rule rejection reads
-  // as "the app is broken"; CareHubAlert matches the rest of the app's UI).
+  // as "the app is broken"; DawaAlert matches the rest of the app's UI).
   const showConflictAlert = (variant: AlertVariant, title: string, message: string, buttons: AlertButton[]) => {
     setConflictAlert({ visible: true, variant, title, message, buttons })
   }
@@ -396,12 +401,12 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     const chargeAmount = creditCoversAll ? 0 : additionalRequired
 
     // Set up Linking listener BEFORE opening the browser so we catch the
-    // carehub:// deep link even when Chapa's flow goes through an external
+    // dawa:// deep link even when Chapa's flow goes through an external
     // banking app (CBE Birr, Telebirr, etc.) that breaks the
     // ASWebAuthenticationSession context.
-    // carehub://payment-return matches app/(patient)/payment-return.tsx via
+    // dawa://payment-return matches app/(patient)/payment-return.tsx via
     // Expo Router (route groups are transparent in URL paths).
-    const deepLinkReturn = 'carehub://payment-return'
+    const deepLinkReturn = 'dawa://payment-return'
     let capturedLinkingUrl: string | null = null
     let resolveLinking: (url: string) => void = () => {}
     const linkingPromise = new Promise<string>(res => { resolveLinking = res })
@@ -414,9 +419,17 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
 
     const navigateToReturn = (chapaStatus: string, id: string, scheduledAt: string) => {
       onClose()
-      router.push({
-        pathname: '/(patient)/payment-return',
-        params: {
+      // The same dawa://payment-return deep link can also be delivered
+      // straight to Expo Router's own linking handler (no consultationId,
+      // looked up from tx_ref instead) — reusing whichever payment-return
+      // instance is already on the stack instead of stacking a second one
+      // is what stops a stale duplicate mount from showing "Payment Failed"
+      // over an already-succeeded, already-visible Waiting Room (Issue 5/6).
+      navigateFamilyRoute(
+        router,
+        navContainerRef.current?.getRootState(),
+        '/(patient)/payment-return',
+        {
           consultationId:   id,
           doctorId:         doctor.id,
           doctorName:       doctor.name,
@@ -425,7 +438,8 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
           timing,
           scheduledAt: timing !== 'now' ? scheduledAt : '',
         },
-      })
+        'push',
+      )
     }
 
     try {
@@ -499,6 +513,14 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         'Booking request timed out. Please check your connection and try again.',
       )
 
+      ghostDebug('[creation] book_appointment_slot resolved', {
+        consultationId: newConsultationId ?? null,
+        error: consultErr?.message ?? null,
+        timing,
+        consultType,
+        doctorId: doctor.id,
+      })
+
       if (consultErr || !newConsultationId) {
         const msg = consultErr?.message ?? ''
         if (msg.includes('SLOT_TAKEN')) {
@@ -537,6 +559,9 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         if (msg.includes('OUTSIDE_HOURS')) {
           throw new BookingConflictError('OUTSIDE_HOURS', 'This time is outside the doctor\'s working hours. Please pick another time.')
         }
+        if (msg.includes('RATE_LIMITED')) {
+          throw new BookingConflictError('RATE_LIMITED', 'Too many booking attempts in a short time. Please wait a moment and try again.')
+        }
         throw new BookingConflictError('BOOKING_FAILED', 'We couldn\'t complete this booking. Please try again.')
       }
       consultationId = newConsultationId as string
@@ -552,15 +577,21 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         // must not — apply-credit already left status='scheduled' for these,
         // matching the Chapa path in payment-return.tsx.
         if (timing === 'now') {
-          router.push({
-            pathname: '/(patient)/waiting-room',
-            params: {
+          // A waiting-room instance from an earlier attempt/recovery may
+          // already be mounted — reuse it instead of stacking a duplicate
+          // (Issue 2/6: repeated Waiting Room screens).
+          navigateFamilyRoute(
+            router,
+            navContainerRef.current?.getRootState(),
+            '/(patient)/waiting-room',
+            {
               consultationId,
               doctorId:         doctor.id,
               doctorName:       doctor.name,
               consultationType: consultType,
             },
-          })
+            'push',
+          )
         } else {
           router.push('/(patient)/(tabs)/appointments')
         }
@@ -568,9 +599,15 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       }
 
       // ── Partial credit — call apply-credit first (stores credit_source_id) ─
+      // A genuine validation failure here (e.g. the credit was already used,
+      // or a type mismatch) must not be silently swallowed — doing so let the
+      // booking fall through to initialize-payment, which re-validates
+      // independently and can surface a differently-worded, confusing error
+      // for what was really this same failure (Issue 7). Propagates to the
+      // catch block below, which already renders it via showConflictAlert/
+      // Alert.alert same as every other booking failure.
       if (activeCredit) {
         await applyFullCredit(consultationId, activeCredit.creditConsultationId)
-          .catch(() => { /* partial credit already stored even if marking fails */ })
       }
 
       // ── DEV-ONLY: simulate payment instead of opening Chapa ─────────────────
@@ -646,7 +683,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
 
       // Chapa requires an https:// return_url and strips all custom query params it
       // didn't add — so we use the bare edge function URL with no extra params.
-      // The edge function always 302-redirects to carehub://payment/return which
+      // The edge function always 302-redirects to dawa://payment/return which
       // ASWebAuthenticationSession intercepts (matching deepLinkReturn sentinel below).
       const chapaReturnUrl = `${supabaseUrl}/functions/v1/payment-redirect`
 
@@ -713,7 +750,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       } catch {}
 
       // Open Chapa checkout. deepLinkReturn is the sentinel: when the web
-      // return page does window.location.replace('carehub://...'), the
+      // return page does window.location.replace('dawa://...'), the
       // in-app browser catches it and resolves with type:'success'.
       const result = await WebBrowser.openAuthSessionAsync(payData.checkout_url, deepLinkReturn)
 
@@ -731,7 +768,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       // ── Dismiss: browser closed ────────────────────────────────────────────
       // When Chapa's flow opens an external banking app (CBE Birr, Telebirr…),
       // ASWebAuthenticationSession breaks and returns 'dismiss'. The bank app
-      // completes the payment then iOS fires the carehub:// deep link via
+      // completes the payment then iOS fires the dawa:// deep link via
       // Linking. We wait up to 4 s for that event before assuming cancellation.
       if (!capturedLinkingUrl) {
         await Promise.race([
@@ -1161,7 +1198,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
         </View>
       </Animated.View>
     </Modal>
-    <CareHubAlert
+    <DawaAlert
       visible={conflictAlert.visible}
       variant={conflictAlert.variant}
       title={conflictAlert.title}

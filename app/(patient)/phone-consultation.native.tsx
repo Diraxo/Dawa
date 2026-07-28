@@ -40,6 +40,7 @@ import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
 import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
+import { useActiveChatStore } from '@/store/activeChatStore'
 import { callkeep } from '@/lib/callkeep'
 import { logger } from '@/lib/logger'
 import { formatDoctorName } from '@/lib/nameFormat'
@@ -49,6 +50,7 @@ import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 
 const GRACE_PERIOD_MS = 90_000
 const RING_TIMEOUT_SECS = 60
@@ -186,6 +188,12 @@ export default function PhoneConsultationScreen() {
   )
 
   const [readyToJoin, setReadyToJoin] = useState(skipRinging)
+  // Issue 17: DawaAlert (design-system dialog) replaces native Alert.alert
+  // for the leave-call confirmation below — a native alert reads as "the
+  // app crashed" against the rest of the app's branded UI.
+  const [simpleAlert, setSimpleAlert] = useState<{ variant: AlertVariant; title: string; message: string; buttons?: AlertButton[] } | null>(null)
+  const showSimpleAlert = (variant: AlertVariant, title: string, message: string, buttons?: AlertButton[]) =>
+    setSimpleAlert({ variant, title, message, buttons })
   const [muted, setMuted] = useState(false)
   const [preMuted, setPreMuted] = useState(false) // muted before answering
   const [speakerOn, setSpeakerOn] = useState(false)
@@ -259,6 +267,19 @@ export default function PhoneConsultationScreen() {
     setActiveConsultationId(channelName)
     return () => setActiveConsultationId(null)
   }, [channelName, setActiveConsultationId])
+
+  // Same store the standalone chat screen writes to (channel id ==
+  // consultation id here) — without this, app/_layout.tsx's global chat
+  // listener never recognises "already viewing this conversation" while on
+  // this call screen's embedded in-call chat, and fires a full Android
+  // notification for a message the user is already in the middle of seeing
+  // update live in the in-call panel (Issue 15).
+  const setActiveChatChannelId = useActiveChatStore((s) => s.setActiveChannelId)
+  useEffect(() => {
+    if (!channelName) return
+    setActiveChatChannelId(channelName)
+    return () => setActiveChatChannelId(null)
+  }, [channelName, setActiveChatChannelId])
 
   const phaseRef = useRef(state.phase)
   useEffect(() => { phaseRef.current = state.phase }, [state.phase])
@@ -850,11 +871,12 @@ export default function PhoneConsultationScreen() {
 
   const handleEnd = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
-    Alert.alert('Leave Call', 'You can rejoin at any time — the doctor will remain in the consultation.', [
-      { text: 'Cancel', style: 'cancel' },
+    showSimpleAlert('confirm', 'Leave Call', 'You can rejoin at any time — the doctor will remain in the consultation.', [
+      { text: 'Cancel', style: 'outline', onPress: () => setSimpleAlert(null) },
       {
-        text: 'Leave Call', style: 'destructive',
+        text: 'Leave Call', style: 'danger',
         onPress: () => {
+          setSimpleAlert(null)
           // Best-effort, fire-and-forget — signals the doctor's screen to
           // show "Patient has left" instead of a generic "Reconnecting…".
           // Never touches `status`: the consultation stays in_progress.
@@ -1167,6 +1189,15 @@ export default function PhoneConsultationScreen() {
         rawStatus={completion.rawStatus}
         onViewSummary={completion.goToSummary}
         onClose={completion.dismissModal}
+      />
+
+      <DawaAlert
+        visible={!!simpleAlert}
+        variant={simpleAlert?.variant ?? 'info'}
+        title={simpleAlert?.title ?? ''}
+        message={simpleAlert?.message ?? ''}
+        buttons={simpleAlert?.buttons ?? [{ text: 'OK', onPress: () => setSimpleAlert(null) }]}
+        onClose={() => setSimpleAlert(null)}
       />
     </SafeAreaView>
   )

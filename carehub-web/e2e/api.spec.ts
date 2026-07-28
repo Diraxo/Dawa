@@ -2,10 +2,10 @@
  * E2E: API route protection tests (no auth required — tests that unauthed requests are blocked).
  * These tests run without any browser session so they're always executable in CI.
  */
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 
 test.describe('API route protection', () => {
-  async function apiGet(page: Parameters<typeof test>[1] extends infer F ? F extends (args: { page: infer P }) => unknown ? P : never : never, path: string) {
+  async function apiGet(page: Page, path: string) {
     const res = await page.request.get(path)
     return res
   }

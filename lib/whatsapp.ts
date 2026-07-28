@@ -1,6 +1,6 @@
 import { Alert, Linking } from 'react-native'
 
-export const SUPPORT_WHATSAPP_NUMBER = '2517777012633'
+export const SUPPORT_WHATSAPP_NUMBER = '251777012633'
 export const SUPPORT_EMAIL = 'dawasupport@gmail.com'
 
 // Opens the native WhatsApp app when installed, falling back to wa.me

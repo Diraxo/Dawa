@@ -23,7 +23,7 @@ import { getAuthClient, supabase } from '@/lib/supabase'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
-import { logger } from '@/lib/logger'
+import { ghostDebug, logger } from '@/lib/logger'
 import { useTranslation } from 'react-i18next'
 
 const DECLINE_REASONS = ['Currently busy', 'Wrong specialty', 'Technical issue', 'Other']
@@ -64,6 +64,8 @@ export default function IncomingRequestScreen() {
 
   useEffect(() => {
     logger.log('[IncomingRequestScreen] Mounted — final pipeline stage reached, consultationId=', consultationId)
+    ghostDebug('[incoming-consultation] IncomingRequestScreen mounted', { consultationId, consultationType })
+    return () => { ghostDebug('[incoming-consultation] IncomingRequestScreen unmounted', { consultationId }) }
   }, [consultationId])
 
   // Auto-clear: reaching this screen directly (Home tab tap, realtime
@@ -141,6 +143,7 @@ export default function IncomingRequestScreen() {
         .eq('id', consultationId)
         .single()
       if (cancelled || navigatedRef.current || !data) return
+      ghostDebug('[incoming-consultation] freshness check', { consultationId, status: data.status })
       if (data.status === 'waiting_for_doctor') return // still fresh — show the UI normally
 
       navigatedRef.current = true
@@ -188,6 +191,7 @@ export default function IncomingRequestScreen() {
         { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `id=eq.${consultationId}` },
         (payload) => {
           const status: string = (payload.new as any)?.status ?? ''
+          ghostDebug('[realtime] incoming-request channel UPDATE', { consultationId, status, navigatedAlready: navigatedRef.current })
           if (navigatedRef.current) return
           if (status === 'cancelled') {
             navigatedRef.current = true
@@ -347,6 +351,7 @@ export default function IncomingRequestScreen() {
       return
     }
     if (navigatedRef.current) return
+    ghostDebug('[consultation-acceptance] handleAccept called', { consultationId, consultationType })
 
     // Disable the buttons immediately on tap — before any await — so a
     // double-tap can never start two concurrent accept flows (which would
@@ -441,6 +446,7 @@ export default function IncomingRequestScreen() {
       })()
 
       const [, result] = await Promise.all([channelCreate, writeAccepted(consultationId)])
+      ghostDebug('[consultation-acceptance] writeAccepted result', { consultationId, result })
       if (result === 'busy') alertAcceptBusy()
       else if (result !== 'ok') alertAcceptFailed(consultationId, patientName ?? 'Patient')
     })()

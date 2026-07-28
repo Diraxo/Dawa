@@ -288,6 +288,38 @@ export default function MedicalRecordsScreen() {
     }
   }
 
+  const doDelete = async (record: MedicalRecord) => {
+    if (!record.storagePath) return
+    try {
+      const token = await getToken()
+      if (!token) return
+      const { error } = await getAuthClient(token).storage
+        .from('patient-documents')
+        .remove([record.storagePath])
+      if (error) throw error
+      setRecords(prev => {
+        const next = prev.filter(r => r.id !== record.id)
+        if (recordsCacheKey) setCachedJson(recordsCacheKey, next)
+        return next
+      })
+      if (previewRecord?.id === record.id) { setPreviewRecord(null); setPreviewImageUrl(null) }
+      Alert.alert(t('deleteDocument'), t('documentDeleted'))
+    } catch (err: any) {
+      Alert.alert(t('error'), err?.message ?? t('deleteFailed'))
+    }
+  }
+
+  const handleDelete = (record: MedicalRecord) => {
+    Alert.alert(
+      t('deleteDocument'),
+      t('deleteDocumentConfirm', { name: record.title }),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        { text: t('delete'), style: 'destructive', onPress: () => doDelete(record) },
+      ],
+    )
+  }
+
   const handleDownload = async (record: MedicalRecord) => {
     if (!record.storagePath) return
     setDownloading(true)
@@ -434,7 +466,7 @@ export default function MedicalRecordsScreen() {
         showsVerticalScrollIndicator={false}
       >
         {loading && records.length === 0 ? (
-          <ActivityIndicator color={colors.careBlue} style={{ marginTop: 60 }} />
+          <ActivityIndicator color={colors.careBlue} style={{ marginTop: 20 }} />
         ) : filtered.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Ionicons name="folder-open-outline" size={52} color={colors.steelGrey} />
@@ -479,13 +511,22 @@ export default function MedicalRecordsScreen() {
                   </Text>
                 </View>
                 {record.storagePath ? (
-                  <Pressable
-                    hitSlop={8}
-                    onPress={(e) => { e.stopPropagation?.(); handleDownload(record) }}
-                    style={({ pressed }) => [styles.dlIconBtn, pressed && { opacity: 0.7 }]}
-                  >
-                    <Ionicons name="download-outline" size={18} color={colors.careBlue} />
-                  </Pressable>
+                  <View style={styles.recordIconRow}>
+                    <Pressable
+                      hitSlop={8}
+                      onPress={(e) => { e.stopPropagation?.(); handleDownload(record) }}
+                      style={({ pressed }) => [styles.dlIconBtn, pressed && { opacity: 0.7 }]}
+                    >
+                      <Ionicons name="download-outline" size={18} color={colors.careBlue} />
+                    </Pressable>
+                    <Pressable
+                      hitSlop={8}
+                      onPress={(e) => { e.stopPropagation?.(); handleDelete(record) }}
+                      style={({ pressed }) => [styles.dlIconBtn, pressed && { opacity: 0.7 }]}
+                    >
+                      <Ionicons name="trash-outline" size={18} color="#DC2626" />
+                    </Pressable>
+                  </View>
                 ) : (
                   <Ionicons name="chevron-forward" size={16} color={colors.steelGrey} />
                 )}
@@ -573,7 +614,7 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
   },
 
-  emptyWrap: { alignItems: 'center', paddingTop: 60, gap: 12 },
+  emptyWrap: { alignItems: 'center', paddingTop: 20, gap: 12 },
   emptyTitle: { fontFamily: fonts.semiBold, fontSize: 17, color: colors.inkBlack },
   emptySub: {
     fontFamily: fonts.regular,
@@ -605,6 +646,7 @@ const styles = StyleSheet.create({
   recordMeta: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 2 },
   recordDate: { fontFamily: fonts.regular, fontSize: 12, color: '#9CA3AF' },
   recordActions: { alignItems: 'flex-end', gap: 8 },
+  recordIconRow: { flexDirection: 'row', gap: 4 },
   categoryBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,

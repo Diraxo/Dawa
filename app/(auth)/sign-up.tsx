@@ -2,7 +2,7 @@ import { useAuth, useSignUp, useSSO } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
-import * as AuthSession from 'expo-auth-session'
+import * as Linking from 'expo-linking'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as WebBrowser from 'expo-web-browser'
@@ -23,10 +23,11 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { LANGUAGES } from '@/constants/languages'
+import { markOAuthInFlight } from '@/lib/oauthResume'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
@@ -190,8 +191,14 @@ export default function SignUpScreen() {
     setGlobalError('')
     ssoInProgressRef.current = true
     try {
-      const redirectUrl = AuthSession.makeRedirectUri()
+      // See lib/oauthResume.ts — lets app/index.tsx skip replaying the full
+      // branded splash if Android kills this process during the Chrome
+      // hand-off and has to cold-relaunch us via the redirect deep link.
+      await markOAuthInFlight()
+      const redirectUrl = Linking.createURL('/oauth-native-callback')
+      console.log('[Google SSO] starting flow, redirectUrl:', redirectUrl)
       const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({ strategy: 'oauth_google', redirectUrl })
+      console.log('[Google SSO] startSSOFlow resolved, createdSessionId:', createdSessionId ?? null)
       if (createdSessionId && ssoSetActive) {
         await ssoSetActive({ session: createdSessionId })
       } else {
@@ -199,6 +206,7 @@ export default function SignUpScreen() {
       }
     } catch (err: any) {
       ssoInProgressRef.current = false
+      console.error('[Google SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
         if (userId) checkRoleAndRedirect(userId)
@@ -218,14 +226,19 @@ export default function SignUpScreen() {
     setGlobalError('')
     ssoInProgressRef.current = true
     try {
-      const redirectUrl = AuthSession.makeRedirectUri()
+      // See the matching comment in handleGoogle above.
+      await markOAuthInFlight()
+      const redirectUrl = Linking.createURL('/oauth-native-callback')
+      console.log('[Apple SSO] starting flow, redirectUrl:', redirectUrl)
       const { createdSessionId, setActive } = await startSSOFlow({ strategy: 'oauth_apple', redirectUrl })
+      console.log('[Apple SSO] startSSOFlow resolved, createdSessionId:', createdSessionId ?? null)
       if (createdSessionId && setActive) {
         await setActive({ session: createdSessionId })
         // useEffect above will fire once isSignedIn/userId updates
       }
     } catch (err: any) {
       ssoInProgressRef.current = false
+      console.error('[Apple SSO] error:', JSON.stringify(err, null, 2), err?.message, err?.errors)
       const code: string = err?.errors?.[0]?.code ?? ''
       if (code === 'session_exists') {
         if (userId) checkRoleAndRedirect(userId)
@@ -302,7 +315,7 @@ export default function SignUpScreen() {
 
         {/* ── LOGO ── */}
         <View style={styles.logoRow}>
-          <CareHubLogo size={56} variant="dark" />
+          <DawaLogo size={56} variant="dark" />
           <Text style={styles.brandName}>DA<Text style={styles.brandHub}>WA</Text></Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>

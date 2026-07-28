@@ -16,7 +16,7 @@ function TabIcon({
   return (
     <Ionicons
       name={focused ? name : (`${name}-outline` as IoniconsName)}
-      size={24}
+      size={focused ? 26 : 22}
       color={focused ? colors.tealGreen : '#9CA3AF'}
     />
   )

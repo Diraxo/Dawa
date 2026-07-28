@@ -16,6 +16,18 @@ Navigate to: **Policy → App Content → Health Apps**
 
 ---
 
+## Health Apps — Step 1: Health Features Checklist (Play Console)
+
+Google Play now asks a feature-category checklist before the Q&A above. For Dawa, check only:
+
+- [x] Medical → **Healthcare services and management**
+- [x] Medical → **Medication and treatment management**
+- [x] Medical → **Diseases and conditions management**
+
+Leave unchecked: all Health and fitness items (activity/fitness, nutrition, period tracking, sleep, stress/relaxation), Clinical decision support, Disease prevention and public health, Emergency and first aid, Medical device apps, Mental and behavioural health (doctor specialty is free-text so a therapist *could* join, but it's not a marketed/distinct feature), Medical reference and education, Physical therapy and rehabilitation, Reproductive and sexual health, Human subjects research, Other. Do not select "My app does not have any health features."
+
+---
+
 ## Required Disclaimer
 
 Should appear in:

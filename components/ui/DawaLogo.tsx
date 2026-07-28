@@ -8,7 +8,7 @@ type Props = {
   variant?: 'light' | 'dark'
 }
 
-export function CareHubLogo({ size = 130, variant = 'light' }: Props) {
+export function DawaLogo({ size = 130, variant = 'light' }: Props) {
   return (
     <Image
       source={variant === 'dark' ? images.darkLogo : images.whiteLogo}

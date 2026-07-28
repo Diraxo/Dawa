@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { ghostDebug } from '@/lib/logger'
 
 export type Role = 'patient' | 'doctor'
 
@@ -62,6 +63,9 @@ export async function resolveActiveConsultationRoute(
   }
 
   const { data } = await query.maybeSingle()
+  ghostDebug('[active-consultation-restoration] resolveActiveConsultationRoute', {
+    role, userRowId, foundConsultationId: (data as any)?.id ?? null, status: (data as any)?.status ?? null,
+  })
   if (!data) return null
 
   const resumeElapsed = data.started_at

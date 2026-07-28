@@ -42,6 +42,18 @@ async function triggerActiveVerification(txRef: string) {
   }
 }
 
+// The dawa://payment-return deep link can reach the app through more than
+// one channel for the same transaction (WebBrowser's own AuthSession
+// resolution, the manual Linking listener BookingModal registers as an
+// external-banking-app workaround, and Expo Router's own automatic
+// scheme-based navigation) — producing two independent mounts of this
+// screen. Module-scope (survives across those mounts within the same app
+// session, unlike component state) so a second, later-resolving mount for a
+// transaction already confirmed paid short-circuits straight to the success
+// path instead of re-deriving status from its own (possibly stale/ambiguous)
+// params and showing "Payment Failed" over an already-visible Waiting Room.
+const resolvedPaymentTxRefs = new Set<string>()
+
 export default function PaymentReturnScreen() {
   const router = useRouter()
   const { getToken } = useAuth()
@@ -110,7 +122,7 @@ export default function PaymentReturnScreen() {
 
     async function run() {
       // ── Resolve params ──────────────────────────────────────────────────────
-      // When the app opens fresh from the carehub://payment-return deep link,
+      // When the app opens fresh from the dawa://payment-return deep link,
       // only tx_ref and status are present. Look up the consultation by tx_ref.
       let consultationId = paramConsultationId
       let doctorId       = paramDoctorId       ?? ''
@@ -163,21 +175,14 @@ export default function PaymentReturnScreen() {
         return
       }
 
-      // Chapa explicitly signalled failure — cancel immediately, no need to poll
-      if (
-        initialChapaStatus === 'failed' ||
-        initialChapaStatus === 'payment_failed' ||
-        initialChapaStatus === 'cancelled'
-      ) {
-        await cancelConsultationById(consultationId)
-        setState('failed')
-        return
-      }
-
       // Look up our own tx_ref for this consultation (may already be known
       // from the cold-launch txRef param, but the normal in-app path never
       // receives one) so we can actively nudge chapa-webhook below instead
-      // of only ever waiting on Chapa's own async callback.
+      // of only ever waiting on Chapa's own async callback. Resolved before
+      // the immediate-fail check below so a second, later-resolving mount of
+      // this screen for a transaction an earlier mount already confirmed
+      // paid can be recognised and short-circuited, instead of acting on
+      // this mount's own possibly-stale/ambiguous status (Issue 5/6).
       let ownTxRef = txRef ?? null
       if (!ownTxRef) {
         try {
@@ -190,60 +195,76 @@ export default function PaymentReturnScreen() {
         } catch {}
       }
 
-      // Fire immediately, in parallel with the passive poll below — this
-      // alone resolves the payment within a couple of seconds in the common
-      // case where Chapa's async webhook is merely delayed or never
-      // configured to reach this environment, closing the exact gap that
-      // otherwise left the doctor un-notified and the waiting room never
-      // appearing.
-      if (ownTxRef) triggerActiveVerification(ownTxRef)
+      let paid = !!(ownTxRef && resolvedPaymentTxRefs.has(ownTxRef))
 
-      // Poll DB until payment is marked paid (up to 60 s passive)
-      const MAX_ATTEMPTS = 30
-      let attempts = 0
-      let paid = false
-
-      while (attempts < MAX_ATTEMPTS) {
-        if (cancelledRef.current) return
-
-        const { data } = await supabase
-          .from('consultations')
-          .select('payment_status')
-          .eq('id', consultationId)
-          .single()
-
-        if (data?.payment_status === 'paid') {
-          paid = true
-          break
+      if (!paid) {
+        // Chapa explicitly signalled failure — cancel immediately, no need to poll
+        if (
+          initialChapaStatus === 'failed' ||
+          initialChapaStatus === 'payment_failed' ||
+          initialChapaStatus === 'cancelled'
+        ) {
+          await cancelConsultationById(consultationId)
+          setState('failed')
+          return
         }
 
-        attempts++
-        await new Promise<void>(resolve => setTimeout(resolve, 2000))
-      }
+        // Fire immediately, in parallel with the passive poll below — this
+        // alone resolves the payment within a couple of seconds in the common
+        // case where Chapa's async webhook is merely delayed or never
+        // configured to reach this environment, closing the exact gap that
+        // otherwise left the doctor un-notified and the waiting room never
+        // appearing.
+        if (ownTxRef) triggerActiveVerification(ownTxRef)
 
-      if (cancelledRef.current) return
+        // Poll DB until payment is marked paid (up to 60 s passive)
+        const MAX_ATTEMPTS = 30
+        let attempts = 0
 
-      if (!paid && initialChapaStatus === 'success' && ownTxRef) {
-        // Passive poll exhausted but Chapa's own redirect said success —
-        // actively re-verify (idempotent, safe to call repeatedly) and give
-        // it one more short window rather than immediately dead-ending on
-        // the static "processing" screen.
-        await triggerActiveVerification(ownTxRef)
-        let retryAttempts = 0
-        while (retryAttempts < 15) {
+        while (attempts < MAX_ATTEMPTS) {
           if (cancelledRef.current) return
+
           const { data } = await supabase
             .from('consultations')
             .select('payment_status')
             .eq('id', consultationId)
             .single()
-          if (data?.payment_status === 'paid') { paid = true; break }
-          retryAttempts++
+
+          if (data?.payment_status === 'paid') {
+            paid = true
+            break
+          }
+
+          attempts++
           await new Promise<void>(resolve => setTimeout(resolve, 2000))
         }
-      }
 
-      if (cancelledRef.current) return
+        if (cancelledRef.current) return
+
+        if (!paid && initialChapaStatus === 'success' && ownTxRef) {
+          // Passive poll exhausted but Chapa's own redirect said success —
+          // actively re-verify (idempotent, safe to call repeatedly) and give
+          // it one more short window rather than immediately dead-ending on
+          // the static "processing" screen.
+          await triggerActiveVerification(ownTxRef)
+          let retryAttempts = 0
+          while (retryAttempts < 15) {
+            if (cancelledRef.current) return
+            const { data } = await supabase
+              .from('consultations')
+              .select('payment_status')
+              .eq('id', consultationId)
+              .single()
+            if (data?.payment_status === 'paid') { paid = true; break }
+            retryAttempts++
+            await new Promise<void>(resolve => setTimeout(resolve, 2000))
+          }
+        }
+
+        if (cancelledRef.current) return
+
+        if (paid && ownTxRef) resolvedPaymentTxRefs.add(ownTxRef)
+      }
 
       if (!paid) {
         if (initialChapaStatus === 'success') {

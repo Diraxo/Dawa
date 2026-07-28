@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
 import { useUserPhotoRealtime } from '@/hooks/useUserPhotoRealtime'
 import Link from 'next/link'
-import { stripDrPrefix } from '@/lib/utils'
+import { stripDrPrefix, capitalizeLanguage } from '@/lib/utils'
 import { MessageCircle, Phone, Video, Search } from 'lucide-react'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
 
@@ -257,7 +257,7 @@ export default function DoctorProfilePage() {
               <div className="flex flex-wrap gap-2">
                 {doctor.languages.map(lang => (
                   <span key={lang} className="bg-teal-50 text-teal-green text-xs font-semibold font-montserrat px-3 py-1 rounded-full border border-teal-green/20">
-                    {lang}
+                    {capitalizeLanguage(lang)}
                   </span>
                 ))}
               </div>

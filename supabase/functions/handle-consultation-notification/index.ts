@@ -143,7 +143,7 @@ const NOTIF_TYPE_TITLE: Record<string, string> = {
 }
 
 const STARS = ['', '⭐', '⭐⭐', '⭐⭐⭐', '⭐⭐⭐⭐', '⭐⭐⭐⭐⭐']
-const BUNDLE_ID = 'com.carehub.app'
+const BUNDLE_ID = 'com.dawa.app'
 
 // Doctor display names are free-text (`users.full_name`) and registration UI
 // actively invites doctors to type "Dr." into that field, so any code that

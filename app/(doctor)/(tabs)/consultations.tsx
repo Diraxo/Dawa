@@ -1,7 +1,7 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
+import { useFocusEffect, useLocalSearchParams, useRootNavigationState, useRouter } from 'expo-router'
 import { Image } from 'expo-image'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
@@ -25,6 +25,7 @@ import { shadow } from '@/lib/shadow'
 import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
+import { navigateFamilyRoute } from '@/lib/notificationNav'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -153,6 +154,7 @@ const STATUS_PILL: Record<string, { bg: string; text: string }> = {
 export default function ConsultationsScreen() {
   const { t } = useTranslation()
   const router = useRouter()
+  const rootNavigationState = useRootNavigationState()
   const { getToken } = useAuth()
   const { user } = useUser()
   const { doctorStatus } = useDoctorStore()
@@ -370,10 +372,17 @@ export default function ConsultationsScreen() {
       return
     }
     if (item.status === 'incoming') {
-      router.push({
-        pathname: '/(doctor)/incoming-request',
-        params: { patientName: item.patientName, consultationType: item.type, consultationId: item.id },
-      })
+      // Shared dedup helper (see home.tsx's checkForWaitingRequest) — a raw
+      // router.push here could stack a second live incoming-request instance
+      // on top of one Home's own detection (or a notification tap) already
+      // pushed for this same consultation.
+      navigateFamilyRoute(
+        router,
+        rootNavigationState,
+        '/(doctor)/incoming-request',
+        { patientName: item.patientName, consultationType: item.type, consultationId: item.id },
+        'push',
+      )
       return
     }
     if (item.status === 'cancelled' || item.status === 'completed' || item.status === 'other') return

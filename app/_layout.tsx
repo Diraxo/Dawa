@@ -1,6 +1,7 @@
 import '../global.css'
 import React from 'react'
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import * as SecureStore from 'expo-secure-store'
 import { Monitoring } from '@/lib/monitoring'
 import ActiveCallBanner from '@/components/ui/ActiveCallBanner'
 
@@ -33,9 +34,10 @@ import { useActiveChatStore } from '@/store/activeChatStore'
 import ForceUpdateScreen from '@/components/shared/ForceUpdateScreen'
 import OfflineStartScreen from '@/components/shared/OfflineStartScreen'
 import NetworkBanner from '@/components/ui/NetworkBanner'
+import { DawaAlert } from '@/components/ui/DawaAlert'
 import { callkeep, type IncomingCallPayload } from '@/lib/callkeep'
 import { registerCallTokens, handleIncomingCallData } from '@/lib/voipPush'
-import { logger } from '@/lib/logger'
+import { ghostDebug, logger } from '@/lib/logger'
 import { navigateDoctorConsultationRoute, navigateFamilyRoute, navigateForNotification, resolveIncomingRequestRoute, type CurrentDoctorRoute } from '@/lib/notificationNav'
 import { markNotificationRead, refreshBadge } from '@/lib/notificationCenter'
 
@@ -70,30 +72,62 @@ const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY!
 
 // Clerk rotates its client JWT on every request: each call must present the
 // token saved from the *previous* response, and the server hands back a new
-// one to persist for the *next* call. A raw AsyncStorage-backed cache has no
-// synchronous fast path, so concurrent getToken() calls (e.g. several tab
-// screens mounting at once and each triggering a session/token check) can
-// race — one call's in-flight AsyncStorage read can return a token that's
-// already been superseded by another call's not-yet-flushed write, making
-// Clerk reject it and isSignedIn flicker false for ~1-3s. Layering an
-// in-memory cache in front closes that window: same-process reads/writes
-// resolve synchronously, matching Clerk's own default MemoryTokenCache
-// behavior, while still persisting to AsyncStorage for cold starts.
+// one to persist for the *next* call. A raw persisted-storage-backed cache
+// has no synchronous fast path, so concurrent getToken() calls (e.g. several
+// tab screens mounting at once and each triggering a session/token check) can
+// race — one call's in-flight read can return a token that's already been
+// superseded by another call's not-yet-flushed write, making Clerk reject it
+// and isSignedIn flicker false for ~1-3s. Layering an in-memory cache in
+// front closes that window: same-process reads/writes resolve synchronously,
+// matching Clerk's own default MemoryTokenCache behavior.
+//
+// Persistence backend: expo-secure-store (OS keychain, encrypted) on
+// iOS/Android, matching Clerk's own documented Expo tokenCache. SecureStore's
+// native module is a no-op stub on web, so web keeps using AsyncStorage —
+// same as before this change, and acceptable since carehub-web (the actual
+// browser-facing app) has its own separate, unrelated Clerk web session.
 const memTokenCache = new Map<string, string>()
+const isNative = Platform.OS === 'ios' || Platform.OS === 'android'
+const secureStoreOpts = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK }
+
+// Clerk's session token previously lived in plain AsyncStorage under this
+// fixed key (`__clerk_client_jwt`, hardcoded in @clerk/clerk-expo's
+// createClerkInstance.js — not exported). One-time best-effort migration so
+// existing signed-in sessions survive the switch to SecureStore instead of
+// silently signing everyone out on upgrade.
+let migratedFromAsyncStorage = false
+async function migrateLegacyToken(key: string) {
+  if (migratedFromAsyncStorage) return
+  migratedFromAsyncStorage = true
+  try {
+    const legacy = await AsyncStorage.getItem(key)
+    if (legacy) {
+      await SecureStore.setItemAsync(key, legacy, secureStoreOpts)
+      await AsyncStorage.removeItem(key)
+    }
+  } catch {}
+}
+
 const tokenCache = {
   async getToken(key: string) {
     if (memTokenCache.has(key)) return memTokenCache.get(key)!
-    const value = await AsyncStorage.getItem(key)
+    if (!isNative) {
+      const value = await AsyncStorage.getItem(key)
+      if (value) memTokenCache.set(key, value)
+      return value
+    }
+    await migrateLegacyToken(key)
+    const value = await SecureStore.getItemAsync(key, secureStoreOpts)
     if (value) memTokenCache.set(key, value)
     return value
   },
   async saveToken(key: string, value: string) {
     memTokenCache.set(key, value)
-    return AsyncStorage.setItem(key, value)
+    return isNative ? SecureStore.setItemAsync(key, value, secureStoreOpts) : AsyncStorage.setItem(key, value)
   },
   async clearToken(key: string) {
     memTokenCache.delete(key)
-    return AsyncStorage.removeItem(key)
+    return isNative ? SecureStore.deleteItemAsync(key, secureStoreOpts) : AsyncStorage.removeItem(key)
   },
 }
 
@@ -157,7 +191,7 @@ function AppInitializer() {
     })
   }, [])
 
-  usePushNotifications()
+  const notificationPermissionPrompt = usePushNotifications(userRole)
   useOngoingConsultationNotification()
 
   // ── Notifee notification tap (Android, foreground/background-alive) ──────
@@ -281,6 +315,7 @@ function AppInitializer() {
     //    direction branch for which).
     callkeep.onAnswer((payload) => {
       logger.log('[CallKeep] Answered consultation:', payload.consultationId, 'direction:', payload.direction ?? 'patient')
+      ghostDebug('[notification-routing] callkeep.onAnswer', { consultationId: payload.consultationId, direction: payload.direction ?? 'patient' })
       const expectedRole = payload.direction === 'doctor' ? 'doctor' : 'patient'
       if (isSignedIn && userRole === expectedRole) {
         navigateToConsultation(payload)
@@ -294,6 +329,7 @@ function AppInitializer() {
     //    call screen, or the ring times out unanswered.
     callkeep.onEnd(async (uuid, payload) => {
       logger.log('[CallKeep] Declined / timed out consultation:', uuid, 'direction:', payload?.direction ?? 'patient')
+      ghostDebug('[notification-routing] callkeep.onEnd', { consultationId: uuid, direction: payload?.direction ?? 'patient' })
 
       // direction === 'doctor': this was a patient's on-demand request
       // ringing the doctor, not yet an established consultation the doctor
@@ -526,6 +562,7 @@ function AppInitializer() {
         const consultationId: string = (data as any).id
         const type: string           = (data as any).type ?? 'chat'
         const status: string         = (data as any).status
+        ghostDebug('[active-consultation-restoration] patient recover() found live row', { consultationId, status, type })
         const startedAt: string | null = (data as any).started_at
         const doctorId: string       = (data as any).doctor_id ?? ''
         const doctorName: string     = (data as any).doctor_profiles?.users?.full_name ?? 'Doctor'
@@ -929,7 +966,23 @@ function AppInitializer() {
     return () => sub.remove()
   }, [userId])
 
-  return null
+  return (
+    <DawaAlert
+      visible={notificationPermissionPrompt.visible}
+      variant="warning"
+      title="Turn on notifications"
+      message={
+        userRole === 'doctor'
+          ? "Notifications are off, so you won't be alerted to incoming consultations, scheduled reminders, or consultation summaries. Doctors need notifications on to avoid missing a patient waiting for them."
+          : "Notifications are off, so you won't be alerted to incoming consultations, scheduled reminders, or consultation summaries."
+      }
+      buttons={[
+        { text: 'Later', style: 'outline', onPress: notificationPermissionPrompt.dismiss },
+        { text: 'Open Settings', onPress: notificationPermissionPrompt.openSettings },
+      ]}
+      onClose={notificationPermissionPrompt.dismiss}
+    />
+  )
 }
 
 // ─── Version gate ─────────────────────────────────────────────────────────────

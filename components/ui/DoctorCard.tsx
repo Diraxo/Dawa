@@ -8,6 +8,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { capitalizeLanguage } from '@/lib/languageFormat'
 import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 
 export type Doctor = {
@@ -24,6 +25,7 @@ export type Doctor = {
   phone_price: number
   video_price: number
   is_online: boolean
+  last_seen_at?: string | null
   profile_photo_url?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
   languages?: string[] | null
@@ -79,7 +81,7 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: P
             {doctor.languages && doctor.languages.length > 0 ? (
               <View style={L.languageRow}>
                 <Ionicons name="language-outline" size={13} color={colors.tealGreen} />
-                <Text style={L.languageText} numberOfLines={1}>{doctor.languages.join(', ')}</Text>
+                <Text style={L.languageText} numberOfLines={1}>{doctor.languages.map(capitalizeLanguage).join(', ')}</Text>
               </View>
             ) : null}
           </View>
@@ -158,7 +160,7 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: P
       {doctor.languages && doctor.languages.length > 0 ? (
         <View style={G.languageRow}>
           <Ionicons name="language-outline" size={11} color={colors.tealGreen} />
-          <Text style={G.languageText} numberOfLines={1}>{doctor.languages.join(', ')}</Text>
+          <Text style={G.languageText} numberOfLines={1}>{doctor.languages.map(capitalizeLanguage).join(', ')}</Text>
         </View>
       ) : null}
       <Pressable
@@ -239,27 +241,27 @@ const G = StyleSheet.create({
     ...shadow('#000', 0, 2, 8, 0.07, 2),
   },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
-  photoWrap: { alignSelf: 'center', marginBottom: 8, position: 'relative' },
-  photo: { width: 64, height: 64, borderRadius: 32 },
+  photoWrap: { alignSelf: 'center', marginBottom: 12, position: 'relative' },
+  photo: { width: 72, height: 72, borderRadius: 36 },
   photoPlaceholder: {
-    width: 64, height: 64, borderRadius: 32,
+    width: 72, height: 72, borderRadius: 36,
     backgroundColor: colors.cloudGrey,
     alignItems: 'center', justifyContent: 'center',
   },
   onlineDot: {
-    position: 'absolute', bottom: 2, right: 2,
-    width: 14, height: 14, borderRadius: 7,
+    position: 'absolute', bottom: 3, right: 3,
+    width: 12, height: 12, borderRadius: 6,
     backgroundColor: colors.success,
     borderWidth: 2, borderColor: colors.mistWhite,
   },
   nameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 2 },
-  name: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.inkBlack, flexShrink: 1 },
+  name: { fontFamily: fonts.bold, fontSize: 13, color: colors.inkBlack, flexShrink: 1 },
   subtitle: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginBottom: 2 },
-  specialty: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginBottom: 6 },
+  specialty: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 6 },
   metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
   ratingPill: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 1 },
-  ratingText: { fontFamily: fonts.semiBold, fontSize: 12, color: colors.inkBlack },
-  priceText: { fontFamily: fonts.bold, fontSize: 12, color: colors.tealGreen, flexShrink: 0 },
+  ratingText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.inkBlack },
+  priceText: { fontFamily: fonts.bold, fontSize: 13, color: colors.tealGreen, flexShrink: 0 },
   languageRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 8 },
   languageText: { fontFamily: fonts.regular, fontSize: 10, color: '#6B7280', flexShrink: 1 },
   bookWrap: { borderRadius: 10, overflow: 'hidden' },

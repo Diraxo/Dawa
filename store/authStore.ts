@@ -99,7 +99,7 @@ export const useAuthStore = create<AuthState>()(
       },
     }),
     {
-      name: 'carehub-auth-storage',
+      name: 'dawa-auth-storage',
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         userRole: state.userRole,

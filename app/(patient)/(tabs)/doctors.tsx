@@ -83,9 +83,6 @@ export default function DoctorsScreen() {
     <View style={styles.headerContainer}>
       {/* Title */}
       <Text style={styles.title}>{t('findADoctor')}</Text>
-      <Text style={styles.subtitle}>
-        {filteredDoctors.length} {filteredDoctors.length === 1 ? 'doctor found' : 'doctors found'}
-      </Text>
 
       {/* Search bar */}
       <View style={styles.searchBar}>
@@ -159,8 +156,7 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 20, paddingBottom: 28 },
 
   headerContainer: { paddingTop: 10, paddingBottom: 16 },
-  title: { fontFamily: fonts.bold, fontSize: 28, color: colors.inkBlack, marginBottom: 2 },
-  subtitle: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280', marginBottom: 16 },
+  title: { fontFamily: fonts.bold, fontSize: 28, color: colors.inkBlack, marginBottom: 16 },
 
   // Search
   searchBar: {

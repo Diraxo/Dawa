@@ -149,10 +149,11 @@ export function getNextDays(count: number, availability?: Availability | null, n
   const today = ethiopiaDateString(nowMs)
   for (let i = 0; i < count; i++) {
     const value = i === 0 ? today : addDaysToDateString(today, i)
-    if (availability) {
-      const slots = getAvailableSlots(availability, value)
-      if (slots.length === 0) continue
-    }
+    // Every day in the range is shown, even ones the doctor has no slots
+    // for — today and tomorrow must never be skipped just because the
+    // doctor isn't working that day. getAvailableSlots() returning [] for a
+    // selected day drives the "not available on this day" empty state
+    // instead of hiding the day entirely.
     days.push({
       label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatWeekdayLabel(value),
       value,

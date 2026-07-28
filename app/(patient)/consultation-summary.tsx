@@ -26,7 +26,7 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
-import { CareHubAlert } from '@/components/ui/CareHubAlert'
+import { DawaAlert } from '@/components/ui/DawaAlert'
 import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -706,7 +706,7 @@ export default function ConsultationSummaryScreen() {
       </View>
       </KeyboardAvoidingView>
 
-      <CareHubAlert
+      <DawaAlert
         visible={successVisible}
         variant="success"
         title={t('ratingSuccessTitle')}
@@ -718,7 +718,16 @@ export default function ConsultationSummaryScreen() {
             router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } })
           },
         }]}
-        onClose={() => setSuccessVisible(false)}
+        // Backdrop-tap / Android back must behave identically to the
+        // Continue button — the review is already saved by the time this
+        // dialog shows, so there's nothing left to do on this screen but
+        // leave it. Previously this only closed the dialog, stranding the
+        // patient on the summary screen looking like the submission hadn't
+        // gone anywhere.
+        onClose={() => {
+          setSuccessVisible(false)
+          router.replace({ pathname: '/(patient)/(tabs)/appointments', params: { tab: 'past' } })
+        }}
       />
     </SafeAreaView>
   )

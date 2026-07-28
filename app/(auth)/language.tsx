@@ -15,7 +15,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { useAuthenticatedRedirect } from '@/hooks/useAuthenticatedRedirect'
@@ -167,7 +167,7 @@ export default function LanguageScreen() {
         style={[styles.header, { paddingTop: top + 10 }]}
       >
         <View style={styles.headerContent}>
-          <CareHubLogo size={64} variant="dark" />
+          <DawaLogo size={64} variant="dark" />
           <Text style={styles.brandName}>DAWA</Text>
           <Text style={styles.tagline}>{t('tagline')}</Text>
         </View>

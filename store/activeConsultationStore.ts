@@ -61,7 +61,7 @@ export const useActiveConsultationStore = create<ActiveConsultationState>()(
         ),
     }),
     {
-      name: 'carehub-active-consultation',
+      name: 'dawa-active-consultation',
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

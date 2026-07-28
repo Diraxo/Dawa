@@ -292,7 +292,7 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
                     <Text style={styles.pickerLabel}>Select Time</Text>
                     {slots.length === 0 ? (
                       <View style={styles.noSlotsWrap}>
-                        <Text style={styles.noSlotsText}>No time slots available for this day.</Text>
+                        <Text style={styles.noSlotsText}>Doctor is not available on this day.</Text>
                       </View>
                     ) : (
                       <>

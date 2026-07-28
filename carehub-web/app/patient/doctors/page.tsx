@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { useDoctorOnlineStatus } from '@/hooks/useDoctorOnlineStatus'
-import { stripDrPrefix } from '@/lib/utils'
+import { stripDrPrefix, capitalizeLanguage } from '@/lib/utils'
 import { Search } from 'lucide-react'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
 
@@ -147,7 +147,7 @@ export default function BrowseDoctorsPage() {
                 <div className="flex flex-wrap gap-1.5">
                   {d.languages.map(lang => (
                     <span key={lang} className="bg-teal-50 text-teal-green text-[10px] font-semibold font-montserrat px-2.5 py-1 rounded-full border border-teal-green/20">
-                      {lang}
+                      {capitalizeLanguage(lang)}
                     </span>
                   ))}
                 </div>

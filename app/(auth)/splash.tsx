@@ -2,7 +2,7 @@ import { useAuth } from '@clerk/clerk-expo'
 import { supabase } from '@/lib/supabase'
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useEffect, useRef, useState } from 'react';
@@ -29,17 +29,28 @@ const MAX_SIGNED_OUT_RETRIES = 6 // ~2.4s total grace window
 
 export default function SplashScreen() {
   const router = useRouter();
+  const { instant } = useLocalSearchParams<{ instant?: string }>()
+  // Set when this cold start is Android relaunching the app after Chrome
+  // handled a Google/Apple OAuth hand-off (see lib/oauthResume.ts) rather
+  // than a genuine fresh app open. Skips the artificial minimum display time
+  // and swaps the full branded animation below for a plain "Signing you
+  // in..." loading state — replaying the whole launch splash here is what
+  // made that return trip look like the app had restarted from scratch.
+  const isInstant = instant === '1'
   const { isSignedIn, isLoaded, userId: clerkUserId } = useAuth()
   const { userRole, userId: cachedUserId, setUserRole } = useAuthStore()
-  const [timerDone, setTimerDone] = useState(false);
+  const [timerDone, setTimerDone] = useState(isInstant);
   const [signedOutRetries, setSignedOutRetries] = useState(0);
   const navigatedRef = useRef(false);
 
-  // Always show splash for at least 2500ms
+  // Always show splash for at least 2500ms — except on an OAuth-resume cold
+  // start, where the doctor/patient already waited through the Chrome flow
+  // and shouldn't wait again for a purely cosmetic minimum.
   useEffect(() => {
+    if (isInstant) return
     const timer = setTimeout(() => setTimerDone(true), 2500);
     return () => clearTimeout(timer);
-  }, []);
+  }, [isInstant]);
 
   // Navigate once both the timer has elapsed and Clerk has initialized
   useEffect(() => {
@@ -166,6 +177,18 @@ export default function SplashScreen() {
     navigate()
   }, [timerDone, isLoaded, isSignedIn, userRole, cachedUserId, signedOutRetries])
 
+  if (isInstant) {
+    return (
+      <View style={styles.instantRoot}>
+        <StatusBar style="light" backgroundColor="transparent" translucent />
+        <ActivityIndicator size={40} color={colors.tealGreen} />
+        <Text className="font-montserrat text-[14px] text-white/60 mt-4 text-center">
+          Signing you in...
+        </Text>
+      </View>
+    )
+  }
+
   return (
     <View style={styles.root}>
       <StatusBar style="light" backgroundColor="transparent" translucent />
@@ -242,6 +265,12 @@ export default function SplashScreen() {
 }
 
 const styles = StyleSheet.create({
+  instantRoot: {
+    flex: 1,
+    backgroundColor: '#070E27',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   root: {
     flex: 1,
     backgroundColor: '#070E27',

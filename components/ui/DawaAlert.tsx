@@ -15,7 +15,7 @@ export interface AlertButton {
   onPress?: () => void
 }
 
-interface CareHubAlertProps {
+interface DawaAlertProps {
   visible: boolean
   variant?: AlertVariant
   title: string
@@ -33,14 +33,14 @@ const VARIANT_CONFIG: Record<AlertVariant, { icon: string; iconColor: string; bg
   logout:  { icon: 'log-out-outline',  iconColor: '#D32F2F', bgColor: '#FDECEA' },
 }
 
-export function CareHubAlert({
+export function DawaAlert({
   visible,
   variant = 'info',
   title,
   message,
   buttons,
   onClose,
-}: CareHubAlertProps) {
+}: DawaAlertProps) {
   const scaleAnim = useRef(new Animated.Value(0.85)).current
   const opacityAnim = useRef(new Animated.Value(0)).current
 

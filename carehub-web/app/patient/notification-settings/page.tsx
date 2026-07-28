@@ -140,9 +140,16 @@ export default function PatientNotificationSettingsPage() {
   const allEnabled = Object.values(prefs).every(Boolean)
 
   function toggleAll() {
-    const next = Object.fromEntries(
-      (Object.keys(prefs) as PrefKey[]).map(k => [k, !allEnabled])
-    ) as Prefs
+    const value = !allEnabled
+    const next: Prefs = {
+      consultation_request: value,
+      messages: value,
+      appointment_reminder: value,
+      consultation_summary: value,
+      promotions: value,
+      health_tips: value,
+      account: value,
+    }
     setPrefs(next)
     savePrefs(next)
   }

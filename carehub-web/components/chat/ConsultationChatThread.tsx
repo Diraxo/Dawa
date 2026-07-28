@@ -15,7 +15,7 @@ import { EndConsultationModal } from '@/components/doctor/EndConsultationModal'
 import { ConsultationCompletedModal } from '@/components/consultation/ConsultationCompletedModal'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
 import Link from 'next/link'
-import { stripDrPrefix } from '@/lib/utils'
+import { stripDrPrefix, capitalizeLanguage } from '@/lib/utils'
 import { logger } from '@/lib/logger'
 import type { Channel, FormatMessageResponse } from 'stream-chat'
 import { Image as ImageIcon, Mic, Paperclip, MessageCircle, ClipboardList, FileText } from 'lucide-react'
@@ -1076,7 +1076,7 @@ export function ConsultationChatThread({
                 {peerProfile.languages && peerProfile.languages.length > 0 && (
                   <div>
                     <p className="text-[11px] text-ink-black/40 font-semibold uppercase tracking-wide">Languages</p>
-                    <p className="text-sm text-ink-black">{peerProfile.languages.join(', ')}</p>
+                    <p className="text-sm text-ink-black">{peerProfile.languages.map(capitalizeLanguage).join(', ')}</p>
                   </div>
                 )}
                 {peerProfile.bio && (

@@ -66,6 +66,11 @@ export function ChangeEmailModal({
   }
 
   const handleClose = () => {
+    // Backing out mid-flow (code requested but never verified) must release
+    // the unverified address Clerk already reserved on "Send Code" —
+    // otherwise it lingers forever and the same email can't be requested
+    // again ("already taken", even though it was never actually verified).
+    if (step === 'verify') pendingAddress?.destroy().catch(() => {})
     reset()
     onClose()
   }
@@ -173,7 +178,17 @@ export function ChangeEmailModal({
                 keyboardType="number-pad"
                 maxLength={8}
               />
-              <Pressable onPress={() => { setStep('input'); setError('') }} hitSlop={8}>
+              <Pressable
+                onPress={() => {
+                  // Same cleanup as handleClose — abandoning this address for
+                  // a different one must release it, not leave it reserved.
+                  pendingAddress?.destroy().catch(() => {})
+                  setPendingAddress(null)
+                  setStep('input')
+                  setError('')
+                }}
+                hitSlop={8}
+              >
                 <Text style={styles.linkText}>Use a different email</Text>
               </Pressable>
             </>

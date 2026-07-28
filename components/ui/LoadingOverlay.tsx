@@ -2,7 +2,7 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useEffect, useRef } from 'react'
 import { Animated, Modal, StyleSheet, Text, View } from 'react-native'
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -62,7 +62,7 @@ export function LoadingOverlay({ visible, message = 'Please wait...' }: LoadingO
         >
           {/* Logo */}
           <View style={styles.logoRow}>
-            <CareHubLogo size={52} />
+            <DawaLogo size={52} />
             <Text style={styles.brandName}>
               CARE<Text style={styles.brandHub}>HUB</Text>
             </Text>

@@ -23,7 +23,7 @@ export const useAppStore = create<AppState>()(
       },
     }),
     {
-      name: 'carehub-app-storage',
+      name: 'dawa-app-storage',
       storage: createJSONStorage(() => AsyncStorage),
       onRehydrateStorage: () => (state) => {
         if (state?.selectedLanguage) {

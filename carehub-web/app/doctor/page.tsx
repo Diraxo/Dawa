@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useUser, useAuth } from '@clerk/nextjs'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { writeDoctorOnlineStatus } from '@/lib/doctorOnline'
 import { getGreeting, stripDrPrefix } from '@/lib/utils'
+import { SLOT_DURATION_MINS } from '@/lib/slotGeneration'
 import { ClipboardList, CheckCircle2, Star, Wallet, Calendar, User, XCircle, Clock, Ban, MessageCircle, Phone, Video } from 'lucide-react'
 import { AppointmentDetailsModal, type AppointmentDetails } from '@/components/doctor/AppointmentDetailsModal'
 
@@ -24,8 +25,16 @@ interface TodayAppointment {
   patientName: string
   patientPhotoUrl: string | null
   time: string
+  scheduledAt: string
   status: string
 }
+
+// Statuses that mean "hasn't started yet" — once scheduledAt + the slot
+// duration has passed with no activity, these are stale and should drop off
+// Today's Schedule on their own (no manual refresh). A consultation that did
+// start (accepted/in_progress/active) stays until its own status changes —
+// a live call legitimately can run past its scheduled slot.
+const NOT_YET_STARTED_STATUSES = new Set(['pending', 'waiting_for_doctor', 'scheduled'])
 
 export default function DoctorHomePage() {
   const { user } = useUser()
@@ -36,6 +45,18 @@ export default function DoctorHomePage() {
   const [loading, setLoading] = useState(true)
   const [todaySchedule, setTodaySchedule] = useState<TodayAppointment[]>([])
   const [detailsAppt, setDetailsAppt] = useState<AppointmentDetails | null>(null)
+  // Today's Schedule must drop an expired, never-started item purely because
+  // the clock ticked forward — no DB write, realtime event, or manual
+  // refresh happens in that case, so nothing else re-renders this list.
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  const visibleTodaySchedule = useMemo(() => todaySchedule.filter((appt) => {
+    if (!NOT_YET_STARTED_STATUSES.has(appt.status)) return true
+    return new Date(appt.scheduledAt).getTime() + SLOT_DURATION_MINS * 60_000 > nowTick
+  }), [todaySchedule, nowTick])
 
   useEffect(() => {
     if (!user) return
@@ -106,6 +127,7 @@ export default function DoctorHomePage() {
       patientName: c.patient?.full_name ?? 'Patient',
       patientPhotoUrl: c.patient?.profile_photo_url ?? null,
       time: c.scheduled_at ? new Date(c.scheduled_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '',
+      scheduledAt: c.scheduled_at,
       status: c.status,
     })))
   }
@@ -260,14 +282,14 @@ export default function DoctorHomePage() {
           <div className="flex flex-col gap-2">
             {[1, 2].map(i => <div key={i} className="h-16 shimmer-bg rounded-2xl" />)}
           </div>
-        ) : todaySchedule.length === 0 ? (
+        ) : visibleTodaySchedule.length === 0 ? (
           <div className="card p-8 text-center">
             <Calendar size={28} className="mx-auto mb-2 text-steel-grey" />
             <p className="text-ink-black/40 text-sm">No appointments scheduled for today</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2">
-            {todaySchedule.map(appt => {
+            {visibleTodaySchedule.map(appt => {
               const typeIcons: Record<string, typeof MessageCircle> = { chat: MessageCircle, phone: Phone, video: Video }
               const ApptIcon = typeIcons[appt.type] ?? ClipboardList
               return (

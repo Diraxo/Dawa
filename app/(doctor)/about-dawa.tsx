@@ -5,7 +5,7 @@ import { useRouter } from 'expo-router'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 
-import { CareHubLogo } from '@/components/ui/CareHubLogo'
+import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -36,7 +36,7 @@ export default function DoctorAboutDawaScreen() {
       <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.hero}>
           <View style={{ marginBottom: 14 }}>
-            <CareHubLogo size={80} />
+            <DawaLogo size={80} />
           </View>
           <Text style={styles.heroTagline}>TRUSTED CARE. ANYWHERE. ALWAYS.</Text>
           <Text style={styles.heroVersion}>Version {APP_VERSION}</Text>

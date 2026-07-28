@@ -62,6 +62,16 @@ export function stripDrPrefix(name: string): string {
   return name.replace(/^Dr\.?\s+/i, '').trim()
 }
 
+// Doctor "languages spoken" values are sometimes seeded directly into the
+// DB with inconsistent casing, so patient-facing displays capitalize
+// defensively rather than trusting the stored casing.
+// Mirrors mobile's capitalizeLanguage() (lib/languageFormat.ts).
+export function capitalizeLanguage(lang: string): string {
+  const trimmed = lang.trim()
+  if (!trimmed) return trimmed
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase()
+}
+
 export interface ParsedPrescription {
   medicine: string
   dosage?: string
