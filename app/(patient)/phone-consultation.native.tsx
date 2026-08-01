@@ -58,7 +58,7 @@ const MUTE_DEBOUNCE_MS = 4_000
 
 // Use a locally bundled ringtone so it works offline and loads instantly
 // Replace assets/sounds/ringtone.wav with any high-quality MP3/WAV for production
-let RINGTONE_SOURCE: ReturnType<typeof require> | { uri: string }
+let RINGTONE_SOURCE: number | { uri: string }
 try {
   RINGTONE_SOURCE = require('@/assets/sounds/ringtone.wav')
 } catch {

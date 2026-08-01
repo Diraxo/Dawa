@@ -347,7 +347,7 @@ export default function ForgotPasswordScreen() {
               </View>
 
               <Pressable
-                onPress={handleVerifyOTP}
+                onPress={() => handleVerifyOTP()}
                 disabled={loading || !otpComplete}
                 style={[styles.btnWrap, (loading || !otpComplete) && styles.dimmed]}
               >
@@ -435,7 +435,7 @@ export default function ForgotPasswordScreen() {
               {destinationError && (
                 <View style={styles.verifyErrorBox}>
                   <Text style={styles.errorText}>
-                    Your password was reset, but we couldn't verify your account. Please check your connection and try again.
+                    Your password was reset, but we couldn&apos;t verify your account. Please check your connection and try again.
                   </Text>
                   <Pressable onPress={retryDestination} style={styles.retryBtn} hitSlop={8}>
                     <Text style={styles.retryBtnText}>Try Again</Text>

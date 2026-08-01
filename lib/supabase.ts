@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? ''
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
@@ -42,7 +42,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 })
 
 const TOKEN_TTL_MS = 5 * 60 * 1000
-const _authClientCache = new Map<string, { client: ReturnType<typeof createClient>; ts: number }>()
+const _authClientCache = new Map<string, { client: SupabaseClient; ts: number }>()
 
 export function getAuthClient(clerkToken: string) {
   const entry = _authClientCache.get(clerkToken)

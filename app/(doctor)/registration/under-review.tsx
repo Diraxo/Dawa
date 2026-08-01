@@ -46,12 +46,14 @@ export default function UnderReviewScreen() {
   // Fetch this doctor's profile ID so we can filter the Realtime subscription
   useEffect(() => {
     if (!user?.id) return
-    supabase
-      .from('doctor_profiles')
+    // Cast to `any` here: the embedded `users!inner(...)` select combined with a
+    // dotted-path `.eq()` filter defeats supabase-js's generic inference on this
+    // untyped (no Database schema) client, blowing past TS's instantiation depth limit.
+    ;(supabase.from('doctor_profiles') as any)
       .select('id, users!inner(clerk_id)')
-      .eq('users.clerk_id' as any, user.id)
+      .eq('users.clerk_id', user.id)
       .maybeSingle()
-      .then(({ data }) => { if (data?.id) setProfileId(data.id) })
+      .then(({ data }: { data: { id: string } | null }) => { if (data?.id) setProfileId(data.id) })
   }, [user?.id])
 
   // Automatically react when admin approves or rejects — filtered to this doctor only

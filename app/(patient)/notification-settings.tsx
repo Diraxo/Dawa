@@ -160,7 +160,7 @@ export default function NotificationSettingsScreen() {
     }
   }
 
-  const toggle = (id: string) => {
+  const toggle = (id: PrefKey) => {
     setToggles((prev) => {
       const next = { ...prev, [id]: !prev[id] } as Record<PrefKey, boolean>
       savePrefs(next, prev)
