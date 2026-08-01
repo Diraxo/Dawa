@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -45,6 +45,11 @@ export default function VerifyScreen() {
   const [timer, setTimer] = useState(TIMER_SECONDS)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // Guards against the auto-submit effect and a manual Continue tap firing
+  // for the same code within the same tick — a ref (not just `loading`
+  // state) is required since state updates are batched and wouldn't be
+  // visible to the second synchronous call yet.
+  const verifyingRef = useRef(false)
 
   // ── Countdown timer ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -58,7 +63,8 @@ export default function VerifyScreen() {
 
   // ── Verify OTP ────────────────────────────────────────────────────────────
   const verifyCode = async (codeStr: string) => {
-    if (loading) return
+    if (verifyingRef.current) return
+    verifyingRef.current = true
     setLoading(true)
     setError('')
     try {
@@ -102,6 +108,7 @@ export default function VerifyScreen() {
       )
       setCode(Array(CODE_LENGTH).fill(''))
     } finally {
+      verifyingRef.current = false
       setLoading(false)
     }
   }

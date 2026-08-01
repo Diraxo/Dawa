@@ -10,12 +10,11 @@ import {
   Animated,
   Modal,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   View,
 } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { LoadingOverlay } from '@/components/ui/LoadingOverlay'
 import { colors } from '@/constants/colors'
@@ -23,7 +22,7 @@ import { fonts } from '@/constants/fonts'
 import { images } from '@/constants/images'
 import { LANGUAGES } from '@/constants/languages'
 import { shadow } from '@/lib/shadow'
-import { supabase, supabaseEmailAuth } from '@/lib/supabase'
+import { getAuthClient, supabase, supabaseEmailAuth } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useAuthStore } from '@/store/authStore'
 import { useDoctorStore } from '@/store/doctorStore'
@@ -79,7 +78,7 @@ export default function RoleScreen() {
   const router = useRouter()
   const { top } = useSafeAreaInsets()
   const { user, isLoaded: userLoaded } = useUser()
-  const { signOut } = useAuth()
+  const { signOut, getToken } = useAuth()
   const { t } = useTranslation()
   const { selectedLanguage, setSelectedLanguage, selectedCountry } = useAppStore()
   const { setUserRole } = useAuthStore()
@@ -98,6 +97,10 @@ export default function RoleScreen() {
 
   const patientScale = useRef(new Animated.Value(1)).current
   const doctorScale = useRef(new Animated.Value(1)).current
+  // Ref (not just `loading` state) guards re-entrancy — state updates are
+  // batched, so two taps fired in the same tick both still see the old
+  // `loading === false` and would otherwise both upsert the profile row.
+  const submittingRef = useRef(false)
 
   useEffect(() => {
     supabaseEmailAuth.auth.getSession().then(({ data: { session } }) => {
@@ -181,10 +184,27 @@ export default function RoleScreen() {
   const handleContinue = async () => {
     const isClerkUser = userLoaded && !!user
     const isSupaUser = supaUserLoaded && !!supaUser
-    if (!selectedRole || loading || (!isClerkUser && !isSupaUser)) return
+    if (!selectedRole || submittingRef.current || (!isClerkUser && !isSupaUser)) return
+    submittingRef.current = true
     setLoading(true)
     setGlobalError('')
     try {
+      // Reaching this screen typically means Clerk just finished a
+      // sign-up/SSO flow moments ago — AppInitializer's effect that wires
+      // Clerk's getToken() into the shared `supabase` client (lib/supabase.ts
+      // _clerkTokenGetter) only runs after that state change re-renders, so
+      // there's a window where the shared client's accessToken callback has
+      // nothing to return and falls back to the (unrelated, unauthenticated)
+      // Supabase-native session. That sends this upsert as `anon`, which the
+      // users_insert_own RLS policy rejects with 42501. Fetching the token
+      // directly here — the same pattern sign-in.tsx and
+      // oauth-native-callback.tsx already use for this exact race — avoids
+      // depending on that effect having fired yet.
+      let client = supabase
+      if (isClerkUser) {
+        const token = await getToken()
+        if (token) client = getAuthClient(token)
+      }
       const record = isClerkUser
         ? {
             clerk_id: user!.id,
@@ -204,7 +224,7 @@ export default function RoleScreen() {
             country: selectedCountry ?? '',
             language: selectedLanguage ?? 'en',
           }
-      const { error: upsertError } = await supabase.from('users').upsert(record, { onConflict: 'clerk_id' })
+      const { error: upsertError } = await client.from('users').upsert(record, { onConflict: 'clerk_id' })
       if (upsertError) {
         // Don't blame "your connection" for a server-side rejection (RLS,
         // constraint violation, etc.) — log the real cause so it's
@@ -241,6 +261,7 @@ export default function RoleScreen() {
       console.error('[role] handleContinue threw:', err)
       setGlobalError('Something went wrong. Please try again.')
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }

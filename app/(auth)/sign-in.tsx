@@ -71,6 +71,12 @@ export default function SignInScreen() {
   // ── Shared redirect state ─────────────────────────────────────────────────
   const redirectingRef = useRef(false)
   const intendingSignInRef = useRef(false)
+  // Refs (not just the loading state) guard re-entrancy: state updates are
+  // batched, so two taps fired in the same tick both see the old
+  // `loading === false` and would otherwise both fire the request.
+  const submittingRef = useRef(false)
+  const googleSubmittingRef = useRef(false)
+  const appleSubmittingRef = useRef(false)
 
   // Uses getToken() directly so the Supabase query works immediately after setActive,
   // before _layout.tsx's _clerkTokenGetter effect fires.
@@ -126,7 +132,8 @@ export default function SignInScreen() {
 
   // ── Email + Password sign-in via Clerk ────────────────────────────────────
   const handleSignIn = async () => {
-    if (!isLoaded || !isFormReady || loading) return
+    if (!isLoaded || !isFormReady || submittingRef.current) return
+    submittingRef.current = true
     const normalizedEmail = email.trim().toLowerCase()
     setEmailError('')
     setPasswordError('')
@@ -173,13 +180,15 @@ export default function SignInScreen() {
         setGlobalError(msg || 'Something went wrong. Please try again.')
       }
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }
 
   // ── Google SSO (Clerk) ────────────────────────────────────────────────────
   const handleGoogle = useCallback(async () => {
-    if (googleLoading) return
+    if (googleSubmittingRef.current) return
+    googleSubmittingRef.current = true
     setGoogleLoading(true)
     setGlobalError('')
     intendingSignInRef.current = true
@@ -225,13 +234,15 @@ export default function SignInScreen() {
         intendingSignInRef.current = false
       }
     } finally {
+      googleSubmittingRef.current = false
       setGoogleLoading(false)
     }
-  }, [googleLoading, startSSOFlow, signIn, router, userId, checkRoleAndRedirect])
+  }, [startSSOFlow, signIn, router, userId, checkRoleAndRedirect])
 
   // ── Apple SSO (Clerk) ─────────────────────────────────────────────────────
   const handleApple = useCallback(async () => {
-    if (appleLoading) return
+    if (appleSubmittingRef.current) return
+    appleSubmittingRef.current = true
     setAppleLoading(true)
     setGlobalError('')
     intendingSignInRef.current = true
@@ -270,9 +281,10 @@ export default function SignInScreen() {
         intendingSignInRef.current = false
       }
     } finally {
+      appleSubmittingRef.current = false
       setAppleLoading(false)
     }
-  }, [appleLoading, signIn, startSSOFlow, router, userId, checkRoleAndRedirect])
+  }, [signIn, startSSOFlow, router, userId, checkRoleAndRedirect])
 
   return (
     <KeyboardAvoidingView

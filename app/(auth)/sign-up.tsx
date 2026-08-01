@@ -77,6 +77,15 @@ export default function SignUpScreen() {
   // ── Shared: check role and navigate to appropriate home ───────────────────
   const redirectingRef = useRef(false)
   const ssoInProgressRef = useRef(false)
+  // Refs, not just the `loading`/`googleLoading`/`appleLoading` state, guard
+  // re-entrancy — state updates are batched, so two taps fired in the same
+  // tick (or before the disabled prop re-renders) both still see the old
+  // `loading === false` and would otherwise both call signUp.create(),
+  // sending two OTP emails for one signup. A ref mutation is visible to the
+  // very next synchronous call immediately.
+  const submittingRef = useRef(false)
+  const googleSubmittingRef = useRef(false)
+  const appleSubmittingRef = useRef(false)
   const checkRoleAndRedirect = useCallback(async (clerkId: string) => {
     if (redirectingRef.current) return
     redirectingRef.current = true
@@ -131,7 +140,10 @@ export default function SignUpScreen() {
 
   // ── Email + Password sign-up via Clerk ────────────────────────────────────
   const handleContinue = async () => {
-    if (!isLoaded || loading) return
+    if (!isLoaded || submittingRef.current) return
+    submittingRef.current = true
+    setLoading(true)
+
     const normalizedEmail = email.trim().toLowerCase()
     let valid = true
     setFullNameError('')
@@ -156,15 +168,20 @@ export default function SignUpScreen() {
       setConfirmError('Passwords do not match.')
       valid = false
     }
-    if (!valid) return
+    if (!valid) {
+      submittingRef.current = false
+      setLoading(false)
+      return
+    }
 
     const limit = await otpLimiter.canRequest(normalizedEmail)
     if (!limit.allowed) {
       setEmailError(limit.message ?? 'Please wait before requesting another code.')
+      submittingRef.current = false
+      setLoading(false)
       return
     }
 
-    setLoading(true)
     try {
       const nameParts = fullName.trim().split(/\s+/)
       const firstName = nameParts[0]
@@ -172,7 +189,10 @@ export default function SignUpScreen() {
       await signUp.create({ emailAddress: normalizedEmail, password, firstName, ...(lastName && { lastName }) })
       await signUp.prepareEmailAddressVerification({ strategy: 'email_code' })
       await otpLimiter.recordRequest(normalizedEmail)
-      router.push({
+      // replace, not push — the verify screen owns this step of the flow now;
+      // stacking sign-up underneath let a second rapid tap (or a stale
+      // duplicate call) push a second verify screen on top of the first.
+      router.replace({
         pathname: '/(auth)/verify',
         params: { email: normalizedEmail, type: 'signup' },
       } as never)
@@ -187,13 +207,15 @@ export default function SignUpScreen() {
         setGlobalError(msg || 'Something went wrong. Please try again.')
       }
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }
 
   // ── Google SSO (Clerk) ────────────────────────────────────────────────────
   const handleGoogle = useCallback(async () => {
-    if (googleLoading) return
+    if (googleSubmittingRef.current) return
+    googleSubmittingRef.current = true
     setGoogleLoading(true)
     setGlobalError('')
     ssoInProgressRef.current = true
@@ -222,13 +244,15 @@ export default function SignUpScreen() {
         setGlobalError(err?.errors?.[0]?.message ?? 'Google sign-in failed. Please try again.')
       }
     } finally {
+      googleSubmittingRef.current = false
       setGoogleLoading(false)
     }
-  }, [googleLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
+  }, [startSSOFlow, router, userId, checkRoleAndRedirect])
 
   // ── Apple SSO (Clerk) ─────────────────────────────────────────────────────
   const handleApple = useCallback(async () => {
-    if (appleLoading) return
+    if (appleSubmittingRef.current) return
+    appleSubmittingRef.current = true
     setAppleLoading(true)
     setGlobalError('')
     ssoInProgressRef.current = true
@@ -254,9 +278,10 @@ export default function SignUpScreen() {
         setGlobalError(err?.errors?.[0]?.message ?? 'Apple sign-in failed. Please try again.')
       }
     } finally {
+      appleSubmittingRef.current = false
       setAppleLoading(false)
     }
-  }, [appleLoading, startSSOFlow, router, userId, checkRoleAndRedirect])
+  }, [startSSOFlow, router, userId, checkRoleAndRedirect])
 
   return (
     <KeyboardAvoidingView
