@@ -159,6 +159,15 @@ Deno.serve(async (req: Request) => {
     if (members.length > 0) {
       await channel.addMembers(members as any)
     }
+
+    // Write-back so migration 103's retry_unfrozen_chat_channels() sweep can
+    // tell a genuinely-frozen channel apart from one still stuck because the
+    // trigger's vault secret has drifted (P3-16) — otherwise a silent auth
+    // failure here is indistinguishable from success on the DB side.
+    await supabase
+      .from('consultations')
+      .update({ chat_frozen_at: new Date().toISOString() })
+      .eq('id', consultation_id)
   } catch (err) {
     console.error('[freeze-consultation-channel] Stream lock failed:', err)
     return new Response(

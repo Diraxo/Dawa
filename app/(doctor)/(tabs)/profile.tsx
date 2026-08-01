@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { Image } from 'expo-image'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Pressable,
   ScrollView,
@@ -21,7 +21,9 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
-import { clearPushTokens } from '@/lib/pushTokens'
+import { stripDrPrefix } from '@/lib/nameFormat'
+import { clearPushTokens, deactivateDevice } from '@/lib/pushTokens'
+import { getOrCreateDeviceId } from '@/lib/deviceId'
 import { shadow } from '@/lib/shadow'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
@@ -92,6 +94,7 @@ export default function DoctorProfileScreen() {
   const { clearAuth, disconnectStream } = useAuthStore()
   const { doctorStatus } = useDoctorStore()
   const guardLogout = useNavGuard()
+  const guardNav = useNavGuard()
 
   const isPending = doctorStatus && doctorStatus !== 'approved'
 
@@ -100,7 +103,7 @@ export default function DoctorProfileScreen() {
   // fire, leaving the doctor's own name on this screen without the prefix
   // every other doctor-facing screen shows. Strip any Dr. the doctor may
   // have typed into their name themselves first, so it's never doubled.
-  const rawFullName = (user?.fullName ?? `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim()).replace(/^Dr\.?\s*/i, '').trim()
+  const rawFullName = stripDrPrefix(user?.fullName ?? `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim())
   const fullName = rawFullName ? `Dr. ${rawFullName}` : 'Dr.'
   const initial = (user?.firstName?.[0] ?? rawFullName[0] ?? 'D').toUpperCase()
 
@@ -135,16 +138,17 @@ export default function DoctorProfileScreen() {
         if (!token) return
         const client = getAuthClient(token)
 
-        const now = new Date()
-        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-
         // doctor_profiles SELECT RLS returns own row + every approved doctor's
         // row (for patient browsing), so this must be filtered to the caller's
         // own row or .single() throws once any other approved doctor exists.
         const { data: me } = await client.from('users').select('id').eq('clerk_id', userId).single()
         if (!me) return
 
-        const [profileRes, totalRes, monthRes] = await Promise.all([
+        // Earnings are aggregated server-side (get_doctor_earnings_summary,
+        // migration 100) instead of fetching every completed consultation's
+        // doctor_amount and summing in JS — same totals, no per-row transfer
+        // that only grows as the doctor's history does.
+        const [profileRes, earningsRes] = await Promise.all([
           client
             .from('doctor_profiles')
             .select(`
@@ -154,12 +158,11 @@ export default function DoctorProfileScreen() {
             `)
             .eq('user_id', (me as any).id)
             .single(),
-          client.from('consultations').select('doctor_amount').eq('status', 'completed'),
-          client.from('consultations').select('doctor_amount').eq('status', 'completed').gte('ended_at', monthStart.toISOString()),
+          client.rpc('get_doctor_earnings_summary').single(),
         ])
 
-        const totalEarned = (totalRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.doctor_amount) || 0), 0)
-        const monthEarned = (monthRes.data ?? []).reduce((s: number, r: any) => s + (Number(r.doctor_amount) || 0), 0)
+        const totalEarned = Number((earningsRes.data as any)?.total_earned ?? 0)
+        const monthEarned = Number((earningsRes.data as any)?.month_earned ?? 0)
 
         if (profileRes.data) {
           const p = profileRes.data as any
@@ -283,6 +286,11 @@ export default function DoctorProfileScreen() {
   }
 
   const displayPhoto = profilePhotoUrl ?? user?.imageUrl ?? null
+  // OAuth-provider avatar URLs (Clerk's imageUrl, when there's no uploaded
+  // photo) can expire or 404 without any DB-side signal — fall back to the
+  // initials placeholder instead of a permanently broken image.
+  const [photoLoadFailed, setPhotoLoadFailed] = useState(false)
+  useEffect(() => { setPhotoLoadFailed(false) }, [displayPhoto])
   const hasPricing = profile.chatPrice > 0 || profile.phonePrice > 0 || profile.videoPrice > 0
 
   return (
@@ -305,9 +313,14 @@ export default function DoctorProfileScreen() {
                   await getAuthClient(token).from('doctor_profiles').update({ is_online: false })
                 }
               } catch {
-                // best-effort; the heartbeat TTL cleanup is the safety net
+                // best-effort — is_online has no server-side auto-offline
+                // mechanism (migration 060 removed the last one), so this is
+                // the only thing that flips it off; a failure here just
+                // leaves the doctor showing online until they toggle it
+                // manually, with no other functional impact.
               }
               if (user?.id) await clearPushTokens(user.id)
+              await deactivateDevice(await getOrCreateDeviceId())
               await disconnectStream()
               await supabaseEmailAuth.auth.signOut()
               clearAuth()
@@ -365,14 +378,15 @@ export default function DoctorProfileScreen() {
 
           {/* ── Profile Header ── */}
           <LinearGradient colors={gradients.hero} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.profileHeader}>
-            <Pressable onPress={() => router.push('/(doctor)/edit-profile' as never)} style={styles.photoWrap}>
-              {displayPhoto ? (
+            <Pressable onPress={guardNav(() => router.push('/(doctor)/edit-profile' as never))} style={styles.photoWrap}>
+              {displayPhoto && !photoLoadFailed ? (
                 <Image
                   source={{ uri: displayPhoto }}
                   style={styles.photo}
                   contentFit="cover"
                   cachePolicy="memory-disk"
                   transition={0}
+                  onError={() => setPhotoLoadFailed(true)}
                 />
               ) : (
                 <View style={styles.photoFallback}>

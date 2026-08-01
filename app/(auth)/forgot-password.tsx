@@ -1,4 +1,4 @@
-﻿import { useAuth, useSignIn } from '@clerk/clerk-expo'
+﻿import { useSignIn } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
@@ -21,8 +21,8 @@ import { DawaLogo } from '@/components/ui/DawaLogo'
 import { OTPInput } from '@/components/ui/OTPInput'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useAuthDestination } from '@/hooks/useAuthDestination'
 import { otpLimiter } from '@/lib/otpLimiter'
-import { getAuthClient, supabase } from '@/lib/supabase'
 import { useTranslation } from 'react-i18next'
 
 type Step = 'email' | 'otp' | 'password'
@@ -36,7 +36,6 @@ export default function ForgotPasswordScreen() {
   const router = useRouter()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
-  const { getToken } = useAuth()
 
   const [step, setStep] = useState<Step>('email')
   const [email, setEmail] = useState('')
@@ -50,7 +49,24 @@ export default function ForgotPasswordScreen() {
   const [successAlert, setSuccessAlert] = useState(false)
   const [resendAlert, setResendAlert] = useState(false)
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const targetRouteRef = useRef<string>('/(auth)/role')
+  const targetRouteRef = useRef<string>('/(patient)/(tabs)/home')
+
+  // Resolves the authenticated user's role (and, for doctors, approval
+  // status) by Clerk id — never by email — and never falls back to Role
+  // Selection just because the lookup temporarily failed.
+  const { arm: armDestination, retry: retryDestination, error: destinationError } = useAuthDestination((dest) => {
+    targetRouteRef.current = dest.route
+    setLoading(false)
+    setSuccessAlert(true)
+    successTimerRef.current = setTimeout(() => {
+      setSuccessAlert(false)
+      router.replace(targetRouteRef.current as never)
+    }, 2000)
+  })
+
+  useEffect(() => {
+    if (destinationError) setLoading(false)
+  }, [destinationError])
 
   useEffect(() => {
     return () => {
@@ -67,13 +83,20 @@ export default function ForgotPasswordScreen() {
       setError('Please enter a valid email address.')
       return
     }
+    const normalizedEmail = email.trim().toLowerCase()
+    const limit = await otpLimiter.canRequest(normalizedEmail)
+    if (!limit.allowed) {
+      setError(limit.message ?? 'Please wait before requesting another code.')
+      return
+    }
     setLoading(true)
     setError('')
     try {
       await signIn.create({
         strategy: 'reset_password_email_code',
-        identifier: email.trim().toLowerCase(),
+        identifier: normalizedEmail,
       })
+      await otpLimiter.recordRequest(normalizedEmail)
       setStep('otp')
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
@@ -140,27 +163,12 @@ export default function ForgotPasswordScreen() {
       const result = await signIn.resetPassword({ password })
       if (result.status === 'complete' && result.createdSessionId) {
         await setActive({ session: result.createdSessionId })
-        try {
-          const token = await getToken()
-          const client = token ? getAuthClient(token) : supabase
-          const { data } = await client
-            .from('users')
-            .select('role')
-            .eq('email', email.trim().toLowerCase())
-            .single()
-          if (data?.role === 'patient') targetRouteRef.current = '/(patient)/(tabs)/home'
-          else if (data?.role === 'doctor') targetRouteRef.current = '/(doctor)/(tabs)/home'
-          else targetRouteRef.current = '/(auth)/role'
-        } catch {
-          targetRouteRef.current = '/(auth)/role'
-        }
-        setSuccessAlert(true)
-        successTimerRef.current = setTimeout(() => {
-          setSuccessAlert(false)
-          router.replace(targetRouteRef.current as never)
-        }, 2000)
+        // Role/status resolution + navigation is handled by useAuthDestination
+        // below once Clerk's isSignedIn/userId reflect the new session.
+        armDestination()
       } else {
         setError('Failed to reset password. Please try again.')
+        setLoading(false)
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
@@ -174,7 +182,6 @@ export default function ForgotPasswordScreen() {
             'Failed to reset password. Please try again.'
         )
       }
-    } finally {
       setLoading(false)
     }
   }
@@ -425,6 +432,17 @@ export default function ForgotPasswordScreen() {
 
               {!!error && <Text style={styles.errorText}>{error}</Text>}
 
+              {destinationError && (
+                <View style={styles.verifyErrorBox}>
+                  <Text style={styles.errorText}>
+                    Your password was reset, but we couldn't verify your account. Please check your connection and try again.
+                  </Text>
+                  <Pressable onPress={retryDestination} style={styles.retryBtn} hitSlop={8}>
+                    <Text style={styles.retryBtnText}>Try Again</Text>
+                  </Pressable>
+                </View>
+              )}
+
               <Pressable
                 onPress={handleResetPassword}
                 disabled={loading}
@@ -509,6 +527,12 @@ const styles = StyleSheet.create({
     marginTop: 6, marginBottom: 4, lineHeight: 18,
   },
   mt10: { marginTop: 10 },
+
+  verifyErrorBox: {
+    backgroundColor: '#FEF2F2', borderRadius: 12, padding: 14, marginTop: 6, marginBottom: 4,
+  },
+  retryBtn: { marginTop: 10, alignSelf: 'flex-start' },
+  retryBtnText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.tealGreen },
 
   infoCard: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 8,

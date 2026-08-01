@@ -1,5 +1,8 @@
+import { useAuth } from '@clerk/clerk-expo'
 import { useEffect, useState } from 'react'
+import { AppState } from 'react-native'
 
+import { getAuthClient } from '@/lib/supabase'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 
 /**
@@ -13,11 +16,32 @@ import { subscribeRealtime } from '@/lib/realtimeChannelManager'
  * many users on screen at once.
  */
 export function useUserPhotoRealtime(userRowId: string | null | undefined, initialPhotoUrl: string | null | undefined) {
+  const { getToken } = useAuth()
   const [photoUrl, setPhotoUrl] = useState<string | null>(initialPhotoUrl ?? null)
 
   useEffect(() => {
     setPhotoUrl(initialPhotoUrl ?? null)
   }, [initialPhotoUrl])
+
+  // Realtime alone misses any change made while this device's socket was
+  // suspended in the background — re-fetch once on every foreground return
+  // (mirrors useOwnProfilePhoto/useUserProfileRealtime's same guard).
+  useEffect(() => {
+    if (!userRowId) return
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return
+      getToken().then(async (token) => {
+        if (!token) return
+        const { data } = await getAuthClient(token)
+          .from('users')
+          .select('profile_photo_url')
+          .eq('id', userRowId)
+          .maybeSingle()
+        if (data) setPhotoUrl(data.profile_photo_url ?? null)
+      })
+    })
+    return () => sub.remove()
+  }, [userRowId, getToken])
 
   useEffect(() => {
     if (!userRowId) return

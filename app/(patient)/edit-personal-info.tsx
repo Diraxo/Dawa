@@ -28,9 +28,11 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { waitForModalDismiss } from '@/lib/imagePicker'
 import { MIN_AGE_PATIENT, meetsAgeRequirement } from '@/lib/ageValidation'
-import { pushOwnPhotoToStream } from '@/lib/stream'
+import { sanitize } from '@/lib/sanitize'
+import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getAuthClient } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useTranslation } from 'react-i18next'
@@ -596,6 +598,7 @@ export default function EditPersonalInfoScreen() {
   const router = useRouter()
   const { t } = useTranslation()
   const { selectedCountry } = useAppStore()
+  const guardNav = useNavGuard()
 
   const [firstName, setFirstName] = useState(user?.firstName ?? '')
   const [lastName, setLastName] = useState(user?.lastName ?? '')
@@ -617,6 +620,13 @@ export default function EditPersonalInfoScreen() {
   const initialPhoneRef = useRef('')
   const initialCountryRef = useRef(selectedCountry ?? '')
   const initialAddressRef = useRef('')
+  // Same guard, extended to gender/DOB (previously unprotected — see C-3 in
+  // the July 30 2026 profile audit): snapshot what patient_profiles actually
+  // had at load time so handleSave only writes these fields when they
+  // differ from that snapshot, never when the async load just hasn't
+  // resolved yet.
+  const initialGenderRef = useRef('')
+  const initialDobIsoRef = useRef<string | null>(null)
 
   const defaultDob: DateValue = useMemo(() => ({ day: 1, month: 0, year: 10 }), [])
   const [dob, setDob] = useState<DateValue>(defaultDob)
@@ -669,7 +679,10 @@ export default function EditPersonalInfoScreen() {
         if (ppError) console.error('Failed to load patient profile:', ppError)
 
         if (pp) {
-          setGender(pp.gender ? (GENDER_DB_TO_UI[pp.gender] ?? '') : '')
+          const loadedGender = pp.gender ? (GENDER_DB_TO_UI[pp.gender] ?? '') : ''
+          setGender(loadedGender)
+          initialGenderRef.current = loadedGender
+          initialDobIsoRef.current = pp.date_of_birth ?? null
           if (pp.date_of_birth) {
             const d = new Date(pp.date_of_birth)
             setDob({
@@ -746,6 +759,16 @@ export default function EditPersonalInfoScreen() {
   const handleSave = async () => {
     if (!user?.id) return
 
+    if (!firstName.trim() || !lastName.trim()) {
+      Alert.alert(t('profileSaveError'), 'Please enter your first and last name.')
+      return
+    }
+    const phoneDigits = phone.replace(/[^0-9]/g, '')
+    if (phone.trim() && (phoneDigits.length < 6 || /[^0-9+\-() ]/.test(phone.trim()))) {
+      Alert.alert(t('profileSaveError'), 'Please enter a valid phone number.')
+      return
+    }
+
     // Validate age
     if (dobLabel) {
       const birthDate = new Date(Number(YEARS[dob.year]), dob.month, dob.day)
@@ -762,8 +785,27 @@ export default function EditPersonalInfoScreen() {
       if (!token) throw new Error('not authenticated')
       const client = getAuthClient(token)
 
-      // Update Clerk name
-      await user.update({ firstName, lastName })
+      // Two-phase write: Clerk first, mirrored onto users.full_name below.
+      // Snapshot the current Clerk name so a failed Supabase write can be
+      // rolled back to it — otherwise Clerk and Supabase could permanently
+      // disagree about the patient's name (mirrors the doctor edit-profile
+      // screen's same guard).
+      const previousFirstName = user.firstName ?? ''
+      const previousLastName = user.lastName ?? ''
+      const nameChanged = firstName !== previousFirstName || lastName !== previousLastName
+      // Strip HTML/script-breakout characters before anything is persisted —
+      // this utility previously existed but was never wired up anywhere.
+      const cleanFirstName = sanitize.text(firstName)
+      const cleanLastName = sanitize.text(lastName)
+      const cleanAddress = sanitize.text(address)
+      if (nameChanged) {
+        try {
+          await user.update({ firstName: cleanFirstName, lastName: cleanLastName })
+        } catch (e) {
+          console.error('Failed to update name (Clerk):', e)
+          throw new Error('Could not update your name. Please try again.')
+        }
+      }
 
       // Upload profile photo if a new one was picked, or clear it if deleted
       let profilePhotoUrl: string | null | undefined = undefined
@@ -784,7 +826,15 @@ export default function EditPersonalInfoScreen() {
           photoUploadFailed = true
         }
       } else if (photoRemoved) {
-        await client.storage.from('profile-photos').remove([avatarPath]).catch(() => {})
+        // Remove every file in this user's folder, not just avatar.jpg —
+        // older upload flows used different filenames/extensions, and
+        // leaving those behind orphans them in storage forever.
+        try {
+          const { data: existing } = await client.storage.from('profile-photos').list(user.id)
+          if (existing && existing.length > 0) {
+            await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
+          }
+        } catch {}
         profilePhotoUrl = null
       }
 
@@ -792,19 +842,35 @@ export default function EditPersonalInfoScreen() {
       const { data: updated, error: userError } = await client
         .from('users')
         .update({
-          full_name: `${firstName} ${lastName}`.trim(),
+          full_name: `${cleanFirstName} ${cleanLastName}`.trim(),
           ...(phone !== initialPhoneRef.current ? { phone } : {}),
           ...(country !== initialCountryRef.current ? { country } : {}),
-          ...(address !== initialAddressRef.current ? { address: address.trim() || null } : {}),
+          ...(address !== initialAddressRef.current ? { address: cleanAddress.trim() || null } : {}),
           ...(profilePhotoUrl !== undefined ? { profile_photo_url: profilePhotoUrl } : {}),
         })
         .eq('clerk_id', user.id)
         .select('id')
         .single()
-      if (userError) throw userError
+      if (userError) {
+        console.error('Failed to update users row:', userError)
+        if (nameChanged) {
+          await user.update({ firstName: previousFirstName, lastName: previousLastName }).catch((e) => {
+            console.error('Failed to roll back Clerk name after users-table write failure:', e)
+          })
+        }
+        throw new Error(
+          phone !== initialPhoneRef.current
+            ? 'Could not update your phone number. Please try again.'
+            : 'Could not save your changes. Please try again.'
+        )
+      }
 
       const uid = supabaseUserId ?? updated?.id
 
+      // Stream only learns a user's name at connectUser() time, so without
+      // this a doctor's already-open chat thread keeps showing the old
+      // patient name until the app fully reconnects.
+      if (nameChanged) pushOwnNameToStream(`${cleanFirstName} ${cleanLastName}`.trim())
       if (profilePhotoUrl !== undefined) pushOwnPhotoToStream(profilePhotoUrl)
 
       // Build ISO date string
@@ -812,13 +878,38 @@ export default function EditPersonalInfoScreen() {
         ? new Date(Number(YEARS[dob.year]), dob.month, dob.day).toISOString().split('T')[0]
         : null
 
-      // Upsert patient_profiles using Supabase UUID
+      // Upsert patient_profiles using Supabase UUID — only include gender/
+      // date_of_birth when they actually differ from what was loaded, so a
+      // save that races ahead of the patient_profiles fetch (still holding
+      // pre-load defaults) can never null out previously-saved values.
       if (uid) {
-        const { error: profileError } = await client.from('patient_profiles').upsert(
-          { user_id: uid, gender: gender ? GENDER_UI_TO_DB[gender] ?? null : null, date_of_birth: dobDate },
-          { onConflict: 'user_id' }
-        )
-        if (profileError) throw profileError
+        const genderChanged = gender !== initialGenderRef.current
+        const dobChanged = dobDate !== initialDobIsoRef.current
+        if (genderChanged || dobChanged) {
+          const patientProfileUpdate: Record<string, unknown> = { user_id: uid }
+          if (genderChanged) patientProfileUpdate.gender = gender ? GENDER_UI_TO_DB[gender] ?? null : null
+          if (dobChanged) patientProfileUpdate.date_of_birth = dobDate
+          const { error: profileError } = await client.from('patient_profiles').upsert(
+            patientProfileUpdate,
+            { onConflict: 'user_id' }
+          )
+          if (profileError) {
+            console.error('Failed to update patient_profiles (gender/DOB):', profileError)
+            throw new Error('Could not save your gender/date of birth. Please try again.')
+          }
+        }
+      }
+
+      // In-app only (spec issue 9) — no push, so a failure here must never
+      // block the save the patient is actually waiting on.
+      if (uid) {
+        client.from('notifications').insert({
+          user_id: uid,
+          title: 'Profile Updated',
+          body: 'Your profile information has been updated successfully.',
+          type: 'profile_updated',
+          data_json: { screen: 'profile' },
+        }).then(() => {}, () => {})
       }
 
       if (photoUploadFailed) {
@@ -827,21 +918,26 @@ export default function EditPersonalInfoScreen() {
         Alert.alert(t('profileSaved'), t('profileSavedMsg'))
       }
       router.back()
-    } catch {
-      Alert.alert(t('profileSaveError'), t('profileSaveErrorMsg'))
+    } catch (e) {
+      Alert.alert(t('profileSaveError'), e instanceof Error ? e.message : t('profileSaveErrorMsg'))
     } finally {
       setSaving(false)
     }
   }
 
   const displayImageUri = photoRemoved ? null : localImageUri ?? dbPhotoUrl ?? user?.imageUrl
+  // OAuth-provider avatar URLs (Clerk's imageUrl, when there's no uploaded
+  // photo) can expire or 404 without any DB-side signal — fall back to the
+  // initials placeholder instead of a permanently broken image.
+  const [avatarLoadFailed, setAvatarLoadFailed] = useState(false)
+  useEffect(() => { setAvatarLoadFailed(false) }, [displayImageUri])
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       {/* Header */}
       <View style={styles.header}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={guardNav(() => router.back())}
           style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.6 }]}
           hitSlop={10}
         >
@@ -869,8 +965,12 @@ export default function EditPersonalInfoScreen() {
             style={styles.avatarWrap}
             onPress={() => setShowPhotoPicker(true)}
           >
-            {displayImageUri ? (
-              <Image source={{ uri: displayImageUri }} style={styles.avatar} />
+            {displayImageUri && !avatarLoadFailed ? (
+              <Image
+                source={{ uri: displayImageUri }}
+                style={styles.avatar}
+                onError={() => setAvatarLoadFailed(true)}
+              />
             ) : (
               <View style={styles.avatarFallback}>
                 <Text style={styles.avatarInitial}>
@@ -967,7 +1067,7 @@ export default function EditPersonalInfoScreen() {
         {/* Save button */}
         <Pressable
           style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]}
-          onPress={handleSave}
+          onPress={guardNav(handleSave)}
           disabled={saving}
         >
           <LinearGradient

@@ -73,3 +73,26 @@ export function validateFile(file: { type: string; size: number; name?: string }
   }
   return true
 }
+
+// Chat attachments additionally allow Word documents (the attach sheet's own
+// copy has always advertised "PDF, Word, or any file") — but unlike the old
+// `type: '*/*'` document picker, nothing here falls through to "any file".
+// Any file type (executables, scripts, archives) was previously acceptable
+// through a consultation chat with no allowlist or size cap at all (P3-14).
+const CHAT_ALLOWED_FILE_TYPES = [
+  'image/jpeg', 'image/png', 'image/webp',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]
+const MAX_CHAT_FILE_SIZE = 10 * 1024 * 1024 // 10 MB
+
+export function validateChatAttachment(file: { type: string; size: number; name?: string }): true {
+  if (!CHAT_ALLOWED_FILE_TYPES.includes(file.type)) {
+    throw new Error('Unsupported file type. Only images, PDF, and Word documents are allowed.')
+  }
+  if (file.size > MAX_CHAT_FILE_SIZE) {
+    throw new Error('File too large. Maximum size is 10 MB.')
+  }
+  return true
+}

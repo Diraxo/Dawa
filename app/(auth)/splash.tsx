@@ -132,30 +132,30 @@ export default function SplashScreen() {
           }
         } else if (userData?.role === 'doctor') {
           setUserRole('doctor')
-          try {
-            const { data: dp } = await supabase
-              .from('doctor_profiles')
-              .select('status')
-              .eq('user_id', userData.id)
-              .single()
+          const { data: dp, error: dpError } = await supabase
+            .from('doctor_profiles')
+            .select('status')
+            .eq('user_id', userData.id)
+            .single()
+          // PGRST116 = no matching row, i.e. registration never started —
+          // a real "go to step 1" case. Any other error is a fetch failure
+          // (network/DB), not evidence the doctor is unregistered, so it's
+          // rethrown into the outer catch below rather than misrouting an
+          // approved doctor into registration on a connectivity blip.
+          if (dpError && dpError.code !== 'PGRST116') throw dpError
 
-            if (dp?.status === 'approved') {
-              // Same check for a returning doctor — an active/waiting
-              // consultation must open directly, never behind Home.
-              const active = await resolveActiveConsultationRoute(supabase, 'doctor', userData.id).catch(() => null)
-              if (active) {
-                router.replace({ pathname: active.pathname as any, params: active.params })
-              } else {
-                router.replace('/(doctor)/(tabs)/home' as never)
-              }
-            } else if (dp?.status === 'pending') {
-              router.replace('/(doctor)/registration/under-review' as never)
-            } else if (dp?.status === 'rejected' || dp?.status === 'suspended') {
-              router.replace('/(doctor)/registration/under-review' as never)
+          if (dp?.status === 'approved') {
+            // Same check for a returning doctor — an active/waiting
+            // consultation must open directly, never behind Home.
+            const active = await resolveActiveConsultationRoute(supabase, 'doctor', userData.id).catch(() => null)
+            if (active) {
+              router.replace({ pathname: active.pathname as any, params: active.params })
             } else {
-              router.replace('/(doctor)/registration/step-1' as never)
+              router.replace('/(doctor)/(tabs)/home' as never)
             }
-          } catch {
+          } else if (dp?.status === 'pending' || dp?.status === 'rejected' || dp?.status === 'suspended') {
+            router.replace('/(doctor)/registration/under-review' as never)
+          } else {
             router.replace('/(doctor)/registration/step-1' as never)
           }
         } else {

@@ -16,7 +16,8 @@ import { Platform } from 'react-native'
 import * as Notifications from 'expo-notifications'
 import { supabase } from './supabase'
 import { callkeep, type IncomingCallPayload } from './callkeep'
-import { reclaimTokenFromOtherUsers } from './pushTokens'
+import { reclaimTokenFromOtherUsers, upsertDevice } from './pushTokens'
+import { getOrCreateDeviceId } from './deviceId'
 import { logger } from './logger'
 
 // ── Lazy-load native modules ──────────────────────────────────────────────────
@@ -110,6 +111,9 @@ async function _registerVoIPToken(
         .eq('clerk_id', currentVoipClerkUserId)
       if (error) logger.warn('[VoIP] Failed to save voip_token:', error.message)
       else        logger.log('[VoIP] voip_token saved')
+
+      const deviceId = await getOrCreateDeviceId()
+      await upsertDevice({ deviceId, platform: 'ios', voipToken: token })
     } catch (e) {
       logger.warn('[VoIP] supabase update failed:', e)
     }
@@ -152,6 +156,9 @@ async function _registerFCMToken(
       .eq('clerk_id', clerkUserId)
     if (error) logger.warn('[FCM] Failed to save fcm_token:', error.message)
     else        logger.log('[FCM] fcm_token saved')
+
+    const deviceId = await getOrCreateDeviceId()
+    await upsertDevice({ deviceId, platform: 'android', fcmToken: token })
   } catch (e) {
     logger.warn('[FCM] getToken failed:', e)
   }
@@ -169,6 +176,9 @@ async function _registerFCMToken(
         .from('users')
         .update({ fcm_token: newToken })
         .eq('clerk_id', currentFcmClerkUserId)
+
+      const deviceId = await getOrCreateDeviceId()
+      await upsertDevice({ deviceId, platform: 'android', fcmToken: newToken })
     } catch {}
   })
 

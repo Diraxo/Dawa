@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  FlatList,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -23,11 +24,19 @@ import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { shadow } from '@/lib/shadow'
 import { ethiopiaTodayRange } from '@/lib/slotGeneration'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { getAuthClient } from '@/lib/supabase'
 import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { navigateFamilyRoute } from '@/lib/notificationNav'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
+
+// Unbounded (P3-27) — a doctor's full lifetime consultation history was
+// fetched on every focus/realtime event/foreground with no cap at all. 200
+// covers realistic tab/search/badge usage (recent-first) without the query
+// cost and payload size growing forever; older rows remain reachable via
+// Consultation History, which paginates independently.
+const CONSULTATIONS_LIST_LIMIT = 200
 
 // "all" is a UI-only meta-tab (shows every row regardless of status) and is
 // never a value assigned to an individual consultation.
@@ -236,6 +245,7 @@ export default function ConsultationsScreen() {
             .from('consultations')
             .select(CONSULTATIONS_SELECT)
             .order('created_at', { ascending: false })
+            .limit(CONSULTATIONS_LIST_LIMIT)
           setIsLoading(false)
           if (!data) return
           const items = data.map(mapConsultationRow)
@@ -280,47 +290,71 @@ export default function ConsultationsScreen() {
     })()
   }, [user?.id, getToken])
 
+  // Patches a single changed consultation row in place instead of refetching
+  // the entire (now merely bounded, not eliminated) list on every realtime
+  // event (P3-27) — also moved onto the shared refcounted channel manager
+  // instead of a `Date.now()`-suffixed one-off channel (P3-30), matching the
+  // singleton pattern already used elsewhere (see usePatientAppointments.ts).
+  const patchConsultationRow = useCallback(async (event: 'INSERT' | 'UPDATE' | 'DELETE', payload: any) => {
+    if (event === 'DELETE') {
+      const oldId = payload.old?.id
+      if (oldId) setConsultations((prev) => prev.filter((c) => c.id !== oldId))
+      return
+    }
+    const id = payload.new?.id
+    if (!id) return
+    const token = await getToken()
+    if (!token) return
+    const { data } = await getAuthClient(token)
+      .from('consultations')
+      .select(CONSULTATIONS_SELECT)
+      .eq('id', id)
+      .maybeSingle()
+    if (!data) return
+    const item = mapConsultationRow(data)
+    setConsultations((prev) => {
+      const idx = prev.findIndex((c) => c.id === item.id)
+      if (idx === -1) return [item, ...prev]
+      const next = [...prev]
+      next[idx] = item
+      return next
+    })
+  }, [getToken])
+
   // Live-refresh whenever any of this doctor's consultations change (new
   // incoming request, status change, etc.) so tab badges update instantly
   // while the doctor is sitting on this screen — no refresh or reopen needed.
   useEffect(() => {
     if (!profileId) return
-    const channel = supabase
-      .channel(`doctor-consultations-${profileId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
+    return subscribeRealtime(
+      `doctor-consultations:${profileId}`,
+      [
         { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
-        async () => {
-          const token = await getToken()
-          if (!token) return
-          const { data } = await getAuthClient(token)
-            .from('consultations')
-            .select(CONSULTATIONS_SELECT)
-            .order('created_at', { ascending: false })
-          if (data) setConsultations(data.map(mapConsultationRow))
-        }
-      )
-      .on(
         // A patient editing their name/photo doesn't touch `consultations`
-        // at all, so the subscription above never fires for it — without
-        // this, a doctor sitting on this tab keeps seeing the patient's old
-        // identity until they navigate away and back.
-        'postgres_changes',
+        // at all, so the filter above never fires for it — without this, a
+        // doctor sitting on this tab keeps seeing the patient's old identity
+        // until they navigate away and back.
         { event: 'UPDATE', schema: 'public', table: 'users' },
-        async (payload) => {
+      ],
+      (event, payload) => {
+        const table = (payload as any).table as string | undefined
+        if (table === 'users') {
           const updated = payload.new as any
           if (!consultationsRef.current.some((c) => c.patientId === updated.id)) return
-          const token = await getToken()
-          if (!token) return
-          const { data } = await getAuthClient(token)
-            .from('consultations')
-            .select(CONSULTATIONS_SELECT)
-            .order('created_at', { ascending: false })
-          if (data) setConsultations(data.map(mapConsultationRow))
+          setConsultations((prev) => prev.map((c) => (
+            c.patientId === updated.id
+              ? { ...c, patientName: updated.full_name ?? c.patientName, patientPhotoUrl: updated.profile_photo_url ?? c.patientPhotoUrl }
+              : c
+          )))
+          return
         }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+        patchConsultationRow(event, payload)
+      },
+    )
+  // patchConsultationRow deliberately excluded — it closes over Clerk's
+  // getToken, a new function reference on unrelated re-renders (see the
+  // useFocusEffect above), which would otherwise tear down and recreate this
+  // subscription continuously instead of once per profileId.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId])
 
@@ -342,6 +376,7 @@ export default function ConsultationsScreen() {
           .from('consultations')
           .select(CONSULTATIONS_SELECT)
           .order('created_at', { ascending: false })
+          .limit(CONSULTATIONS_LIST_LIMIT)
         if (data) setConsultations(data.map(mapConsultationRow))
       })
     })
@@ -453,29 +488,32 @@ export default function ConsultationsScreen() {
         })}
       </ScrollView>
 
-      <ScrollView
+      <FlatList
         style={styles.list}
         contentContainerStyle={[styles.listContent, filtered.length === 0 && styles.listContentEmpty]}
         showsVerticalScrollIndicator={false}
-      >
-        {isLoading && filtered.length === 0 ? (
-          <View style={styles.emptyWrap}>
-            <ActivityIndicator size="small" color={colors.steelGrey} />
-          </View>
-        ) : filtered.length === 0 ? (
-          <View style={styles.emptyWrap}>
-            <Ionicons name="medical-outline" size={48} color={colors.steelGrey} />
-            <Text style={styles.emptyTitle}>{t('noConsultationsYet')}</Text>
-            <Text style={styles.emptyText}>
-              {activeTab === 'incoming' ? `${t('goOnline')} →` : t('noConsultationsYet')}
-            </Text>
-          </View>
-        ) : (
-          filtered.map((item) => {
-            const pill = STATUS_PILL[item.rawStatus] ?? { bg: '#F3F4F6', text: '#6B7280' }
-            return (
+        data={filtered}
+        keyExtractor={(item) => item.id}
+        ListEmptyComponent={
+          isLoading ? (
+            <View style={styles.emptyWrap}>
+              <ActivityIndicator size="small" color={colors.steelGrey} />
+            </View>
+          ) : (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="medical-outline" size={48} color={colors.steelGrey} />
+              <Text style={styles.emptyTitle}>{t('noConsultationsYet')}</Text>
+              <Text style={styles.emptyText}>
+                {activeTab === 'incoming' ? `${t('goOnline')} →` : t('noConsultationsYet')}
+              </Text>
+            </View>
+          )
+        }
+        ListFooterComponent={<View style={{ height: 24 }} />}
+        renderItem={({ item }) => {
+          const pill = STATUS_PILL[item.rawStatus] ?? { bg: '#F3F4F6', text: '#6B7280' }
+          return (
             <Pressable
-              key={item.id}
               onPress={guardNav(() => handleOpenConsultation(item))}
               style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }, item.status === 'cancelled' && styles.cardCancelled]}
             >
@@ -539,11 +577,9 @@ export default function ConsultationsScreen() {
                 )}
               </View>
             </Pressable>
-            )
-          })
-        )}
-        <View style={{ height: 24 }} />
-      </ScrollView>
+          )
+        }}
+      />
     </SafeAreaView>
   )
 }

@@ -179,6 +179,34 @@ export default function AppointmentsPage() {
     setRescheduleTarget(a)
   }
 
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
+
+  // Cancelling a paid, future ('scheduled') appointment converts its
+  // payment to consultation credit server-side (migration 104's fix to
+  // set_consultation_credit_on_decline) rather than forfeiting it — this was
+  // previously only reachable via admin support, which silently dropped the
+  // credit entirely.
+  async function handleCancel(a: Appointment) {
+    if (cancellingId) return
+    if (!window.confirm(`Cancel your appointment with Dr. ${stripDrPrefix(a.doctor?.user?.full_name || '')}? Your payment will be converted to consultation credit you can use for a future booking.`)) return
+    setCancellingId(a.id)
+    try {
+      const token = await getToken()
+      if (!token || !myUserIdRef.current) throw new Error('Not authenticated')
+      const { error } = await getAuthClient(token)
+        .from('consultations')
+        .update({ status: 'cancelled', cancelled_by: myUserIdRef.current })
+        .eq('id', a.id)
+        .eq('status', 'scheduled')
+      if (error) throw error
+      alert('Your appointment has been cancelled and a consultation credit has been issued to your account.')
+    } catch {
+      alert('Could not cancel your appointment. Please check your connection and try again.')
+    } finally {
+      setCancellingId(null)
+    }
+  }
+
   function joinHref(a: Appointment) {
     return `/patient/consultation/${a.type}/${a.id}`
   }
@@ -332,12 +360,21 @@ export default function AppointmentsPage() {
                     </div>
                   )}
                   {a.status === 'scheduled' && (
-                    <button
-                      onClick={() => handleReschedule(a)}
-                      className="h-8 px-4 text-xs rounded-xl border border-warning text-warning font-semibold hover:bg-warning/5 transition-colors"
-                    >
-                      Reschedule
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleReschedule(a)}
+                        className="h-8 px-4 text-xs rounded-xl border border-warning text-warning font-semibold hover:bg-warning/5 transition-colors"
+                      >
+                        Reschedule
+                      </button>
+                      <button
+                        onClick={() => handleCancel(a)}
+                        disabled={cancellingId === a.id}
+                        className="h-8 px-4 text-xs rounded-xl border border-error text-error font-semibold hover:bg-error/5 transition-colors disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   )}
                   {a.status === 'completed' && (
                     <div className="flex gap-2">

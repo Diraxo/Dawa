@@ -237,11 +237,47 @@ async function _getFCMAccessToken(): Promise<{ token: string; projectId: string 
   return { token: cachedFcmAccessToken.token, projectId: account.project_id }
 }
 
-async function sendFCMDataMessage(
-  fcmToken:  string,
-  data:      Record<string, string>,
-  supabase?: ReturnType<typeof createClient>,
-  recipient?: { userId: string; column: 'fcm_token' },
+// ── Multi-device fan-out (Phase-5 audit H4) ────────────────────────────────
+// Mirrors handle-consultation-notification's getActiveDevices/fan-out
+// pattern exactly — user_devices (migration 109) is the primary source of
+// truth; a recipient with no rows there yet falls back to the single legacy
+// token, unchanged from today's behavior.
+async function getActiveDevices(
+  supabase: ReturnType<typeof createClient> | undefined,
+  userId:   string | null | undefined,
+): Promise<Array<{ id: string; expo_push_token: string | null; fcm_token: string | null; voip_token: string | null }>> {
+  if (!supabase || !userId) return []
+  const { data } = await supabase
+    .from('user_devices')
+    .select('id, expo_push_token, fcm_token, voip_token')
+    .eq('user_id', userId)
+    .eq('active', true)
+  return (data as any[]) ?? []
+}
+
+// Expands one recipient into a per-device list of {token, recipient} for the
+// Expo batch-push path — recipient is either a device row (cleared via
+// user_devices on a DeviceNotRegistered ticket) or the legacy users.<column>
+// fallback when the recipient has no device rows yet.
+async function expoTargetsForUser(
+  supabase:    ReturnType<typeof createClient>,
+  userId:      string | null | undefined,
+  legacyToken: string | null | undefined,
+): Promise<Array<{ token: string; recipient: { userId: string } | { deviceId: string } }>> {
+  const devices = await getActiveDevices(supabase, userId)
+  if (devices.length === 0) {
+    if (!legacyToken || !userId) return []
+    return [{ token: legacyToken, recipient: { userId } }]
+  }
+  return devices
+    .filter(d => d.expo_push_token)
+    .map(d => ({ token: d.expo_push_token as string, recipient: { deviceId: d.id } }))
+}
+
+async function _sendFCMDataMessageOnce(
+  fcmToken: string,
+  data:     Record<string, string>,
+  onDead:   () => Promise<void>,
 ): Promise<boolean> {
   const tag = `[FCM:${data.consultationId ?? data.uuid ?? '?'}]`
   const auth = await _getFCMAccessToken()
@@ -273,18 +309,42 @@ async function sendFCMDataMessage(
   if (!res.ok) {
     const txt = await res.text()
     console.error(`${tag} Data message failed:`, res.status, txt)
-    if (supabase && recipient) {
-      const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
-      if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
-        console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing ${recipient.column} on user ${recipient.userId}`)
-        await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
-      }
+    const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
+    if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
+      console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing`)
+      await onDead()
     }
     return false
   }
   const json = await res.json().catch(() => null)
   console.log(`${tag} Firebase accepted the message:`, json?.name ?? '(no message id in response)')
   return true
+}
+
+// Fan-out wrapper — sends to every active device with an fcm_token; falls
+// back to the single legacy token when there are none. Returns true if ANY
+// device accepted the message.
+async function sendFCMDataMessage(
+  fcmToken:  string,
+  data:      Record<string, string>,
+  supabase?: ReturnType<typeof createClient>,
+  recipient?: { userId: string; column: 'fcm_token' },
+): Promise<boolean> {
+  const devices = await getActiveDevices(supabase, recipient?.userId)
+  if (devices.length === 0) {
+    if (!fcmToken) return false
+    return _sendFCMDataMessageOnce(fcmToken, data, async () => {
+      if (supabase && recipient) await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    })
+  }
+  const targets = devices.filter(d => d.fcm_token)
+  if (targets.length === 0) return false
+  const results = await Promise.all(targets.map(d =>
+    _sendFCMDataMessageOnce(d.fcm_token as string, data, async () => {
+      await supabase!.from('user_devices').update({ fcm_token: null }).eq('id', d.id)
+    })
+  ))
+  return results.some(Boolean)
 }
 
 // ── iOS APNs VoIP push (triggers CallKit even when app is killed) ─────────────
@@ -294,11 +354,10 @@ async function sendFCMDataMessage(
 //   APNS_KEY_ID / APNS_TEAM_ID / APNS_PRIVATE_KEY
 const BUNDLE_ID = 'com.dawa.app'
 
-async function sendAPNsVoIPPush(
+async function _sendAPNsVoIPPushOnce(
   voipToken: string,
   payload:   Record<string, unknown>,
-  supabase?: ReturnType<typeof createClient>,
-  recipient?: { userId: string; column: 'voip_token' },
+  onDead:    () => Promise<void>,
 ): Promise<boolean> {
   const keyId      = Deno.env.get('APNS_KEY_ID')
   const teamId     = Deno.env.get('APNS_TEAM_ID')
@@ -331,11 +390,9 @@ async function sendAPNsVoIPPush(
     if (!res.ok) {
       const txt = await res.text()
       console.error('[APNs] VoIP push failed:', res.status, txt)
-      if (supabase && recipient) {
-        const reason = (() => { try { return JSON.parse(txt)?.reason } catch { return null } })()
-        if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
-          await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
-        }
+      const reason = (() => { try { return JSON.parse(txt)?.reason } catch { return null } })()
+      if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
+        await onDead()
       }
       return false
     }
@@ -345,6 +402,30 @@ async function sendAPNsVoIPPush(
     console.error('[APNs] VoIP push error:', e)
     return false
   }
+}
+
+// Fan-out wrapper — same shape as sendFCMDataMessage above.
+async function sendAPNsVoIPPush(
+  voipToken: string,
+  payload:   Record<string, unknown>,
+  supabase?: ReturnType<typeof createClient>,
+  recipient?: { userId: string; column: 'voip_token' },
+): Promise<boolean> {
+  const devices = await getActiveDevices(supabase, recipient?.userId)
+  if (devices.length === 0) {
+    if (!voipToken) return false
+    return _sendAPNsVoIPPushOnce(voipToken, payload, async () => {
+      if (supabase && recipient) await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    })
+  }
+  const targets = devices.filter(d => d.voip_token)
+  if (targets.length === 0) return false
+  const results = await Promise.all(targets.map(d =>
+    _sendAPNsVoIPPushOnce(d.voip_token as string, payload, async () => {
+      await supabase!.from('user_devices').update({ voip_token: null }).eq('id', d.id)
+    })
+  ))
+  return results.some(Boolean)
 }
 
 async function _generateAPNsJWT(
@@ -448,7 +529,7 @@ async function sendExpoPush(messages: object[]): Promise<unknown> {
 async function logExpoPushErrors(
   supabase:   ReturnType<typeof createClient>,
   expoResult: unknown,
-  recipients: Array<{ userId: string }>,
+  recipients: Array<{ userId: string } | { deviceId: string }>,
 ): Promise<void> {
   const tickets = (expoResult as any)?.data
   if (!Array.isArray(tickets)) return
@@ -458,7 +539,11 @@ async function logExpoPushErrors(
     console.error('[ExpoPush] Delivery error:', ticket.message, ticket.details)
     const recipient = recipients[i]
     if (ticket.details?.error === 'DeviceNotRegistered' && recipient) {
-      await supabase.from('users').update({ push_token: null }).eq('id', recipient.userId)
+      if ('deviceId' in recipient) {
+        await supabase.from('user_devices').update({ expo_push_token: null }).eq('id', recipient.deviceId)
+      } else {
+        await supabase.from('users').update({ push_token: null }).eq('id', recipient.userId)
+      }
     }
   }
 }
@@ -481,6 +566,33 @@ Deno.serve(async (req: Request) => {
     return new Response('Forbidden', { status: 403 })
   }
 
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+
+  // ── Replay protection (Phase-5 audit M4) — mirrors handle-consultation-
+  // notification's identical check; every caller (pg_cron trigger functions
+  // and migration 110's retry_unconfirmed_appointment_notifications sweep)
+  // sends a fresh nonce + timestamp per HTTP attempt.
+  const notificationTimestamp = req.headers.get('X-Notification-Timestamp')
+  const notificationNonce     = req.headers.get('X-Notification-Nonce')
+  if (!notificationTimestamp || !notificationNonce) {
+    return new Response('Missing replay-protection headers', { status: 400 })
+  }
+  const requestAgeMs = Date.now() - new Date(notificationTimestamp).getTime()
+  if (!Number.isFinite(requestAgeMs) || Math.abs(requestAgeMs) > 5 * 60 * 1000) {
+    return new Response('Request expired or timestamp invalid', { status: 400 })
+  }
+  {
+    const { error: nonceError } = await supabase
+      .from('notification_request_nonces')
+      .insert({ nonce: notificationNonce })
+    if (nonceError) {
+      return new Response('Duplicate or invalid request nonce', { status: 409 })
+    }
+  }
+
   let payload: Payload
   try {
     payload = await req.json()
@@ -489,11 +601,6 @@ Deno.serve(async (req: Request) => {
   }
 
   const { appointment_id, reminder_id, kind = 'start' } = payload
-
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  )
 
   // ── Follow-up reminder (doctor-scheduled, from consultation-summary) ──────
   if (kind === 'followup') {
@@ -546,14 +653,17 @@ Deno.serve(async (req: Request) => {
     }
 
     const messages: object[] = []
-    const recipients: Array<{ userId: string }> = []
-    if (patient.push_token && await isPushEnabled(supabase, patient.id, 'appointment_reminder')) {
-      messages.push(pushMessage(
-        patient.push_token, title, pushBody, { ...data, notificationId: notificationId ?? '' }, doctorPhoto,
-        await getUnreadBadgeCount(supabase, patient.id),
-        `followup-${reminder_id}`,
-      ))
-      recipients.push({ userId: patient.id })
+    const recipients: Array<{ userId: string } | { deviceId: string }> = []
+    if (await isPushEnabled(supabase, patient.id, 'appointment_reminder')) {
+      const badge = await getUnreadBadgeCount(supabase, patient.id)
+      for (const t of await expoTargetsForUser(supabase, patient.id, patient.push_token)) {
+        messages.push(pushMessage(
+          t.token, title, pushBody, { ...data, notificationId: notificationId ?? '' }, doctorPhoto,
+          badge,
+          `followup-${reminder_id}`,
+        ))
+        recipients.push(t.recipient)
+      }
     }
     const expoResult = await sendExpoPush(messages)
     await logExpoPushErrors(supabase, expoResult, recipients)
@@ -710,16 +820,19 @@ Deno.serve(async (req: Request) => {
 
   // 2. Send push notifications via Expo Push API (mobile) and Web Push (browser)
   const messages: object[] = []
-  const recipients: Array<{ userId: string }> = []
-  if (patient.push_token && await isPushEnabled(supabase, patient.id, 'appointment_reminder')) {
-    messages.push(pushMessage(
-      patient.push_token, patientTitle, patientBody,
-      { ...patientDeepLinkData, notificationId: patientNotificationId ?? '' },
-      doctorPhoto,
-      await getUnreadBadgeCount(supabase, patient.id),
-      `appt-${appointment_id}-${kind}-patient`,
-    ))
-    recipients.push({ userId: patient.id })
+  const recipients: Array<{ userId: string } | { deviceId: string }> = []
+  if (await isPushEnabled(supabase, patient.id, 'appointment_reminder')) {
+    const patientBadge = await getUnreadBadgeCount(supabase, patient.id)
+    for (const t of await expoTargetsForUser(supabase, patient.id, patient.push_token)) {
+      messages.push(pushMessage(
+        t.token, patientTitle, patientBody,
+        { ...patientDeepLinkData, notificationId: patientNotificationId ?? '' },
+        doctorPhoto,
+        patientBadge,
+        `appt-${appointment_id}-${kind}-patient`,
+      ))
+      recipients.push(t.recipient)
+    }
   }
   // A scheduled phone/video consultation reaching its start time is the same
   // "doctor must respond now" moment as an on-demand new_request in
@@ -755,23 +868,28 @@ Deno.serve(async (req: Request) => {
     doctorClerkId:    doctorUser.clerk_id ?? '',
     agoraChannel:     appointment_id,
   }
+  // Both channels attempted unconditionally (not "VoIP only if FCM didn't
+  // take") — see the identical fix/comment in handle-consultation-
+  // notification's new_request case for why this matters under multi-device.
   let doctorFcmDelivered = false
-  if (isCallStart && doctorUser.fcm_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
-    doctorFcmDelivered = await sendFCMDataMessage(doctorUser.fcm_token, callStartData, supabase, { userId: doctorUser.id, column: 'fcm_token' })
-  }
-  if (!doctorFcmDelivered && isCallStart && doctorUser.voip_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
-    doctorFcmDelivered = await sendAPNsVoIPPush(doctorUser.voip_token, callStartData, supabase, { userId: doctorUser.id, column: 'voip_token' })
+  if (isCallStart && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
+    doctorFcmDelivered = await sendFCMDataMessage(doctorUser.fcm_token ?? '', callStartData, supabase, { userId: doctorUser.id, column: 'fcm_token' })
+    const voipDelivered = await sendAPNsVoIPPush(doctorUser.voip_token ?? '', callStartData, supabase, { userId: doctorUser.id, column: 'voip_token' })
+    doctorFcmDelivered = doctorFcmDelivered || voipDelivered
   }
 
-  if (doctorUser.push_token && await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
-    messages.push(pushMessage(
-      doctorUser.push_token, doctorTitle, doctorPushBody,
-      { screen: 'consultations', consultationId: appointment_id, notificationId: doctorNotificationId ?? '' },
-      undefined,
-      await getUnreadBadgeCount(supabase, doctorUser.id),
-      `appt-${appointment_id}-${kind}-doctor`,
-    ))
-    recipients.push({ userId: doctorUser.id })
+  if (await isPushEnabled(supabase, doctorUser.id, 'appointment_reminder')) {
+    const doctorBadge = await getUnreadBadgeCount(supabase, doctorUser.id)
+    for (const t of await expoTargetsForUser(supabase, doctorUser.id, doctorUser.push_token)) {
+      messages.push(pushMessage(
+        t.token, doctorTitle, doctorPushBody,
+        { screen: 'consultations', consultationId: appointment_id, notificationId: doctorNotificationId ?? '' },
+        undefined,
+        doctorBadge,
+        `appt-${appointment_id}-${kind}-doctor`,
+      ))
+      recipients.push(t.recipient)
+    }
   }
 
   const expoResult = await sendExpoPush(messages)
@@ -786,15 +904,29 @@ Deno.serve(async (req: Request) => {
     (await sendWebPush(supabase, patient.id, { title: patientTitle, body: patientBody, url: patientPushUrl })) +
     (await sendWebPush(supabase, doctorUser.id, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl }))
 
-  // 3. Mark as sent so the cron job skips it next minute
+  // 3. Mark as sent so the cron job skips it next minute. Also write the
+  // matching *_confirmed_at column (migration 110, Phase-5 audit H1) — the
+  // *_sent columns are claimed atomically by the cron trigger functions
+  // BEFORE this function is even called, so only this confirmed_at write,
+  // reached exclusively via a clean run of this handler, tells
+  // retry_unconfirmed_appointment_notifications() a claim actually
+  // completed rather than being lost to an edge-function error or a
+  // net.http_post that never arrived.
   const sentColumn = kind === 'reminder' ? 'reminder_sent'
     : kind === 'reminder_30' ? 'reminder_30_sent'
     : kind === 'reminder_10' ? 'reminder_10_sent'
     : kind === 'reminder_5' ? 'reminder_5_sent'
     : 'notification_sent'
+  const confirmedColumn = kind === 'reminder_30' ? 'reminder_30_confirmed_at'
+    : kind === 'reminder_10' ? 'reminder_10_confirmed_at'
+    : kind === 'reminder_5' ? 'reminder_5_confirmed_at'
+    : kind === 'start' ? 'notification_confirmed_at'
+    : null // legacy 'reminder' tier predates the confirm-column scheme; *_sent alone still stops the cron re-selecting it
+  const updatePayload: Record<string, unknown> = { [sentColumn]: true }
+  if (confirmedColumn) updatePayload[confirmedColumn] = new Date().toISOString()
   await supabase
     .from('consultations')
-    .update({ [sentColumn]: true })
+    .update(updatePayload)
     .eq('id', appointment_id)
 
   return new Response(

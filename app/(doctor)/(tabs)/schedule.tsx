@@ -28,6 +28,7 @@ import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { ethiopiaTodayRange } from '@/lib/slotGeneration'
 import { getAuthClient, supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
@@ -369,52 +370,49 @@ export default function ScheduleScreen() {
   // saved until the next full app focus/reload.
   useEffect(() => {
     if (!profileId) return
-    const channel = supabase
-      .channel(`doctor-schedule-availability-${profileId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` },
-        (payload) => {
-          const next = (payload.new as { availability?: unknown })?.availability
-          if (next) applyAvailability(next)
-        }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Stable per-doctor topic through the shared ref-counted manager (not a
+    // Date.now()-suffixed one-off channel) — Phase-4 audit M10.
+    const unsubscribe = subscribeRealtime(
+      `doctor-schedule-availability:${profileId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${profileId}` }],
+      (_event, payload) => {
+        const next = (payload.new as { availability?: unknown })?.availability
+        if (next) applyAvailability(next)
+      },
+    )
+    return unsubscribe
   }, [profileId])
 
   // Live-refresh Upcoming Appointments whenever any of this doctor's
   // consultations change (new scheduled booking, reschedule, cancellation).
   useEffect(() => {
     if (!profileId) return
-    const channel = supabase
-      .channel(`doctor-schedule-${profileId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
+    // Stable per-doctor topic through the shared ref-counted manager (not a
+    // Date.now()-suffixed one-off channel) — Phase-4 audit M10. Both filters
+    // share one callback; `payload.table` disambiguates which one fired,
+    // since subscribeRealtime dispatches every registered filter for a topic
+    // through the same callback.
+    const unsubscribe = subscribeRealtime(
+      `doctor-schedule:${profileId}`,
+      [
         { event: '*', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profileId}` },
-        async () => {
-          const token = await getToken()
-          if (!token) return
-          await loadAppointments(getAuthClient(token), profileId)
-        }
-      )
-      .on(
         // A patient editing their name/photo doesn't touch `consultations` at
-        // all, so the subscription above never fires for it — without this,
+        // all, so the filter above never fires for it — without this,
         // Upcoming Appointments keeps showing the patient's old identity
         // until the doctor navigates away and back.
-        'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'users' },
-        async (payload) => {
+      ],
+      async (_event, payload) => {
+        if ((payload as any).table === 'users') {
           const updated = payload.new as any
           if (!appointmentsRef.current.some((a) => a.patientId === updated.id)) return
-          const token = await getToken()
-          if (!token) return
-          await loadAppointments(getAuthClient(token), profileId)
         }
-      )
-      .subscribe()
-    return () => { supabase.removeChannel(channel) }
+        const token = await getToken()
+        if (!token) return
+        await loadAppointments(getAuthClient(token), profileId)
+      },
+    )
+    return unsubscribe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId])
 

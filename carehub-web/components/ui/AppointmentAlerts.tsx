@@ -5,7 +5,7 @@ import { useUser } from '@clerk/nextjs'
 import { useRouter, usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { useWebPushSubscription } from '@/hooks/useWebPushSubscription'
-import { Bell, CheckCircle2, XCircle, ClipboardList, FileEdit, Star, Clock, Building2, LogIn, LogOut } from 'lucide-react'
+import { Bell, CheckCircle2, XCircle, ClipboardList, FileEdit, Star, Clock, Building2, LogIn, LogOut, Wallet, Ban, ShieldCheck, FileText } from 'lucide-react'
 
 interface NotificationRow {
   id: string
@@ -29,6 +29,14 @@ const TYPE_ICONS: Record<string, typeof Bell> = {
   completed: CheckCircle2,
   patient_joined: LogIn,
   patient_left: LogOut,
+  withdrawal_approved: Wallet,
+  withdrawal_rejected: XCircle,
+  withdrawal_paid: Wallet,
+  doctor_rejected: XCircle,
+  doctor_suspended: Ban,
+  doctor_reinstated: ShieldCheck,
+  document_update_reviewed: FileText,
+  document_update_requested: FileText,
 }
 
 function resolveUrl(n: NotificationRow, role: string): string {
@@ -42,8 +50,17 @@ function resolveUrl(n: NotificationRow, role: string): string {
       case 'incoming_request': return '/doctor/consultations'
       case 'consultations':   return '/doctor/consultations'
       case 'profile':         return '/doctor/profile'
+      case 'withdrawal':      return '/doctor/withdraw'
+      case 'documents':       return '/doctor/profile'
       default:
         return consultationId ? '/doctor/schedule' : '/doctor/home'
+    }
+  }
+
+  if (role === 'admin') {
+    switch (screen) {
+      case 'doctors': return '/admin/doctors'
+      default: return '/admin'
     }
   }
 

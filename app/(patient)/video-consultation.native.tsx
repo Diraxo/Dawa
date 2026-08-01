@@ -1147,9 +1147,9 @@ export default function VideoConsultationScreen() {
               <Text style={styles.videoPlaceholderText}>{formatDoctorName(doctorName)}</Text>
               {doctorStatus === 'approved' && <VerifiedBadge size={16} />}
             </View>
-            {tokenFetchFailed ? (
+            {(tokenFetchFailed || callStatus === 'error') ? (
               <Pressable
-                onPress={() => setTokenRetryKey(k => k + 1)}
+                onPress={() => { setLocalError(false); setTokenFetchFailed(false); setTokenRetryKey(k => k + 1) }}
                 style={{ marginTop: 4, backgroundColor: 'rgba(239,68,68,0.15)', borderRadius: 12, paddingHorizontal: 20, paddingVertical: 10, borderWidth: 1, borderColor: 'rgba(239,68,68,0.4)' }}
               >
                 <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#FCA5A5' }}>Connection failed — tap to retry</Text>

@@ -7,6 +7,94 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
+// Minimal, self-contained Expo push send — mirrors the other edge functions'
+// sendPushNotification but without the FCM/VoIP/dedupe machinery those need
+// for ringing calls, which payment notifications never are. Never throws —
+// a failed push must not affect the payment-verification response.
+async function sendExpoPush(
+  token: string,
+  title: string,
+  body: string,
+  data: Record<string, unknown>,
+  badge: number,
+): Promise<void> {
+  try {
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ to: token, channelId: 'consultations', title, body, data, sound: 'default', priority: 'normal', badge }),
+    })
+  } catch (e) {
+    console.warn('[chapa-webhook] push send failed:', e)
+  }
+}
+
+async function getUnreadBadgeCount(
+  supabase: ReturnType<typeof createClient>,
+  userId: string | null | undefined,
+): Promise<number> {
+  if (!userId) return 1
+  const { count } = await supabase
+    .from('notifications')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .is('read_at', null)
+  return count ?? 1
+}
+
+async function isPushEnabled(
+  supabase: ReturnType<typeof createClient>,
+  userId: string | null | undefined,
+): Promise<boolean> {
+  if (!userId) return false
+  const { data } = await supabase
+    .from('notification_preferences')
+    .select('consultation_request')
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (!data) return true
+  return (data as any).consultation_request !== false
+}
+
+// Payment Successful / Payment Failed fallback notifications (spec issues
+// 5/6) — the payment-return screen already shows this synchronously, but a
+// patient who leaves the external Chapa browser/app before returning never
+// sees it. Both callers guard "only once" by only calling this when their
+// own idempotent status-flip UPDATE actually matched a row (see call sites).
+async function notifyPaymentOutcome(
+  supabase: ReturnType<typeof createClient>,
+  outcome: 'success' | 'failed',
+  row: { id: string; patient_id: string | null; doctor_id: string | null },
+): Promise<void> {
+  const patientId = row.patient_id
+  if (!patientId) return
+
+  const title = outcome === 'success' ? 'Payment Successful' : 'Payment Failed'
+  const body  = outcome === 'success'
+    ? 'Your consultation request has been received successfully.'
+    : 'Your payment could not be completed. Please try again.'
+  const dataJson = outcome === 'success'
+    ? { screen: 'waiting', consultationId: row.id }
+    : { screen: 'booking', consultationId: row.id, doctorId: row.doctor_id ?? '' }
+
+  const { data: inserted } = await supabase
+    .from('notifications')
+    .insert({ user_id: patientId, title, body, type: `payment_${outcome}`, data_json: dataJson })
+    .select('id')
+    .single()
+
+  const { data: patientRow } = await supabase
+    .from('users')
+    .select('push_token')
+    .eq('id', patientId)
+    .maybeSingle()
+
+  const token = (patientRow as any)?.push_token
+  if (token && await isPushEnabled(supabase, patientId)) {
+    await sendExpoPush(token, title, body, { ...dataJson, notificationId: inserted?.id ?? '' }, await getUnreadBadgeCount(supabase, patientId))
+  }
+}
+
 interface ChapaVerifyResponse {
   status: string
   data?: {
@@ -146,18 +234,27 @@ Deno.serve(async (req: Request) => {
       )
       const { data: failedRow } = await supabase
         .from('consultations')
-        .select('id')
+        .select('id, patient_id, doctor_id')
         .eq('chapa_tx_ref', trx_ref)
         .eq('status', 'pending_payment')
         .maybeSingle()
 
       if (failedRow?.id) {
         await supabase.from('slot_locks').delete().eq('consultation_id', failedRow.id)
-        await supabase
+        // .select() here tells us whether THIS call performed the cancel —
+        // guards the fallback notification below to fire exactly once even
+        // if this webhook is invoked more than once for the same failed tx
+        // (Chapa retry, or both the GET redirect and a POST callback landing).
+        const { data: cancelledRows } = await supabase
           .from('consultations')
           .update({ status: 'cancelled', payment_status: 'failed' })
           .eq('id', failedRow.id)
           .eq('status', 'pending_payment')
+          .select('id')
+
+        if (cancelledRows && cancelledRows.length > 0) {
+          await notifyPaymentOutcome(supabase, 'failed', failedRow as any)
+        }
       }
     } catch (err) {
       console.error('[chapa-webhook] immediate slot release on payment failure failed:', err)
@@ -179,11 +276,15 @@ Deno.serve(async (req: Request) => {
   // Idempotent update: skip if payment_status is already 'paid' so the DB
   // trigger (migration 009) only fires once even when both the server webhook
   // and the browser redirect hit this function for the same transaction.
-  const { error } = await supabase
+  // .select() also tells us whether THIS call was the one that performed the
+  // flip — used below to fire the Payment Successful fallback notification
+  // (spec issue 5) exactly once, never on a second/idempotent-no-op call.
+  const { data: paidRows, error } = await supabase
     .from('consultations')
     .update({ payment_status: 'paid' })
     .eq('chapa_tx_ref', trx_ref)
     .neq('payment_status', 'paid')
+    .select('id, patient_id, doctor_id')
 
   if (error) {
     console.error('[chapa-webhook] DB update error:', error)
@@ -191,6 +292,14 @@ Deno.serve(async (req: Request) => {
       return new Response(FAILED_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } })
     }
     return new Response('DB update failed', { status: 500 })
+  }
+
+  if (paidRows && paidRows.length > 0) {
+    try {
+      await notifyPaymentOutcome(supabase, 'success', paidRows[0] as any)
+    } catch (e) {
+      console.warn('[chapa-webhook] Payment Successful fallback notification failed:', e)
+    }
   }
 
   // Resilience fallback: normally the client (payment-return screens) flips
@@ -232,7 +341,7 @@ Deno.serve(async (req: Request) => {
   try {
     const { data: recoverableRow } = await supabase
       .from('consultations')
-      .select('id, created_at, scheduled_at, is_on_demand')
+      .select('id, created_at, scheduled_at, is_on_demand, patient_amount')
       .eq('chapa_tx_ref', trx_ref)
       .in('status', ['pending_payment', 'cancelled'])
       .is('waiting_started_at', null)
@@ -249,7 +358,7 @@ Deno.serve(async (req: Request) => {
             new Date(recoverableRow.scheduled_at).getTime() - new Date(recoverableRow.created_at).getTime()
           ) < 60_000
 
-      await supabase
+      const { error: resurrectError } = await supabase
         .from('consultations')
         .update({
           status: isOnDemand ? 'waiting_for_doctor' : 'scheduled',
@@ -259,6 +368,34 @@ Deno.serve(async (req: Request) => {
         .in('status', ['pending_payment', 'cancelled'])
         .is('waiting_started_at', null)
         .is('cancelled_by', null)
+
+      // uq_consultations_doctor_slot (migration 044) rejects this specific
+      // update if another patient already took the same doctor/slot while
+      // this row sat cancelled waiting on a late webhook — the patient here
+      // was genuinely charged (payment_status was just flipped to 'paid'
+      // above) but the appointment itself is gone. Previously this was a
+      // bare console.error, silently leaving the row stuck 'cancelled' with
+      // payment_status='paid' and no compensation. Credit is this app's only
+      // compensation mechanism (see set_consultation_credit_on_decline) —
+      // issue it directly here since this row's own status isn't changing
+      // (it stays 'cancelled', so the normal decline/cancel trigger never
+      // fires for it).
+      if (resurrectError?.code === '23505') {
+        console.error(
+          `[chapa-webhook] slot ${recoverableRow.id} was retaken before its late payment confirmation landed — issuing credit instead of resurrecting`,
+          resurrectError,
+        )
+        await supabase
+          .from('consultations')
+          .update({
+            consultation_credit: true,
+            credit_amount: recoverableRow.patient_amount ?? 0,
+          })
+          .eq('id', recoverableRow.id)
+          .eq('consultation_credit', false)
+      } else if (resurrectError) {
+        console.error('[chapa-webhook] status-flip fallback failed:', resurrectError)
+      }
     }
   } catch (err) {
     console.error('[chapa-webhook] status-flip fallback failed:', err)

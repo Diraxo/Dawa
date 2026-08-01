@@ -25,6 +25,11 @@
 //   patient_left      → notify DOCTOR  (patient tapped "Leave Call" mid-consultation)
 //   doctor_running_late → notify PATIENT (scheduled time arrived, doctor still occupied — fires once)
 //   doctor_ready         → notify PATIENT (a previously-delayed consultation just activated)
+//   doctor_connected     → notify PATIENT (doctor's media/session connected — doctor_connected_at set)
+//   doctor_left          → notify PATIENT (doctor backgrounded the app mid-call — doctor_left_at set)
+//   ended_abnormally     → notify PATIENT (heartbeat-timeout force-end — fires once)
+//   doctor_delayed       → notify PATIENT (scheduled slot arrived, doctor never came online — fires once)
+//   rating_reminder      → notify PATIENT (24h after completion, no review submitted — fires once)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import webpush from 'npm:web-push'
@@ -119,12 +124,18 @@ type ConsultationEvent =
   | 'patient_left'
   | 'doctor_running_late'
   | 'doctor_ready'
+  | 'doctor_connected'
+  | 'doctor_left'
+  | 'ended_abnormally'
+  | 'doctor_delayed'
+  | 'rating_reminder'
 
 interface Payload {
   event:           ConsultationEvent
   consultation_id: string
   rating?:         number
   repeat?:         boolean
+  dispatch_log_id?: string
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -240,34 +251,38 @@ async function insertNotification(
 // logs. `recipient` (userId) lets a DeviceNotRegistered ticket clear the
 // stale token so it stops being retried on every future event.
 
-async function sendPushNotification(
+// ── Multi-device fan-out (Phase-5 audit H4) ────────────────────────────────
+// user_devices (migration 109) is the primary source of truth for push
+// delivery — every active device registered for a recipient gets its own
+// send. A recipient with zero rows there (hasn't relaunched the app since
+// this shipped, or is a legacy-only account) falls back to exactly the
+// single-token behavior every sender already had before this change, using
+// whichever legacy users.<column> value the caller passed in — so nothing
+// regresses during rollout.
+async function getActiveDevices(
+  supabase: ReturnType<typeof createClient> | undefined,
+  userId:   string | null | undefined,
+): Promise<Array<{ id: string; expo_push_token: string | null; fcm_token: string | null; voip_token: string | null }>> {
+  if (!supabase || !userId) return []
+  const { data } = await supabase
+    .from('user_devices')
+    .select('id, expo_push_token, fcm_token, voip_token')
+    .eq('user_id', userId)
+    .eq('active', true)
+  return (data as any[]) ?? []
+}
+
+async function _sendExpoPushOnce(
   token:      string,
   title:      string,
   body:       string,
   data:       Record<string, unknown>,
-  channel:    string = 'consultations',
-  priority:   string = 'normal',
-  imageUrl?:  string,
-  supabase?:  ReturnType<typeof createClient>,
-  recipient?: { userId: string; column: 'push_token' },
-  badge:      number = 1,
-  // `dedupeKey`, when given, is sent as both Expo's `tag` (Android — replaces
-  // an already-displayed notification with the same tag; maps to FCM
-  // notification.tag) and `collapseId` (Android: collapses same-key messages
-  // still in transit via FCM collapse_key; iOS: ALSO replaces an
-  // already-displayed notification via apns-collapse-id). Callers pass the
-  // same key used by the client-side notification this push might duplicate
-  // (e.g. Notifee's deterministic id for the same consultation event) so a
-  // repeat send (migration 067's 3-min re-notify cron, FCM/Expo redelivery)
-  // replaces the prior tray entry in place instead of stacking a second one.
-  // This does not eliminate a duplicate between two independently-posted
-  // notifications from different delivery transports (Notifee's own
-  // background display vs this Expo-relayed one) — Android's tag/id identity
-  // requires both the tag AND an internal numeric id to match, and Notifee's
-  // id-hashing scheme for that numeric id is undocumented and unverified
-  // without a physical device — see the dedup investigation notes in
-  // index.js's 'incoming_request' branch for the full explanation.
-  dedupeKey?: string,
+  channel:    string,
+  priority:   string,
+  imageUrl:   string | undefined,
+  badge:      number,
+  dedupeKey:  string | undefined,
+  onDeviceNotRegistered: () => Promise<void>,
 ) {
   const tag = `[ExpoPush:${(data as Record<string, unknown>)?.consultationId ?? '?'}]`
   console.log(`${tag} Sending, channel=${channel}, priority=${priority}, token=...${token.slice(-8)}`)
@@ -304,9 +319,9 @@ async function sendPushNotification(
   const ticket = json?.data
   if (ticket?.status === 'error') {
     console.error(`${tag} Delivery error:`, ticket.message, ticket.details)
-    if (ticket.details?.error === 'DeviceNotRegistered' && supabase && recipient) {
-      console.warn(`${tag} Token is DeviceNotRegistered — clearing ${recipient.column} on user ${recipient.userId}`)
-      await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    if (ticket.details?.error === 'DeviceNotRegistered') {
+      console.warn(`${tag} Token is DeviceNotRegistered — clearing`)
+      await onDeviceNotRegistered()
     }
   } else {
     // Expo's ticket id lets you look up the actual receipt (delivered/error)
@@ -315,6 +330,50 @@ async function sendPushNotification(
     // delivered it.
     console.log(`${tag} Expo accepted the push, ticket id:`, ticket?.id ?? '(none)')
   }
+}
+
+async function sendPushNotification(
+  token:      string,
+  title:      string,
+  body:       string,
+  data:       Record<string, unknown>,
+  channel:    string = 'consultations',
+  priority:   string = 'normal',
+  imageUrl?:  string,
+  supabase?:  ReturnType<typeof createClient>,
+  recipient?: { userId: string; column: 'push_token' },
+  badge:      number = 1,
+  // `dedupeKey`, when given, is sent as both Expo's `tag` (Android — replaces
+  // an already-displayed notification with the same tag; maps to FCM
+  // notification.tag) and `collapseId` (Android: collapses same-key messages
+  // still in transit via FCM collapse_key; iOS: ALSO replaces an
+  // already-displayed notification via apns-collapse-id). Callers pass the
+  // same key used by the client-side notification this push might duplicate
+  // (e.g. Notifee's deterministic id for the same consultation event) so a
+  // repeat send (migration 067's 3-min re-notify cron, FCM/Expo redelivery)
+  // replaces the prior tray entry in place instead of stacking a second one.
+  // This does not eliminate a duplicate between two independently-posted
+  // notifications from different delivery transports (Notifee's own
+  // background display vs this Expo-relayed one) — Android's tag/id identity
+  // requires both the tag AND an internal numeric id to match, and Notifee's
+  // id-hashing scheme for that numeric id is undocumented and unverified
+  // without a physical device — see the dedup investigation notes in
+  // index.js's 'incoming_request' branch for the full explanation.
+  dedupeKey?: string,
+) {
+  const devices = await getActiveDevices(supabase, recipient?.userId)
+  if (devices.length === 0) {
+    if (!token) return
+    await _sendExpoPushOnce(token, title, body, data, channel, priority, imageUrl, badge, dedupeKey, async () => {
+      if (supabase && recipient) await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    })
+    return
+  }
+  await Promise.all(devices.filter(d => d.expo_push_token).map(d =>
+    _sendExpoPushOnce(d.expo_push_token as string, title, body, data, channel, priority, imageUrl, badge, dedupeKey, async () => {
+      await supabase!.from('user_devices').update({ expo_push_token: null }).eq('id', d.id)
+    })
+  ))
 }
 
 // ── Android FCM data message (triggers ConnectionService) ─────────────────────
@@ -402,11 +461,10 @@ async function _getFCMAccessToken(): Promise<{ token: string; projectId: string 
 // device uninstalled the app or the token was never valid) get cleared so it
 // isn't retried forever on every future call, mirroring what
 // sendPushNotification already does for Expo's DeviceNotRegistered ticket.
-async function sendFCMDataMessage(
-  fcmToken:  string,
-  data:      Record<string, string>,
-  supabase?: ReturnType<typeof createClient>,
-  recipient?: { userId: string; column: 'fcm_token' },
+async function _sendFCMDataMessageOnce(
+  fcmToken: string,
+  data:     Record<string, string>,
+  onDead:   () => Promise<void>,
 ): Promise<boolean> {
   const tag = `[FCM:${data.consultationId ?? data.uuid ?? '?'}]`
 
@@ -442,12 +500,10 @@ async function sendFCMDataMessage(
   if (!res.ok) {
     const txt = await res.text()
     console.error(`${tag} Data message failed:`, res.status, txt)
-    if (supabase && recipient) {
-      const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
-      if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
-        console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing ${recipient.column} on user ${recipient.userId}`)
-        await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
-      }
+    const status = (() => { try { return JSON.parse(txt)?.error?.status } catch { return null } })()
+    if (res.status === 404 || status === 'UNREGISTERED' || status === 'NOT_FOUND') {
+      console.warn(`${tag} Token is UNREGISTERED/NOT_FOUND — clearing`)
+      await onDead()
     }
     return false
   }
@@ -459,6 +515,34 @@ async function sendFCMDataMessage(
   const json = await res.json().catch(() => null)
   console.log(`${tag} Firebase accepted the message:`, json?.name ?? '(no message id in response)')
   return true
+}
+
+// Fan-out wrapper (Phase-5 audit H4) — sends to every active device that has
+// an fcm_token; falls back to the single legacy token when the recipient has
+// no rows in user_devices yet. Returns true if ANY device accepted the
+// message (matches the previous single-device return semantics that callers
+// use to decide whether to also attempt a VoIP/Expo fallback).
+async function sendFCMDataMessage(
+  fcmToken:  string,
+  data:      Record<string, string>,
+  supabase?: ReturnType<typeof createClient>,
+  recipient?: { userId: string; column: 'fcm_token' },
+): Promise<boolean> {
+  const devices = await getActiveDevices(supabase, recipient?.userId)
+  if (devices.length === 0) {
+    if (!fcmToken) return false
+    return _sendFCMDataMessageOnce(fcmToken, data, async () => {
+      if (supabase && recipient) await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    })
+  }
+  const targets = devices.filter(d => d.fcm_token)
+  if (targets.length === 0) return false
+  const results = await Promise.all(targets.map(d =>
+    _sendFCMDataMessageOnce(d.fcm_token as string, data, async () => {
+      await supabase!.from('user_devices').update({ fcm_token: null }).eq('id', d.id)
+    })
+  ))
+  return results.some(Boolean)
 }
 
 // ── Best-effort "stop ringing" signal (Android FCM + iOS APNs VoIP) ────────────
@@ -478,25 +562,29 @@ async function sendFCMDataMessage(
 // other party cancelled had no way to learn that short of the 60s CallKit
 // timeout in lib/callkeep.ts. Mirrors the FCM-vs-VoIP fallback pattern used
 // for the 'start' call-ring in send-appointment-notification.
+// Fans out to every device (Phase-5 audit H4) rather than "try FCM, fall
+// back to VoIP only if FCM failed" — with multiple devices on mixed
+// platforms (an Android phone AND an iPhone signed into the same account),
+// both channels are independently correct: the Android device only ever has
+// an fcm_token to lose its ring on, the iPhone only ever has a voip_token,
+// so both must always be attempted rather than short-circuiting on the
+// first one that succeeds.
 async function sendCallCancelSignal(
-  recipient: { fcm_token?: string | null; voip_token?: string | null },
+  supabase: ReturnType<typeof createClient> | undefined,
+  userId: string | null | undefined,
+  legacy: { fcm_token?: string | null; voip_token?: string | null },
   consultationId: string,
 ): Promise<void> {
   const payload = { callType: 'cancel_call', uuid: consultationId, consultationId }
-  if (recipient.fcm_token) {
-    try {
-      await sendFCMDataMessage(recipient.fcm_token, payload)
-      return
-    } catch (e) {
-      console.warn('[FCM] cancel_call signal failed:', e)
-    }
+  try {
+    await sendFCMDataMessage(legacy.fcm_token ?? '', payload, supabase, userId ? { userId, column: 'fcm_token' } : undefined)
+  } catch (e) {
+    console.warn('[FCM] cancel_call signal failed:', e)
   }
-  if (recipient.voip_token) {
-    try {
-      await sendAPNsVoIPPush(recipient.voip_token, payload)
-    } catch (e) {
-      console.warn('[APNs] cancel_call signal failed:', e)
-    }
+  try {
+    await sendAPNsVoIPPush(legacy.voip_token ?? '', payload, supabase, userId ? { userId, column: 'voip_token' } : undefined)
+  } catch (e) {
+    console.warn('[APNs] cancel_call signal failed:', e)
   }
 }
 
@@ -507,11 +595,10 @@ async function sendCallCancelSignal(
 //   APNS_TEAM_ID     — 10-char team ID (from Apple Developer → Membership)
 //   APNS_PRIVATE_KEY — contents of the .p8 file (entire PEM including headers)
 
-async function sendAPNsVoIPPush(
+async function _sendAPNsVoIPPushOnce(
   voipToken: string,
   payload:   Record<string, unknown>,
-  supabase?: ReturnType<typeof createClient>,
-  recipient?: { userId: string; column: 'voip_token' },
+  onDead:    () => Promise<void>,
 ): Promise<boolean> {
   const keyId      = Deno.env.get('APNS_KEY_ID')
   const teamId     = Deno.env.get('APNS_TEAM_ID')
@@ -547,12 +634,10 @@ async function sendAPNsVoIPPush(
     if (!res.ok) {
       const txt = await res.text()
       console.error(`${tag} VoIP push failed:`, res.status, txt)
-      if (supabase && recipient) {
-        const reason = (() => { try { return JSON.parse(txt)?.reason } catch { return null } })()
-        if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
-          console.warn(`${tag} Token is BadDeviceToken/Unregistered — clearing ${recipient.column} on user ${recipient.userId}`)
-          await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
-        }
+      const reason = (() => { try { return JSON.parse(txt)?.reason } catch { return null } })()
+      if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered') {
+        console.warn(`${tag} Token is BadDeviceToken/Unregistered — clearing`)
+        await onDead()
       }
       return false
     }
@@ -562,6 +647,30 @@ async function sendAPNsVoIPPush(
     console.error(`${tag} VoIP push error:`, e)
     return false
   }
+}
+
+// Fan-out wrapper (Phase-5 audit H4) — same shape as sendFCMDataMessage.
+async function sendAPNsVoIPPush(
+  voipToken: string,
+  payload:   Record<string, unknown>,
+  supabase?: ReturnType<typeof createClient>,
+  recipient?: { userId: string; column: 'voip_token' },
+): Promise<boolean> {
+  const devices = await getActiveDevices(supabase, recipient?.userId)
+  if (devices.length === 0) {
+    if (!voipToken) return false
+    return _sendAPNsVoIPPushOnce(voipToken, payload, async () => {
+      if (supabase && recipient) await supabase.from('users').update({ [recipient.column]: null }).eq('id', recipient.userId)
+    })
+  }
+  const targets = devices.filter(d => d.voip_token)
+  if (targets.length === 0) return false
+  const results = await Promise.all(targets.map(d =>
+    _sendAPNsVoIPPushOnce(d.voip_token as string, payload, async () => {
+      await supabase!.from('user_devices').update({ voip_token: null }).eq('id', d.id)
+    })
+  ))
+  return results.some(Boolean)
 }
 
 // JWT signing for APNs (ES256 via Web Crypto API available in Deno)
@@ -684,6 +793,31 @@ Deno.serve(async (req: Request) => {
   // ever produce duplicate notifications.
   if (bearerToken !== Deno.env.get('INTERNAL_NOTIFICATION_SECRET')) {
     return new Response('Forbidden', { status: 403 })
+  }
+
+  // ── Replay protection (Phase-5 audit M4) ──────────────────────────────────
+  // The static bearer secret alone doesn't stop a captured request from being
+  // resent — every caller (the DB trigger, and migration 110's reconciliation
+  // sweep) now sends a fresh nonce + timestamp per HTTP attempt alongside it.
+  const notificationTimestamp = req.headers.get('X-Notification-Timestamp')
+  const notificationNonce     = req.headers.get('X-Notification-Nonce')
+  if (!notificationTimestamp || !notificationNonce) {
+    return new Response('Missing replay-protection headers', { status: 400 })
+  }
+  const requestAgeMs = Date.now() - new Date(notificationTimestamp).getTime()
+  if (!Number.isFinite(requestAgeMs) || Math.abs(requestAgeMs) > 5 * 60 * 1000) {
+    return new Response('Request expired or timestamp invalid', { status: 400 })
+  }
+  {
+    const { error: nonceError } = await supabase
+      .from('notification_request_nonces')
+      .insert({ nonce: notificationNonce })
+    if (nonceError) {
+      // Unique-violation on the nonce PK means this exact request was
+      // already processed once — reject the replay. Any other DB error is
+      // treated the same way (fail closed) rather than silently proceeding.
+      return new Response('Duplicate or invalid request nonce', { status: 409 })
+    }
   }
 
   const { data: consult, error } = await supabase
@@ -824,10 +958,15 @@ Deno.serve(async (req: Request) => {
         `push_token=${doctorToken ? 'present' : 'MISSING'}`,
         `isCallType=${isCallType}`,
       )
+      // Both channels are attempted unconditionally (not "VoIP only if FCM
+      // didn't take") — with multiple devices on mixed platforms, an
+      // Android device only ever has an fcm_token to ring on and an iPhone
+      // only ever has a voip_token, so both must fire independently for
+      // "every active device receives notifications" to actually hold.
       let callRingDelivered = false
-      if (doctorUser.fcm_token && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        callRingDelivered = isCallType
-          ? await sendFCMDataMessage(doctorUser.fcm_token, {
+      if (await isPushEnabled(supabase, doctorId, 'consultation_request')) {
+        const fcmDelivered = isCallType
+          ? await sendFCMDataMessage(doctorUser.fcm_token ?? '', {
               callType:         'incoming_call',
               direction:        'doctor',
               uuid:             consultation_id,
@@ -842,7 +981,7 @@ Deno.serve(async (req: Request) => {
               agoraChannel:     consultation_id,
               waitingStartedAt: (consult as any).waiting_started_at ?? '',
             }, supabase, doctorId ? { userId: doctorId, column: 'fcm_token' } : undefined)
-          : await sendFCMDataMessage(doctorUser.fcm_token, {
+          : await sendFCMDataMessage(doctorUser.fcm_token ?? '', {
               callType:         'incoming_request',
               consultationId:   consultation_id,
               consultationType: String(consult.type),
@@ -851,23 +990,26 @@ Deno.serve(async (req: Request) => {
               patientClerkId:   patient.clerk_id   ?? '',
               waitingStartedAt: (consult as any).waiting_started_at ?? '',
             }, supabase, doctorId ? { userId: doctorId, column: 'fcm_token' } : undefined)
-      }
-      if (!callRingDelivered && isCallType && doctorUser.voip_token && await isPushEnabled(supabase, doctorId, 'consultation_request')) {
-        callRingDelivered = await sendAPNsVoIPPush(doctorUser.voip_token, {
-          callType:         'incoming_call',
-          direction:        'doctor',
-          uuid:             consultation_id,
-          consultationId:   consultation_id,
-          consultationType: String(consult.type),
-          patientName:      patient.full_name  ?? 'Patient',
-          patientPhotoUrl:  patient.profile_photo_url ?? '',
-          patientId:        patient.id         ?? '',
-          patientClerkId:   patient.clerk_id   ?? '',
-          doctorId:         doctorUser.id      ?? '',
-          doctorClerkId:    doctorUser.clerk_id ?? '',
-          agoraChannel:     consultation_id,
-          waitingStartedAt: (consult as any).waiting_started_at ?? '',
-        }, supabase, doctorId ? { userId: doctorId, column: 'voip_token' } : undefined)
+        callRingDelivered = fcmDelivered
+
+        if (isCallType) {
+          const voipDelivered = await sendAPNsVoIPPush(doctorUser.voip_token ?? '', {
+            callType:         'incoming_call',
+            direction:        'doctor',
+            uuid:             consultation_id,
+            consultationId:   consultation_id,
+            consultationType: String(consult.type),
+            patientName:      patient.full_name  ?? 'Patient',
+            patientPhotoUrl:  patient.profile_photo_url ?? '',
+            patientId:        patient.id         ?? '',
+            patientClerkId:   patient.clerk_id   ?? '',
+            doctorId:         doctorUser.id      ?? '',
+            doctorClerkId:    doctorUser.clerk_id ?? '',
+            agoraChannel:     consultation_id,
+            waitingStartedAt: (consult as any).waiting_started_at ?? '',
+          }, supabase, doctorId ? { userId: doctorId, column: 'voip_token' } : undefined)
+          callRingDelivered = callRingDelivered || voipDelivered
+        }
       }
       const requestPushEnabled = await isPushEnabled(supabase, doctorId, 'consultation_request')
       if (doctorToken && requestPushEnabled) {
@@ -947,15 +1089,15 @@ Deno.serve(async (req: Request) => {
           screen:           'consultation',
         }
 
-        // Android → FCM data message (high priority, no notification body)
-        if (patientFCM) {
-          await sendFCMDataMessage(patientFCM, callData, supabase, patientId ? { userId: patientId, column: 'fcm_token' } : undefined)
-        }
+        // Android → FCM data message (high priority, no notification body).
+        // No outer `if (patientFCM)` guard — sendFCMDataMessage already
+        // no-ops safely when there's neither a legacy token nor any device
+        // row with one, and gating here would skip device-only patients who
+        // never had a legacy fcm_token populated in the first place.
+        await sendFCMDataMessage(patientFCM ?? '', callData, supabase, patientId ? { userId: patientId, column: 'fcm_token' } : undefined)
 
         // iOS → APNs VoIP push (wakes app via PushKit → CallKit shows native UI)
-        if (patientVoIP) {
-          await sendAPNsVoIPPush(patientVoIP, callData, supabase, patientId ? { userId: patientId, column: 'voip_token' } : undefined)
-        }
+        await sendAPNsVoIPPush(patientVoIP ?? '', callData, supabase, patientId ? { userId: patientId, column: 'voip_token' } : undefined)
       }
 
       // ── 3. Expo push fallback (works when app is in background without call tokens) ─
@@ -1066,8 +1208,8 @@ Deno.serve(async (req: Request) => {
       // instead of letting it ring out to its own ~60s timeout for a request
       // that no longer exists.
       if (isCallType) {
-        await sendCallCancelSignal({ fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
-        await sendCallCancelSignal({ fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
+        await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
+        await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
       }
 
       // ── Patient side — skipped entirely if the patient is the one who cancelled ──
@@ -1138,7 +1280,7 @@ Deno.serve(async (req: Request) => {
       const body  = `${patient.full_name ?? 'A patient'} missed your ${typeLabel}. The request has been marked as missed.`
       const pushBody = `A patient missed your ${typeLabel}. The request has been marked as missed.`
 
-      if (isCallType) await sendCallCancelSignal({ fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
+      if (isCallType) await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
 
       let notificationId: string | null = null
       if (doctorId) {
@@ -1572,8 +1714,164 @@ Deno.serve(async (req: Request) => {
       break
     }
 
+    // ── Patient: doctor's media/session connected ────────────────────────────
+    case 'doctor_connected': {
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const doctorPhoto  = doctorUser.profile_photo_url || undefined
+      const title = 'Doctor Joined'
+      const body  = `${formatDoctorName(doctorUser.full_name, 'Your doctor')} has joined your consultation. Tap to continue.`
+
+      let notificationId: string | null = null
+      if (patientId) {
+        notificationId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title,
+          body,
+          type:      'doctor_connected',
+          data_json: { ...sharedData, screen: 'consultation' },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_update')) {
+        await sendPushNotification(patientToken, title, body, {
+          screen: 'consultation', notificationId: notificationId ?? '', ...sharedData,
+        }, 'consultations', 'normal', doctorPhoto, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_update')) {
+        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('consultation', consultation_id, String(consult.type)) })
+      }
+      break
+    }
+
+    // ── Patient: doctor backgrounded the app mid-call ─────────────────────────
+    case 'doctor_left': {
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const title = 'Doctor Left'
+      const body  = 'Your doctor has left the consultation.'
+
+      let notificationId: string | null = null
+      if (patientId) {
+        notificationId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title,
+          body,
+          type:      'doctor_left',
+          data_json: { ...sharedData, screen: 'consultation' },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_update')) {
+        await sendPushNotification(patientToken, title, body, {
+          screen: 'consultation', notificationId: notificationId ?? '', ...sharedData,
+        }, 'consultations', 'normal', undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_update')) {
+        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('consultation', consultation_id, String(consult.type)) })
+      }
+      break
+    }
+
+    // ── Patient: heartbeat-timeout force-end (migration 023) ─────────────────
+    case 'ended_abnormally': {
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const title = 'Consultation Ended'
+      const body  = 'Your consultation ended unexpectedly. Please reopen the app or contact support if the issue continues.'
+
+      let notificationId: string | null = null
+      if (patientId) {
+        notificationId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title,
+          body,
+          type:      'ended_abnormally',
+          data_json: { ...sharedData, screen: 'appointments' },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendPushNotification(patientToken, title, body, {
+          screen: 'appointments', notificationId: notificationId ?? '', ...sharedData,
+        }, 'consultations', 'normal', undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('appointments', consultation_id, String(consult.type)) })
+      }
+      break
+    }
+
+    // ── Patient: scheduled slot arrived, doctor never came online ────────────
+    // Fires exactly once (running_late_notified guard lives in the cron
+    // function that calls this — migration 107, shared with doctor_running_late).
+    case 'doctor_delayed': {
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const title = 'Doctor Delayed'
+      const body  = "Your doctor has not joined yet. Please continue waiting while we notify them."
+
+      let notificationId: string | null = null
+      if (patientId) {
+        notificationId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title,
+          body,
+          type:      'doctor_delayed',
+          data_json: { ...sharedData, screen: 'appointments' },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendPushNotification(patientToken, title, body, {
+          screen: 'appointments', notificationId: notificationId ?? '', ...sharedData,
+        }, 'consultations', 'normal', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('appointments', consultation_id, String(consult.type)) })
+      }
+      break
+    }
+
+    // ── Patient: 24h after completion, no review submitted ───────────────────
+    // Fires exactly once (rating_reminder_sent guard lives in the cron
+    // function that calls this — migration 107).
+    case 'rating_reminder': {
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const title = 'Rate Your Consultation'
+      const body  = 'Tell us how your consultation went.'
+
+      let notificationId: string | null = null
+      if (patientId) {
+        notificationId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title,
+          body,
+          type:      'rating_reminder',
+          data_json: { ...sharedData, screen: 'consultation_summary' },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'reviews')) {
+        await sendPushNotification(patientToken, title, body, {
+          screen: 'consultation_summary', notificationId: notificationId ?? '', ...sharedData,
+        }, 'consultations', 'normal', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'reviews')) {
+        await sendWebPush(supabase, patientId, { title, body, url: patientPushUrl('consultation_summary', consultation_id, String(consult.type)) })
+      }
+      break
+    }
+
     default:
       return new Response('Unknown event type', { status: 400, headers: corsHeaders })
+  }
+
+  // Reliability (Phase-5 audit M3) — mark this dispatch confirmed only once
+  // every branch above ran to completion with no unhandled exception.
+  // migration 110's retry_unconfirmed_consultation_notifications() sweep
+  // re-attempts any dispatch-log row that never reaches this line.
+  if (payload.dispatch_log_id) {
+    await supabase
+      .from('notification_dispatch_log')
+      .update({ confirmed_at: new Date().toISOString() })
+      .eq('id', payload.dispatch_log_id)
   }
 
   return new Response(

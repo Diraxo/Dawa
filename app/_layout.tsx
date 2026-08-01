@@ -773,6 +773,9 @@ function AppInitializer() {
     // the banner immediately instead of leaving a dead "Resume" behind.
     if (isOnConsultationScreen) return
 
+    let cancelled = false
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
     const recoverDoctor = async () => {
       if (doctorFetchingRef.current) return
       doctorFetchingRef.current = true
@@ -825,9 +828,56 @@ function AppInitializer() {
     const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
       if (state === 'active') recoverDoctor()
     })
-    return () => sub.remove()
+
+    // Realtime-triggered: the patient-side recovery effect above is paired
+    // with a live subscription specifically because a party sitting idle on
+    // a foregrounded non-consultation screen is otherwise never pulled in
+    // until they background/foreground the app — this doctor-side effect had
+    // no equivalent, so a doctor foregrounded on a tab other than Home/
+    // Consultations when a queued consultation auto-activates (or another
+    // device accepts on their behalf) wouldn't see this global banner until
+    // backgrounding/foregrounding (Phase-4 audit M3).
+    if (clerkUser?.id) {
+      (async () => {
+        const token = await getToken()
+        if (!token || cancelled) return
+        const { data: me } = await getAuthClient(token)
+          .from('users')
+          .select('id')
+          .eq('clerk_id', clerkUser.id)
+          .maybeSingle()
+        if (!me || cancelled) return
+        const { data: profile } = await getAuthClient(token)
+          .from('doctor_profiles')
+          .select('id')
+          .eq('user_id', me.id)
+          .maybeSingle()
+        if (!profile || cancelled) return
+
+        // Guards against the recurring stale-channel race (see history) —
+        // this effect re-runs whenever the doctor enters/leaves a
+        // consultation screen, which can flip fast enough to race a prior
+        // mount's async removeChannel() for this topic.
+        const activationTopic = `doctor-active-consultation-recovery-${profile.id}`
+        const staleActivation = supabase.getChannels().find((c) => c.topic === `realtime:${activationTopic}`)
+        if (staleActivation) supabase.removeChannel(staleActivation)
+        channel = supabase
+          .channel(activationTopic)
+          .on(
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'consultations', filter: `doctor_id=eq.${profile.id}` },
+            (payload) => {
+              const status = (payload.new as { status?: string })?.status
+              if (status === 'accepted' || status === 'in_progress') recoverDoctor()
+            },
+          )
+          .subscribe()
+      })()
+    }
+
+    return () => { cancelled = true; sub.remove(); if (channel) supabase.removeChannel(channel) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn, userRole, isOnConsultationScreen])
+  }, [isSignedIn, userRole, isOnConsultationScreen, clerkUser?.id])
 
   // ── Ghost-consultation self-heal ───────────────────────────────────────────
   // The two recovery effects above only re-check the DB on mount / AppState

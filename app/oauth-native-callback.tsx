@@ -5,6 +5,7 @@ import { useEffect } from 'react'
 import { ActivityIndicator, View } from 'react-native'
 
 import { colors } from '@/constants/colors'
+import { resolveAuthDestination } from '@/lib/resolveAuthDestination'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 
@@ -30,17 +31,10 @@ export default function OAuthNativeCallback() {
       try {
         const token = await getToken()
         const client = token ? getAuthClient(token) : supabase
-        const { data } = await client.from('users').select('role').eq('clerk_id', userId).single()
-        console.log('[OAuth callback] role lookup resolved:', data?.role ?? null)
-        if (data?.role === 'doctor') {
-          setUserRole('doctor')
-          router.replace('/(doctor)/(tabs)/home' as never)
-        } else if (data?.role === 'patient') {
-          setUserRole('patient')
-          router.replace('/(patient)/(tabs)/home' as never)
-        } else {
-          router.replace('/(auth)/role' as never)
-        }
+        const dest = await resolveAuthDestination(client, userId)
+        console.log('[OAuth callback] destination resolved:', dest.route)
+        if (dest.role) setUserRole(dest.role)
+        router.replace(dest.route as never)
       } catch (err) {
         console.error('[OAuth callback] role lookup failed:', err)
         router.replace('/(auth)/role' as never)

@@ -415,6 +415,28 @@ export function navigateForNotification(
       router.push('/(doctor)/(tabs)/schedule')
       break
 
+    // Payment Failed fallback (migration 107 / chapa-webhook) — reopens the
+    // doctor's profile, where the booking sheet lives, so the patient can
+    // retry. Falls back to Appointments if the failure was resolved before
+    // a doctor_id could be attached (should not normally happen).
+    case 'booking':
+      if (data.doctorId) {
+        router.push({ pathname: '/(patient)/doctor-profile', params: { id: data.doctorId } })
+      } else {
+        router.push('/(patient)/(tabs)/appointments')
+      }
+      break
+
+    // Withdrawal Approved/Rejected/Paid — doctor-only.
+    case 'withdrawal':
+      router.push('/(doctor)/withdraw')
+      break
+
+    // Document Update Approved/Rejected — doctor-only.
+    case 'documents':
+      router.push('/(doctor)/my-documents')
+      break
+
     case 'profile':
       // A rating notification also carries screen: 'profile' (so a stale
       // client/carehub-web that doesn't know about notifKind still lands

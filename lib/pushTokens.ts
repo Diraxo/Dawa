@@ -70,3 +70,57 @@ export async function reclaimTokenFromOtherUsers(
     logger.warn(`[PushTokens] reclaimTokenFromOtherUsers(${column}) threw:`, e)
   }
 }
+
+// ── Multi-device support (migration 109, Phase-5 audit H4) ─────────────────
+//
+// user_devices is now the primary source of truth the two notification edge
+// functions fan out to — everything above this comment (clearPushTokens,
+// reclaimTokenFromOtherUsers, and every call site that writes the legacy
+// users.push_token/fcm_token/voip_token columns) is left completely
+// unchanged and keeps running exactly as before. These are purely additive:
+// callers invoke upsertDevice() alongside the existing legacy write, never
+// instead of it, so a device that predates this change (or a build that
+// hasn't picked it up yet) keeps working off the legacy single-column
+// fallback the edge functions still support.
+
+export interface UpsertDeviceParams {
+  deviceId:       string
+  platform:       'ios' | 'android'
+  expoPushToken?: string | null
+  fcmToken?:      string | null
+  voipToken?:     string | null
+  appVersion?:    string | null
+}
+
+/** Registers/refreshes this device's row. Safe to call repeatedly (e.g. once per token type as each is obtained). */
+export async function upsertDevice(params: UpsertDeviceParams): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('upsert_user_device', {
+      p_device_id: params.deviceId,
+      p_platform: params.platform,
+      p_expo_push_token: params.expoPushToken ?? null,
+      p_fcm_token: params.fcmToken ?? null,
+      p_voip_token: params.voipToken ?? null,
+      p_app_version: params.appVersion ?? null,
+    })
+    if (error) logger.warn('[PushTokens] upsertDevice failed:', error.message)
+  } catch (e) {
+    logger.warn('[PushTokens] upsertDevice threw:', e)
+  }
+}
+
+/**
+ * Call on sign-out, alongside (not instead of) clearPushTokens — deactivates
+ * only this device's row so other devices signed into the same account keep
+ * receiving pushes, which is the entire point of moving off the single
+ * users.push_token column.
+ */
+export async function deactivateDevice(deviceId: string): Promise<void> {
+  if (!deviceId) return
+  try {
+    const { error } = await supabase.rpc('deactivate_user_device', { p_device_id: deviceId })
+    if (error) logger.warn('[PushTokens] deactivateDevice failed:', error.message)
+  } catch (e) {
+    logger.warn('[PushTokens] deactivateDevice threw:', e)
+  }
+}

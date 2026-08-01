@@ -3,7 +3,7 @@ import { useAuth, useUser } from '@clerk/clerk-expo'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { Image } from 'expo-image'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Pressable,
   ScrollView,
@@ -20,7 +20,8 @@ import { gradients } from '@/constants/gradients'
 import Constants from 'expo-constants'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
-import { clearPushTokens } from '@/lib/pushTokens'
+import { clearPushTokens, deactivateDevice } from '@/lib/pushTokens'
+import { getOrCreateDeviceId } from '@/lib/deviceId'
 import { shadow } from '@/lib/shadow'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getAuthClient, supabaseEmailAuth } from '@/lib/supabase'
@@ -76,6 +77,11 @@ export default function ProfileScreen() {
   const { photoUrl: dbPhotoUrl } = useOwnProfilePhoto()
 
   const avatarUri = dbPhotoUrl ?? user?.imageUrl ?? null
+  // OAuth-provider avatar URLs (Clerk's imageUrl, when there's no uploaded
+  // photo) can expire or 404 without any DB-side signal — fall back to the
+  // initials placeholder instead of a permanently broken image.
+  const [avatarLoadFailed, setAvatarLoadFailed] = useState(false)
+  useEffect(() => { setAvatarLoadFailed(false) }, [avatarUri])
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -88,6 +94,7 @@ export default function ProfileScreen() {
   const confirmDeactivate = async () => {
     setShowDeactivateAlert(false)
     if (user?.id) await clearPushTokens(user.id)
+    await deactivateDevice(await getOrCreateDeviceId())
     await disconnectStream()
     await supabaseEmailAuth.auth.signOut()
     clearAuth()
@@ -107,7 +114,15 @@ export default function ProfileScreen() {
       if (user?.id && token) {
         const client = getAuthClient(token)
         // Best-effort avatar cleanup — must never block account deletion.
-        await client.storage.from('profile-photos').remove([`${user.id}/avatar.jpg`]).catch(() => {})
+        // Removes every file in this user's folder, not just avatar.jpg —
+        // older upload flows used different filenames/extensions, and
+        // leaving those behind orphans them in storage forever.
+        try {
+          const { data: existing } = await client.storage.from('profile-photos').list(user.id)
+          if (existing && existing.length > 0) {
+            await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
+          }
+        } catch {}
 
         // Anonymize rather than hard-delete the `users` row: consultations,
         // messages, and reviews all reference patient_id/sender_id with
@@ -246,6 +261,7 @@ export default function ProfileScreen() {
             onPress: guardLogout(async () => {
               setShowLogoutAlert(false)
               if (user?.id) await clearPushTokens(user.id)
+              await deactivateDevice(await getOrCreateDeviceId())
               await disconnectStream()
               await supabaseEmailAuth.auth.signOut()
               clearAuth()
@@ -317,15 +333,16 @@ export default function ProfileScreen() {
         >
           <Pressable
             style={styles.avatarWrap}
-            onPress={() => router.push('/(patient)/edit-personal-info')}
+            onPress={guardNav(() => router.push('/(patient)/edit-personal-info'))}
           >
-            {avatarUri ? (
+            {avatarUri && !avatarLoadFailed ? (
               <Image
                 source={{ uri: avatarUri }}
                 style={styles.avatar}
                 contentFit="cover"
                 cachePolicy="memory-disk"
                 transition={0}
+                onError={() => setAvatarLoadFailed(true)}
               />
             ) : (
               <View style={styles.avatarFallback}>
@@ -358,7 +375,7 @@ export default function ProfileScreen() {
         {/* ── Edit Personal Info button ── */}
         <Pressable
           style={({ pressed }) => [styles.editBtnWrap, pressed && { opacity: 0.88 }]}
-          onPress={() => router.push('/(patient)/edit-personal-info')}
+          onPress={guardNav(() => router.push('/(patient)/edit-personal-info'))}
         >
           <LinearGradient
             colors={gradients.interactive}

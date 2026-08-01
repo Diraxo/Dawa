@@ -440,6 +440,23 @@ export default function DoctorVideoConsultationScreen() {
     return () => sub.remove()
   }, [callStatus, consultationId, displayName, camOff, patientUserId, patientPhotoUrl])
 
+  // ── Patient-facing "Doctor Left" notification (migration 107) ────────────
+  // Isolated from the effect above on purpose — only ever writes
+  // doctor_left_at, never touches the camera/notification lifecycle it
+  // manages. Fires once per backgrounding (the presence trigger only
+  // notifies on the NULL -> NOT NULL transition), clears on return.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const inCall = callStatus === 'connected' || callStatus === 'reconnecting'
+      if ((nextState === 'background' || nextState === 'inactive') && inCall) {
+        state.markDoctorLeft()
+      } else if (nextState === 'active' && inCall) {
+        state.clearDoctorLeft()
+      }
+    })
+    return () => sub.remove()
+  }, [callStatus, state.markDoctorLeft, state.clearDoctorLeft])
+
   // ── Fetch Agora token ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!channelName) return
@@ -745,7 +762,8 @@ export default function DoctorVideoConsultationScreen() {
       engine?.leaveChannel()
       releaseAgoraEngine()
     }
-  }, [agoraReady, channelName, localUid])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agoraToken, channelName, localUid, muteLoaded, camStateLoaded])
 
   // Sync mute
   useEffect(() => {
@@ -929,9 +947,9 @@ export default function DoctorVideoConsultationScreen() {
               )}
             </SpeakingPulse>
             <Text style={styles.patientVideoName}>{displayName}</Text>
-            {tokenFetchFailed ? (
+            {(tokenFetchFailed || callStatus === 'error') ? (
               <Pressable
-                onPress={() => setTokenRetryKey(k => k + 1)}
+                onPress={() => { setLocalError(false); setTokenFetchFailed(false); setTokenRetryKey(k => k + 1) }}
                 style={{ marginTop: 4, backgroundColor: 'rgba(239,68,68,0.15)', borderRadius: 12, paddingHorizontal: 20, paddingVertical: 10, borderWidth: 1, borderColor: 'rgba(239,68,68,0.4)' }}
               >
                 <Text style={{ fontFamily: fonts.regular, fontSize: 13, color: '#FCA5A5' }}>Connection failed — tap to retry</Text>

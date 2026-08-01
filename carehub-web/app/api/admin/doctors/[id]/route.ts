@@ -113,9 +113,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         title,
         body: notifBody,
         type: 'document_update_reviewed',
-        data_json: { doctorProfileId: id },
+        data_json: { doctorProfileId: id, screen: 'documents' },
       })
-      await sendDoctorStatusPush(profile.user_id, title, notifBody)
+      await sendDoctorStatusPush(profile.user_id, title, notifBody, { screen: 'documents' })
     }
 
     await logAdminAction(userId, action, { doctorProfileId: id }, { entityType: 'doctor_profile', entityId: id, ...getRequestContext(req) })
@@ -153,9 +153,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         title: 'Account Suspended',
         body: 'Your account has been suspended. Please contact support.',
         type: 'doctor_suspended',
-        data_json: { doctorProfileId: id },
+        data_json: { doctorProfileId: id, screen: 'profile' },
       })
-      await sendDoctorStatusPush(profile.user_id, 'Account Suspended', 'Your account has been suspended. Please contact support.')
+      await sendDoctorStatusPush(profile.user_id, 'Account Suspended', 'Your account has been suspended. Please contact support.', { screen: 'profile' })
 
       if (userRow?.email) {
         await sendEmail(
@@ -170,9 +170,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         title: 'Account Reinstated',
         body: 'Your Dawa doctor account has been reinstated. You can now go online and accept consultations again.',
         type: 'doctor_reinstated',
-        data_json: { doctorProfileId: id },
+        data_json: { doctorProfileId: id, screen: 'profile' },
       })
-      await sendDoctorStatusPush(profile.user_id, 'Account Reinstated', 'Your Dawa doctor account has been reinstated. You can now go online and accept consultations again.')
+      await sendDoctorStatusPush(profile.user_id, 'Account Reinstated', 'Your Dawa doctor account has been reinstated. You can now go online and accept consultations again.', { screen: 'profile' })
 
       if (userRow?.email) {
         await sendEmail(

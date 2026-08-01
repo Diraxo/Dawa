@@ -17,7 +17,30 @@ import { createRemoteJWKSet, jwtVerify } from 'npm:jose'
 import { RtcTokenBuilder, RtcRole } from 'npm:agora-access-token'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const INACTIVE_STATUSES = new Set(['completed', 'cancelled', 'declined', 'ended_abnormally'])
+// Mirrors hooks/useConsultationState.ts's TERMINAL_STATUSES — a narrower set
+// here let a stale client mint a token and join a call the counterpart
+// already considers over (P3-21).
+const INACTIVE_STATUSES = new Set([
+  'completed',
+  'cancelled',
+  'declined',
+  'doctor_missed',
+  'missed',
+  'call_declined',
+  'ended_abnormally',
+])
+
+// Mirrors lib/agora.ts's uidFromString exactly — the uid is derived here from
+// the caller's own verified Clerk subject, never taken from the request body,
+// so a caller can never mint a token for another participant's uid (P3-19).
+function uidFromString(str: string): number {
+  let h = 5381
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) + h) ^ str.charCodeAt(i)
+    h = h >>> 0
+  }
+  return h === 0 ? 1 : h
+}
 
 const ALLOWED_ORIGINS = new Set(['https://dawa.com', 'http://localhost:3000', 'http://localhost:19006'])
 function buildCorsHeaders(req: Request) {
@@ -65,15 +88,13 @@ Deno.serve(async (req: Request) => {
 
   // Parse request body
   let channelName: string
-  let uid: number
   try {
     const body = await req.json()
     channelName = body.channelName
-    uid = Number(body.uid)
-    if (!channelName || isNaN(uid)) throw new Error('invalid')
+    if (!channelName) throw new Error('invalid')
   } catch {
     return new Response(
-      JSON.stringify({ error: 'Body must include channelName (string) and uid (number)' }),
+      JSON.stringify({ error: 'Body must include channelName (string)' }),
       { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
@@ -133,6 +154,11 @@ Deno.serve(async (req: Request) => {
       { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
+
+  // uid is derived from the caller's own verified identity, not the request
+  // body — prevents a participant from minting a token for the other party's
+  // uid and force-disconnecting them mid-call.
+  const uid = uidFromString(clerkSub)
 
   const appId = Deno.env.get('AGORA_APP_ID')!
   const appCertificate = Deno.env.get('AGORA_APP_CERTIFICATE')!

@@ -5,6 +5,7 @@ import { createJSONStorage, persist } from 'zustand/middleware'
 import { streamClient } from '@/lib/stream'
 import { logger } from '@/lib/logger'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
+import { useDoctorStore } from '@/store/doctorStore'
 
 type UserRole = 'patient' | 'doctor' | null
 
@@ -96,6 +97,17 @@ export const useAuthStore = create<AuthState>()(
         // on the signed-out sign-in screen and surviving into the next account
         // signed into on the same device.
         useActiveConsultationStore.getState().setActive(null)
+
+        // dawa-doctor-storage persists registration-draft fields
+        // (regFullName, regLicenseNumber, regBio, etc.) plus isOnline/
+        // doctorStatus — none of it was ever cleared on sign-out, so a
+        // doctor who signs out mid-registration leaves their draft sitting
+        // in AsyncStorage for whichever account (their own re-login, or a
+        // different doctor on a shared device) signs in next.
+        const doctorState = useDoctorStore.getState()
+        doctorState.clearReg()
+        doctorState.setIsOnline(false)
+        doctorState.setDoctorStatus(null)
       },
     }),
     {

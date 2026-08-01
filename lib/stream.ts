@@ -1,5 +1,5 @@
 import { Image } from 'react-native'
-import { StreamChat } from 'stream-chat'
+import { StreamChat, type Channel } from 'stream-chat'
 
 const STREAM_KEY = process.env.EXPO_PUBLIC_STREAM_API_KEY ?? ''
 if (!STREAM_KEY) console.error('[Stream] EXPO_PUBLIC_STREAM_API_KEY is not set — chat will not work')
@@ -99,6 +99,18 @@ export function getMessageImageUrls(messages: { attachments?: any[] }[]): string
     }
   }
   return Array.from(urls)
+}
+
+// Server-side full-history message search (P3-11) — the chat screens used to
+// filter `channel.state.messages`, the SDK's in-memory paginated cache, so
+// searching for anything older than the last-loaded page silently returned
+// "No messages found" even though the message exists. `channel.search()`
+// hits Stream's own search index instead, covering the whole channel.
+export async function searchChannelMessages(channel: Channel, query: string, limit = 30) {
+  const trimmed = query.trim()
+  if (!trimmed) return []
+  const res = await channel.search(trimmed, { limit } as any)
+  return res.results.map((r) => r.message)
 }
 
 // Warms the native image cache so chat images render fully instead of

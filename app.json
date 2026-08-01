@@ -75,6 +75,7 @@
     },
     "plugins": [
       "./plugins/withFirebaseMessagingManifestFix.js",
+      "./plugins/withRemoveMediaProjectionPermission.js",
       "./plugins/withScopedStoragePermissions.js",
       "./plugins/withWhatsAppQueries.js",
       "expo-router",

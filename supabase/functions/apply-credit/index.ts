@@ -231,17 +231,25 @@ Deno.serve(async (req: Request) => {
     )
   }
 
-  // Partial coverage — record credit source; caller initiates Chapa for difference.
-  // The chapa-webhook marks credit_used=true once the difference payment is confirmed.
+  // Partial coverage — caller initiates Chapa for the difference.
   const additionalRequired = newFee - creditAmount
 
-  // Same credit_used=false guard as the full-coverage path — the webhook
-  // marks credit_used=true once the difference payment confirms, so this
-  // only reserves the credit source; it must not attach to a consultation
-  // whose credit was already claimed elsewhere in the meantime.
+  // Claim credit_used=true right here, atomically (WHERE credit_used=false),
+  // instead of waiting for the webhook to do it once the difference payment
+  // confirms. The full-coverage branch above already claims this way; this
+  // branch previously only reserved (replacement_consultation_id) without
+  // claiming, which let BookingModal re-offer the same still-"unused" credit
+  // on a second, different booking before the first one ever paid —
+  // discounting both if both were later completed (double-spend).
+  //
+  // Claiming this early means an abandoned partial-coverage booking (patient
+  // never completes the Chapa top-up) would otherwise strand the credit
+  // permanently — migration 104 extends cancel_stale_pending_payments()'s
+  // existing 30-minute sweep to release credit_used back to false for any
+  // credit whose reservation belongs to a booking it's cancelling.
   const { data: reserved } = await supabase
     .from('consultations')
-    .update({ replacement_consultation_id: new_consultation_id })
+    .update({ credit_used: true, replacement_consultation_id: new_consultation_id })
     .eq('id', credit_consultation_id)
     .eq('credit_used', false)
     .select('id')

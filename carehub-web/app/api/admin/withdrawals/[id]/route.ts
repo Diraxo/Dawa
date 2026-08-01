@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/server'
 import { logAdminAction, getRequestContext } from '@/lib/supabase/audit'
 import { stripDrPrefix } from '@/lib/utils'
+import { sendDoctorStatusPush } from '@/lib/doctorStatusPush'
 
 async function sendEmail(to: string, subject: string, body: string) {
   const apiKey = process.env.RESEND_API_KEY
@@ -81,13 +82,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       const amount = `ETB ${withdrawal.amount}`
 
       if (action === 'approve') {
+        const title = 'Withdrawal Approved'
+        const notifBody = `Your withdrawal request of ${amount} has been approved and is being processed.`
         await supabaseAdmin.from('notifications').insert({
           user_id: profile.user_id,
-          title: 'Withdrawal Approved',
-          body: `Your withdrawal request of ${amount} has been approved and is being processed.`,
+          title,
+          body: notifBody,
           type: 'withdrawal_approved',
-          data_json: { withdrawalId: id, amount: withdrawal.amount },
+          data_json: { withdrawalId: id, amount: withdrawal.amount, screen: 'withdrawal' },
         })
+        await sendDoctorStatusPush(profile.user_id, title, notifBody, { screen: 'withdrawal', prefColumn: 'earnings' })
 
         if (userRow?.email) {
           await sendEmail(
@@ -97,13 +101,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
           )
         }
       } else if (action === 'reject') {
+        const title = 'Withdrawal Not Processed'
+        const notifBody = `Your withdrawal request of ${amount} could not be processed. Please contact support for details.`
         await supabaseAdmin.from('notifications').insert({
           user_id: profile.user_id,
-          title: 'Withdrawal Not Processed',
-          body: `Your withdrawal request of ${amount} could not be processed. Please contact support for details.`,
+          title,
+          body: notifBody,
           type: 'withdrawal_rejected',
-          data_json: { withdrawalId: id, amount: withdrawal.amount },
+          data_json: { withdrawalId: id, amount: withdrawal.amount, screen: 'withdrawal' },
         })
+        await sendDoctorStatusPush(profile.user_id, title, notifBody, { screen: 'withdrawal', prefColumn: 'earnings' })
 
         if (userRow?.email) {
           await sendEmail(
@@ -113,13 +120,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
           )
         }
       } else if (action === 'paid') {
+        const title = 'Payment Sent'
+        const notifBody = `Your withdrawal of ${amount} has been sent to your bank account. Please check your balance.`
         await supabaseAdmin.from('notifications').insert({
           user_id: profile.user_id,
-          title: 'Payment Sent',
-          body: `Your withdrawal of ${amount} has been sent to your bank account. Please check your balance.`,
+          title,
+          body: notifBody,
           type: 'withdrawal_paid',
-          data_json: { withdrawalId: id, amount: withdrawal.amount },
+          data_json: { withdrawalId: id, amount: withdrawal.amount, screen: 'withdrawal' },
         })
+        await sendDoctorStatusPush(profile.user_id, title, notifBody, { screen: 'withdrawal', prefColumn: 'earnings' })
 
         if (userRow?.email) {
           await sendEmail(

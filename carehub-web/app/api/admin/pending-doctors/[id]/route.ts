@@ -72,7 +72,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         title: 'Doctor Application Approved',
         body: 'Your account has been approved. You may now begin accepting patients.',
         type: 'doctor_approved',
-        data_json: { doctorProfileId: id },
+        data_json: { doctorProfileId: id, screen: 'profile' },
       })
       await sendDoctorStatusPush(profile.user_id, 'Doctor Application Approved', 'Your account has been approved. You may now begin accepting patients.')
 
@@ -138,7 +138,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         title: 'Doctor Application Rejected',
         body: `Your application was not approved. Reason: ${reason}`,
         type: 'doctor_rejected',
-        data_json: { doctorProfileId: id },
+        data_json: { doctorProfileId: id, screen: 'profile' },
       })
       await sendDoctorStatusPush(profile.user_id, 'Doctor Application Rejected', `Your application was not approved. Reason: ${reason}`)
 

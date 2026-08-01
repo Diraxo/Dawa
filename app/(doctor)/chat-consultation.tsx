@@ -61,8 +61,9 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
-import { streamClient, preloadImages, getMessageImageUrls } from '@/lib/stream'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { streamClient, preloadImages, getMessageImageUrls, searchChannelMessages, watchConsultationChannel } from '@/lib/stream'
+import { getAuthClient, supabase, validateChatAttachment } from '@/lib/supabase'
+import { blockConsultationPeer, fetchHasBlockedPeer } from '@/lib/block'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { restrictedMessageActions } from '@/lib/chatMessageActions'
 import { isPdfAttachment } from '@/lib/pdfAttachment'
@@ -187,10 +188,37 @@ export default function DoctorChatConsultationScreen() {
   // Block
   const [showBlockModal, setShowBlockModal] = useState(false)
   const [isBlocked, setIsBlocked] = useState(false)
+  const [blocking, setBlocking] = useState(false)
 
   // Search
   const [searchActive, setSearchActive] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<any[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState(false)
+
+  // Server-side search (P3-11) — replaces filtering `activeChannel.state
+  // .messages` (the SDK's in-memory paginated cache), which silently missed
+  // anything older than the last-loaded page. Debounced so every keystroke
+  // doesn't fire a network request.
+  useEffect(() => {
+    if (!searchActive || !activeChannel) { setSearchResults([]); return }
+    const trimmed = searchQuery.trim()
+    if (!trimmed) { setSearchResults([]); setSearchError(false); return }
+    let cancelled = false
+    setSearchLoading(true)
+    setSearchError(false)
+    const timer = setTimeout(() => {
+      searchChannelMessages(activeChannel, trimmed, 50)
+        .then((messages) => { if (!cancelled) setSearchResults(messages) })
+        .catch((err) => {
+          logger.error('[DoctorChat] message search failed:', err)
+          if (!cancelled) { setSearchResults([]); setSearchError(true) }
+        })
+        .finally(() => { if (!cancelled) setSearchLoading(false) })
+    }, 350)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [searchActive, activeChannel, searchQuery])
 
   // Attachment menu
   const [showAttachMenu, setShowAttachMenu] = useState(false)
@@ -231,6 +259,17 @@ export default function DoctorChatConsultationScreen() {
   useEffect(() => {
     if (!effectiveChannelId || !dbUserId) return
     markNotificationsReadForConsultation(supabase, dbUserId, effectiveChannelId)
+  }, [effectiveChannelId, dbUserId])
+
+  // Read back a previously-persisted block on mount (P3-12) — `isBlocked`
+  // used to be local-only component state that silently reset on remount.
+  useEffect(() => {
+    if (!effectiveChannelId || !dbUserId) return
+    let cancelled = false
+    fetchHasBlockedPeer(supabase, effectiveChannelId, dbUserId)
+      .then((blocked) => { if (!cancelled) setIsBlocked(blocked) })
+      .catch(() => {})
+    return () => { cancelled = true }
   }, [effectiveChannelId, dbUserId])
 
   // ── Background notification ────────────────────────────────────────────────
@@ -348,25 +387,11 @@ export default function DoctorChatConsultationScreen() {
         const patientClerkId = (data as any)?.patient?.clerk_id as string | undefined
         patientClerkIdRef.current = patientClerkId ?? null
         const members = userId && patientClerkId ? [userId, patientClerkId] : undefined
-        const ch = streamClient.channel('messaging', effectiveChannelId, members ? { members } : undefined)
+        const ch = await watchConsultationChannel(effectiveChannelId, members, { presence: true } as any)
         currentChannel = ch
-        try {
-          await ch.watch({ presence: true })
-        } catch (err) {
-          if (!members) throw err
-          // Membership may already exist (added by the accept-time create
-          // or the patient's own self-heal watch) — re-sending members on
-          // an already-provisioned channel trips Stream's "duplicate
-          // members" validation. `channel()` caches one instance per cid, so
-          // calling it again here would just hand back this same `ch` with
-          // `members` still baked into its data — strip it directly instead.
-          if (ch.data) delete (ch.data as any).members
-          if ((ch as any)._data) delete (ch as any)._data.members
-          await ch.watch({ presence: true })
-        }
-        if (!mounted) { ch.stopWatching().catch(() => {}); return }
+        if (!mounted) return
         await preloadImages(getMessageImageUrls(ch.state.messages as any[]))
-        if (!mounted) { ch.stopWatching().catch(() => {}); return }
+        if (!mounted) return
         setActiveChannel(ch)
         if (!ended) {
           ch.markRead().catch(() => {})
@@ -399,7 +424,14 @@ export default function DoctorChatConsultationScreen() {
       mounted = false
       if (retryTimer) clearTimeout(retryTimer)
       connSub?.unsubscribe()
-      currentChannel?.stopWatching().catch(() => {})
+      // Deliberately not calling currentChannel?.stopWatching() here (P3-18)
+      // — `streamClient.channel()` caches one instance per cid, and the
+      // Messages tab may still have this same channel actively watched via
+      // its own useFocusEffect. Un-watching it out from under that listener
+      // silently downgrades its live updates until it's refocused. Letting
+      // the watch persist past this screen's unmount is harmless; the
+      // channel gets genuinely released only when nothing else is watching
+      // it (Stream's own connection teardown on sign-out).
       setActiveChannel(null)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -623,32 +655,53 @@ export default function DoctorChatConsultationScreen() {
     })
     if (!result.canceled) {
       for (const asset of result.assets) {
-        await uploadFileRef.current?.({
+        const file = {
           uri: asset.uri,
           name: asset.fileName ?? `photo_${Date.now()}.jpg`,
           size: asset.fileSize ?? 0,
           type: asset.mimeType ?? 'image/jpeg',
-        })
+        }
+        try {
+          validateChatAttachment(file)
+        } catch (err: any) {
+          showSimpleAlert('error', 'Attachment rejected', err?.message ?? 'This file cannot be sent.')
+          continue
+        }
+        await uploadFileRef.current?.(file)
       }
     }
   }
+
+  const CHAT_DOCUMENT_PICKER_TYPES = [
+    'image/jpeg', 'image/png', 'image/webp',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ]
 
   const pickDocument = async () => {
     setShowAttachMenu(false)
     await waitForModalDismiss()
     const result = await DocumentPicker.getDocumentAsync({
-      type: '*/*',
+      type: CHAT_DOCUMENT_PICKER_TYPES,
       copyToCacheDirectory: true,
       multiple: true,
     })
     if (!result.canceled) {
       for (const asset of result.assets) {
-        await uploadFileRef.current?.({
+        const file = {
           uri: asset.uri,
           name: asset.name,
           size: asset.size ?? 0,
           type: asset.mimeType ?? 'application/octet-stream',
-        })
+        }
+        try {
+          validateChatAttachment(file)
+        } catch (err: any) {
+          showSimpleAlert('error', 'Attachment rejected', err?.message ?? 'This file cannot be sent.')
+          continue
+        }
+        await uploadFileRef.current?.(file)
       }
     }
   }
@@ -746,19 +799,27 @@ export default function DoctorChatConsultationScreen() {
 
           {/* Search results */}
           <ScrollView keyboardShouldPersistTaps="handled">
-            {searchQuery.trim() && activeChannel ? (() => {
-              const results = (activeChannel.state.messages as any[])
-                .filter(m => m.text?.toLowerCase().includes(searchQuery.toLowerCase()))
-                .slice(0, 50)
-              if (results.length === 0) {
-                return (
-                  <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
-                    <Ionicons name="search-outline" size={40} color={colors.steelGrey} />
-                    <Text style={{ fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' }}>No messages found</Text>
-                  </View>
-                )
-              }
-              return results.map((m: any) => {
+            {!searchQuery.trim() ? (
+              <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
+                <Ionicons name="search-outline" size={40} color={colors.steelGrey} />
+                <Text style={{ fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' }}>Type to search messages</Text>
+              </View>
+            ) : searchLoading ? (
+              <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
+                <ActivityIndicator color={colors.tealGreen} />
+              </View>
+            ) : searchError ? (
+              <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
+                <Ionicons name="cloud-offline-outline" size={40} color={colors.steelGrey} />
+                <Text style={{ fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' }}>Search unavailable — check your connection</Text>
+              </View>
+            ) : searchResults.length === 0 ? (
+              <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
+                <Ionicons name="search-outline" size={40} color={colors.steelGrey} />
+                <Text style={{ fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' }}>No messages found</Text>
+              </View>
+            ) : (
+              searchResults.map((m: any) => {
                 const msgDate = m.created_at ? new Date(m.created_at) : null
                 return (
                   <Pressable
@@ -775,11 +836,6 @@ export default function DoctorChatConsultationScreen() {
                   </Pressable>
                 )
               })
-            })() : (
-              <View style={{ alignItems: 'center', paddingTop: 48, gap: 8 }}>
-                <Ionicons name="search-outline" size={40} color={colors.steelGrey} />
-                <Text style={{ fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' }}>Type to search messages</Text>
-              </View>
             )}
           </ScrollView>
         </SafeAreaView>
@@ -859,10 +915,29 @@ export default function DoctorChatConsultationScreen() {
             </View>
             <Text style={styles.blockTitle}>Block {displayName}?</Text>
             <Text style={styles.blockSub}>You will no longer receive messages from this patient. The consultation history is preserved.</Text>
-            <Pressable style={styles.blockConfirmBtn} onPress={() => { setShowBlockModal(false); setIsBlocked(true) }}>
-              <Text style={styles.blockConfirmText}>Block Patient</Text>
+            <Pressable
+              style={[styles.blockConfirmBtn, blocking && { opacity: 0.6 }]}
+              disabled={blocking}
+              onPress={async () => {
+                if (!effectiveChannelId) return
+                setBlocking(true)
+                try {
+                  const token = await getToken()
+                  if (!token) throw new Error('no token')
+                  await blockConsultationPeer(effectiveChannelId, token)
+                  setIsBlocked(true)
+                  setShowBlockModal(false)
+                } catch (err) {
+                  logger.error('[DoctorChat] block peer failed:', err)
+                  showSimpleAlert('error', 'Could not block', 'Something went wrong. Please try again.')
+                } finally {
+                  setBlocking(false)
+                }
+              }}
+            >
+              {blocking ? <ActivityIndicator color={colors.mistWhite} /> : <Text style={styles.blockConfirmText}>Block Patient</Text>}
             </Pressable>
-            <Pressable style={styles.blockCancelBtn} onPress={() => setShowBlockModal(false)}>
+            <Pressable style={styles.blockCancelBtn} onPress={() => setShowBlockModal(false)} disabled={blocking}>
               <Text style={styles.blockCancelText}>Cancel</Text>
             </Pressable>
           </View>
@@ -995,7 +1070,7 @@ export default function DoctorChatConsultationScreen() {
               </View>
               <View style={styles.attachMenuTextWrap}>
                 <Text style={styles.attachMenuLabel}>Choose Document</Text>
-                <Text style={styles.attachMenuSub}>PDF, Word, or any file</Text>
+                <Text style={styles.attachMenuSub}>PDF or Word documents</Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.steelGrey} />
             </Pressable>

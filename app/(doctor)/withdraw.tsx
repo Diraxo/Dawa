@@ -90,15 +90,18 @@ export default function WithdrawScreen() {
       if (!token) return
       const client = getAuthClient(token)
 
-      const [userRes, totalRes, withdrawnRes, historyRes] = await Promise.all([
+      // Total earned is aggregated server-side (get_doctor_earnings_summary,
+      // migration 100) instead of fetching every completed consultation's
+      // doctor_amount and summing in JS.
+      const [userRes, earningsRes, withdrawnRes, historyRes] = await Promise.all([
         client.from('users').select('id').eq('clerk_id', userId).single(),
-        client.from('consultations').select('doctor_amount').eq('status', 'completed'),
+        client.rpc('get_doctor_earnings_summary').single(),
         client.from('withdrawals').select('amount').in('status', ['pending', 'approved', 'paid']),
         client.from('withdrawals').select('id, amount, status, bank_details, requested_at').order('requested_at', { ascending: false }),
       ])
 
       if (userRes.data?.id) setDbUserId(userRes.data.id)
-      const totalEarned = (totalRes.data ?? []).reduce((s, r: any) => s + (Number(r.doctor_amount) || 0), 0)
+      const totalEarned = Number((earningsRes.data as any)?.total_earned ?? 0)
       const totalWithdrawn = (withdrawnRes.data ?? []).reduce((s, r: any) => s + (Number(r.amount) || 0), 0)
       setAvailableBalance(Math.max(0, totalEarned - totalWithdrawn))
       setHistory((historyRes.data ?? []) as WithdrawalRecord[])

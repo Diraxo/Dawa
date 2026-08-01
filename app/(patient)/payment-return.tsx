@@ -241,7 +241,7 @@ export default function PaymentReturnScreen() {
 
         if (cancelledRef.current) return
 
-        if (!paid && initialChapaStatus === 'success' && ownTxRef) {
+        if (!paid && (initialChapaStatus === 'success' || initialChapaStatus === 'unknown') && ownTxRef) {
           // Passive poll exhausted but Chapa's own redirect said success —
           // actively re-verify (idempotent, safe to call repeatedly) and give
           // it one more short window rather than immediately dead-ending on
@@ -267,15 +267,24 @@ export default function PaymentReturnScreen() {
       }
 
       if (!paid) {
-        if (initialChapaStatus === 'success') {
-          // Chapa said success but both the passive poll and the active
-          // re-verify above came back empty — genuinely unresolved (Chapa
-          // API itself unreachable, or the transaction really isn't settled
-          // yet). Leave the row open rather than cancelling a possibly-paid
-          // booking; the "processing" screen's retry action can nudge again.
+        if (initialChapaStatus === 'success' || initialChapaStatus === 'unknown') {
+          // 'success' means Chapa's own redirect said so but both the passive
+          // poll and the active re-verify above came back empty — genuinely
+          // unresolved (Chapa API itself unreachable, or the transaction
+          // really isn't settled yet). 'unknown' is what a cold app-relaunch
+          // always resolves to (splash.tsx has no real status to hand off,
+          // see lib/pendingPayment.ts) — treating it as a hard failure here
+          // would auto-cancel a booking whose Chapa payment may simply still
+          // be in flight, showing a false "no charge made" message while the
+          // real webhook later resurrects the row, risking a second paid
+          // booking if the patient believes the false message and re-books.
+          // Either way, leave the row open rather than cancelling a
+          // possibly-paid booking; the "processing" screen's retry action
+          // can nudge again.
           setProcessingInfo({ consultationId, txRef: ownTxRef, doctorId, doctorName, consultationType, timing })
           setState('processing')
         } else {
+          // A concrete Chapa-reported failure/cancel status — safe to cancel.
           await cancelConsultationById(consultationId)
           setState('failed')
         }

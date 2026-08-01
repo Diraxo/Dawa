@@ -1,8 +1,8 @@
 ﻿import { useAuth, useSignIn } from "@clerk/clerk-expo"
 import { Ionicons } from "@expo/vector-icons"
 import { LinearGradient } from "expo-linear-gradient"
-import { useLocalSearchParams, useRouter } from "expo-router"
-import { useRef, useState } from "react"
+import { useRouter } from "expo-router"
+import { useEffect, useRef, useState } from "react"
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -20,11 +20,32 @@ import { DawaAlert } from "@/components/ui/DawaAlert"
 import { DawaLogo } from "@/components/ui/DawaLogo"
 import { colors } from "@/constants/colors"
 import { fonts } from "@/constants/fonts"
-import { getAuthClient, supabase } from "@/lib/supabase"
+import { useAuthDestination } from "@/hooks/useAuthDestination"
+
+// Best-effort — a failed security notification must never block the
+// password-reset success flow the patient is actively waiting on.
+async function notifyPasswordChanged(getToken: () => Promise<string | null>) {
+  try {
+    const token = await getToken()
+    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? ''
+    const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+    if (!token || !supabaseUrl) return
+    await fetch(`${supabaseUrl}/functions/v1/notify-security-event`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${token}`,
+        ...(anonKey ? { apikey: anonKey } : {}),
+      },
+      body: JSON.stringify({ kind: 'password_changed' }),
+    })
+  } catch {
+    // best-effort
+  }
+}
 
 export default function ResetPasswordScreen() {
   const router = useRouter()
-  const { email } = useLocalSearchParams<{ email: string }>()
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
   const { getToken } = useAuth()
@@ -37,7 +58,25 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState("")
   const [successAlert, setSuccessAlert] = useState(false)
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const targetRouteRef = useRef<string>('/(auth)/role')
+  const targetRouteRef = useRef<string>('/(patient)/(tabs)/home')
+
+  // Resolves the authenticated user's role (and, for doctors, approval
+  // status) by Clerk id — never by email — and never falls back to Role
+  // Selection just because the lookup temporarily failed.
+  const { arm: armDestination, retry: retryDestination, error: destinationError } = useAuthDestination((dest) => {
+    targetRouteRef.current = dest.route
+    setLoading(false)
+    setSuccessAlert(true)
+    notifyPasswordChanged(getToken)
+    successTimerRef.current = setTimeout(() => {
+      setSuccessAlert(false)
+      router.replace(targetRouteRef.current as never)
+    }, 2000)
+  })
+
+  useEffect(() => {
+    if (destinationError) setLoading(false)
+  }, [destinationError])
 
   const handleReset = async () => {
     if (!isLoaded || !signIn) return
@@ -55,27 +94,12 @@ export default function ResetPasswordScreen() {
       const result = await signIn.resetPassword({ password })
       if (result.status === "complete" && result.createdSessionId) {
         await setActive!({ session: result.createdSessionId })
-        try {
-          const token = await getToken()
-          const client = token ? getAuthClient(token) : supabase
-          const { data } = await client
-            .from("users")
-            .select("role")
-            .eq("email", (email ?? "").trim().toLowerCase())
-            .single()
-          if (data?.role === "patient") targetRouteRef.current = "/(patient)/(tabs)/home"
-          else if (data?.role === "doctor") targetRouteRef.current = "/(doctor)/(tabs)/home"
-          else targetRouteRef.current = "/(auth)/role"
-        } catch {
-          targetRouteRef.current = "/(auth)/role"
-        }
-        setSuccessAlert(true)
-        successTimerRef.current = setTimeout(() => {
-          setSuccessAlert(false)
-          router.replace(targetRouteRef.current as never)
-        }, 2000)
+        // Role/status resolution + navigation is handled by useAuthDestination
+        // above once Clerk's isSignedIn/userId reflect the new session.
+        armDestination()
       } else {
         setError("Failed to reset password. Please try again.")
+        setLoading(false)
       }
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ""
@@ -89,7 +113,6 @@ export default function ResetPasswordScreen() {
             "Failed to reset password. Please try again."
         )
       }
-    } finally {
       setLoading(false)
     }
   }
@@ -196,6 +219,17 @@ export default function ResetPasswordScreen() {
 
             {!!error && <Text style={styles.errorText}>{error}</Text>}
 
+            {destinationError && (
+              <View style={styles.verifyErrorBox}>
+                <Text style={styles.errorText}>
+                  Your password was reset, but we couldn't verify your account. Please check your connection and try again.
+                </Text>
+                <Pressable onPress={retryDestination} style={styles.retryBtn} hitSlop={8}>
+                  <Text style={styles.retryBtnText}>Try Again</Text>
+                </Pressable>
+              </View>
+            )}
+
             <Pressable
               onPress={handleReset}
               disabled={loading || !password || !confirmPassword}
@@ -264,6 +298,12 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular, fontSize: 12, color: colors.error,
     marginTop: 6, marginBottom: 4, lineHeight: 18,
   },
+
+  verifyErrorBox: {
+    backgroundColor: "#FEF2F2", borderRadius: 12, padding: 14, marginTop: 6, marginBottom: 4,
+  },
+  retryBtn: { marginTop: 10, alignSelf: "flex-start" },
+  retryBtnText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.tealGreen },
 
   btnWrap: { borderRadius: 16, overflow: "hidden", marginTop: 6 },
   btn: { height: 52, alignItems: "center", justifyContent: "center" },

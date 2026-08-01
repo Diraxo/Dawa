@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '@clerk/clerk-expo'
 import { useScrollToTop } from '@react-navigation/native'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useNavigationContainerRef, useRouter } from 'expo-router'
@@ -6,6 +7,7 @@ import { Image } from 'expo-image'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   ScrollView,
@@ -22,6 +24,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { usePatientAppointments, type PatientAppointment } from '@/hooks/usePatientAppointments'
+import { getAuthClient } from '@/lib/supabase'
 import { navigateFamilyRoute } from '@/lib/notificationNav'
 import { shadow } from '@/lib/shadow'
 import { useTranslation } from 'react-i18next'
@@ -189,12 +192,14 @@ function UpcomingCard({
   item,
   onJoin,
   onReschedule,
+  onCancel,
   onWaitingRoom,
   onOpenDoctor,
 }: {
   item: Appointment
   onJoin: (item: Appointment) => void
   onReschedule: (item: Appointment) => void
+  onCancel: (item: Appointment) => void
   onWaitingRoom: (item: Appointment) => void
   onOpenDoctor: (item: Appointment) => void
 }) {
@@ -256,13 +261,22 @@ function UpcomingCard({
             <Ionicons name="calendar-outline" size={15} color="#6B7280" />
             <Text style={cardStyles.pendingText}>Appointment Scheduled</Text>
           </View>
-          <Pressable
-            style={({ pressed }) => [cardStyles.rescheduleBtn, pressed && { opacity: 0.75 }]}
-            onPress={() => onReschedule(item)}
-          >
-            <Ionicons name="calendar-outline" size={15} color={colors.careBlue} />
-            <Text style={cardStyles.rescheduleBtnText}>Reschedule</Text>
-          </Pressable>
+          <View style={cardStyles.pastActionsRow}>
+            <Pressable
+              style={({ pressed }) => [cardStyles.rescheduleBtn, { flex: 1 }, pressed && { opacity: 0.75 }]}
+              onPress={() => onReschedule(item)}
+            >
+              <Ionicons name="calendar-outline" size={15} color={colors.careBlue} />
+              <Text style={cardStyles.rescheduleBtnText}>Reschedule</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [cardStyles.cancelBtn, { flex: 1 }, pressed && { opacity: 0.75 }]}
+              onPress={() => onCancel(item)}
+            >
+              <Ionicons name="close-circle-outline" size={15} color={colors.error} />
+              <Text style={cardStyles.cancelBtnText}>Cancel</Text>
+            </Pressable>
+          </View>
         </View>
       ) : item.status === 'waiting_for_doctor' ? (
         // scheduled_at has arrived — the global waiting-room recovery effect
@@ -563,6 +577,12 @@ const cardStyles = StyleSheet.create({
     backgroundColor: '#EFF6FF',
   },
   rescheduleBtnText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.careBlue },
+  cancelBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    height: 40, borderRadius: 12, borderWidth: 1.5, borderColor: colors.error,
+    backgroundColor: '#FEF2F2',
+  },
+  cancelBtnText: { fontFamily: fonts.semiBold, fontSize: 13, color: colors.error },
 })
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
@@ -629,7 +649,9 @@ export default function AppointmentsScreen() {
   const listRef = useRef<FlatList>(null)
   useScrollToTop(listRef)
   const guardNav = useNavGuard()
+  const { getToken, userId: clerkUserId } = useAuth()
   const [activeTab, setActiveTab] = useState<AppointmentTab>(tabParam === 'past' ? 'past' : 'upcoming')
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
 
   // Single source of truth, shared with the Home screen's Upcoming
   // Appointment widget — see hooks/usePatientAppointments.ts. `isLoading` is
@@ -719,6 +741,53 @@ export default function AppointmentsScreen() {
 
   const handleReschedule = (item: Appointment) => {
     setRescheduleTarget(item)
+  }
+
+  // Cancelling a paid, future ('scheduled') appointment converts its
+  // payment to consultation credit server-side (migration 104's fix to
+  // set_consultation_credit_on_decline) rather than forfeiting it — this was
+  // previously only reachable via admin support, which silently dropped the
+  // credit entirely.
+  const handleCancel = (item: Appointment) => {
+    if (cancellingId) return
+    Alert.alert(
+      'Cancel Appointment',
+      `Are you sure you want to cancel your appointment with ${item.doctorName}? Your payment will be converted to consultation credit you can use for a future booking.`,
+      [
+        { text: 'Keep Appointment', style: 'cancel' },
+        {
+          text: 'Cancel Appointment',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingId(item.id)
+            try {
+              const token = await getToken()
+              if (!token || !clerkUserId) throw new Error('Not authenticated')
+              const client = getAuthClient(token)
+              const { data: me } = await client
+                .from('users')
+                .select('id')
+                .eq('clerk_id', clerkUserId)
+                .maybeSingle()
+              if (!me) throw new Error('User not found')
+
+              const { error } = await client
+                .from('consultations')
+                .update({ status: 'cancelled', cancelled_by: me.id })
+                .eq('id', item.id)
+                .eq('status', 'scheduled')
+              if (error) throw error
+
+              Alert.alert('Appointment Cancelled', 'Your appointment has been cancelled and a consultation credit has been issued to your account.')
+            } catch {
+              Alert.alert('Cancellation Failed', 'Could not cancel your appointment. Please check your connection and try again.')
+            } finally {
+              setCancellingId(null)
+            }
+          },
+        },
+      ],
+    )
   }
 
   return (
@@ -824,7 +893,7 @@ export default function AppointmentsScreen() {
         }
         renderItem={({ item }) =>
           activeTab === 'upcoming' ? (
-            <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onWaitingRoom={handleWaitingRoom} onOpenDoctor={handleBookAgain} />
+            <UpcomingCard item={item} onJoin={handleJoin} onReschedule={handleReschedule} onCancel={handleCancel} onWaitingRoom={handleWaitingRoom} onOpenDoctor={handleBookAgain} />
           ) : (
             <PastCard
               item={item}

@@ -30,13 +30,15 @@ import { navigateFamilyRoute } from '@/lib/notificationNav'
 import { ghostDebug } from '@/lib/logger'
 import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
 import { useServerNow } from '@/lib/serverClock'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import {
   SLOT_DURATION_MINS,
-  formatTimeMins,
   isSlotPast,
   getAvailableSlots,
   getNextDays,
   parseScheduledAt,
+  ethiopiaDayRange,
+  formatSlotFromIso,
 } from '@/lib/slotGeneration'
 
 type ConsultationType = 'chat' | 'phone' | 'video'
@@ -210,16 +212,20 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       return
     }
     let cancelled = false
-    const dayStart = new Date(`${selectedDayValue}T00:00:00`)
-    const dayEnd = new Date(`${selectedDayValue}T23:59:59.999`)
+    // Ethiopia-anchored bounds, not device-local `T00:00:00` — every other
+    // slot-availability calculation in this file is anchored the same way
+    // (Phase-4 audit M2); using the device's own timezone here could show a
+    // free slot as "Booked" (or vice versa) for a patient whose device isn't
+    // set to Africa/Addis_Ababa.
+    const { startIso: dayStartIso, endIso: dayEndIso } = ethiopiaDayRange(selectedDayValue)
 
     const fetchBookedTimes = () => {
       supabase
         .from('slot_locks')
         .select('slot_start')
         .eq('doctor_id', doctor.id)
-        .gte('slot_start', dayStart.toISOString())
-        .lte('slot_start', dayEnd.toISOString())
+        .gte('slot_start', dayStartIso)
+        .lt('slot_start', dayEndIso)
         .gt('expires_at', new Date().toISOString())
         .then(({ data, error }) => {
           if (cancelled) return
@@ -228,10 +234,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
             return
           }
           setBookedTimes(new Set(
-            data.map((row: any) => {
-              const d = new Date(row.slot_start)
-              return formatTimeMins(d.getHours() * 60 + d.getMinutes())
-            })
+            data.map((row: any) => formatSlotFromIso(row.slot_start))
           ))
         })
     }
@@ -242,16 +245,15 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     // Another patient booking/cancelling the same day while this sheet is
     // already open must flip that slot's availability live — without this,
     // only re-opening the sheet (or changing day and back) picked it up.
-    const channel = supabase
-      .channel(`booking-slot-locks-${doctor.id}-${selectedDayValue}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctor.id}` },
-        () => fetchBookedTimes()
-      )
-      .subscribe()
+    // Stable per-doctor-per-day topic through the shared ref-counted manager
+    // (not a Date.now()-suffixed one-off channel) — Phase-4 audit M9.
+    const unsubscribe = subscribeRealtime(
+      `booking-slot-locks:${doctor.id}:${selectedDayValue}`,
+      [{ event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctor.id}` }],
+      () => fetchBookedTimes(),
+    )
 
-    return () => { cancelled = true; supabase.removeChannel(channel) }
+    return () => { cancelled = true; unsubscribe() }
   }, [visible, doctor?.id, timing, selectedDayValue])
 
   useEffect(() => {

@@ -26,7 +26,9 @@ import { DawaLogo } from '@/components/ui/DawaLogo'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { LANGUAGES } from '@/constants/languages'
+import { loginLimiter } from '@/lib/loginLimiter'
 import { markOAuthInFlight } from '@/lib/oauthResume'
+import { resolveAuthDestination } from '@/lib/resolveAuthDestination'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
@@ -78,16 +80,9 @@ export default function SignInScreen() {
     try {
       const token = await getToken()
       const client = token ? getAuthClient(token) : supabase
-      const { data } = await client.from('users').select('role').eq('clerk_id', clerkId).single()
-      if (data?.role === 'doctor') {
-        setUserRole('doctor')
-        router.replace('/(doctor)/(tabs)/home' as never)
-      } else if (data?.role === 'patient') {
-        setUserRole('patient')
-        router.replace('/(patient)/(tabs)/home' as never)
-      } else {
-        router.replace('/(auth)/role' as never)
-      }
+      const dest = await resolveAuthDestination(client, clerkId)
+      if (dest.role) setUserRole(dest.role)
+      router.replace(dest.route as never)
     } catch {
       if (localRole === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
       else if (localRole === 'patient') router.replace('/(patient)/(tabs)/home' as never)
@@ -139,11 +134,19 @@ export default function SignInScreen() {
     setLoading(true)
     intendingSignInRef.current = true
     try {
+      const limit = await loginLimiter.check(normalizedEmail)
+      if (!limit.allowed) {
+        setGlobalError(limit.message ?? 'Too many failed attempts. Please try again later.')
+        intendingSignInRef.current = false
+        return
+      }
+
       const result = await signIn!.create({
         identifier: normalizedEmail,
         password,
       })
       if (result.status === 'complete' && result.createdSessionId) {
+        await loginLimiter.recordSuccess(normalizedEmail)
         await setActive!({ session: result.createdSessionId })
         // The useEffect above handles redirect once isSignedIn/userId update from Clerk.
       } else {
@@ -152,6 +155,10 @@ export default function SignInScreen() {
     } catch (err: any) {
       const code: string = err?.errors?.[0]?.code ?? ''
       const msg: string = err?.errors?.[0]?.longMessage ?? err?.errors?.[0]?.message ?? ''
+      // session_exists isn't a failed credential attempt — don't count it against the limiter.
+      if (code !== 'session_exists') {
+        await loginLimiter.recordFailure(normalizedEmail)
+      }
       if (code === 'form_identifier_not_found') {
         setGlobalError('No account found with this email. Please sign up first.')
       } else if (code === 'form_password_incorrect') {

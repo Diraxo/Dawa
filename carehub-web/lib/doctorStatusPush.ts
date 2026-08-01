@@ -7,7 +7,12 @@ import { supabaseAdmin } from '@/lib/supabase/server'
 // Mirrors the pushMessage()/sendExpoPush() pattern already used by
 // supabase/functions/send-appointment-notification and
 // supabase/functions/handle-consultation-notification.
-export async function sendDoctorStatusPush(userId: string, title: string, body: string) {
+export async function sendDoctorStatusPush(
+  userId: string,
+  title: string,
+  body: string,
+  opts?: { screen?: string; prefColumn?: 'account' | 'earnings' },
+) {
   const { data: userRow } = await supabaseAdmin
     .from('users')
     .select('push_token')
@@ -17,12 +22,13 @@ export async function sendDoctorStatusPush(userId: string, title: string, body: 
   const pushToken = userRow?.push_token
   if (!pushToken) return
 
+  const prefColumn = opts?.prefColumn ?? 'account'
   const { data: prefs } = await supabaseAdmin
     .from('notification_preferences')
-    .select('account')
+    .select(prefColumn)
     .eq('user_id', userId)
     .maybeSingle()
-  if (prefs && prefs.account === false) return
+  if (prefs && (prefs as any)[prefColumn] === false) return
 
   try {
     await fetch('https://exp.host/--/api/v2/push/send', {
@@ -37,7 +43,7 @@ export async function sendDoctorStatusPush(userId: string, title: string, body: 
         channelId: 'account',
         title,
         body,
-        data: { screen: 'profile' },
+        data: { screen: opts?.screen ?? 'profile' },
         sound: 'default',
         priority: 'high',
         badge: 1,

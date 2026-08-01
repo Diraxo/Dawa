@@ -27,6 +27,7 @@ interface ConsultationRow {
   doctor_connected_at: string | null
   patient_connected_at: string | null
   patient_left_at: string | null
+  doctor_left_at: string | null
   doctor_reconnecting: boolean
   patient_reconnecting: boolean
 }
@@ -171,7 +172,7 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     const t = setInterval(() => {
       supabase
         .from('consultations')
-        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at, doctor_reconnecting, patient_reconnecting')
+        .select('status, started_at, doctor_connected_at, patient_connected_at, patient_left_at, doctor_left_at, doctor_reconnecting, patient_reconnecting')
         .eq('id', consultationId)
         .single()
         .then(
@@ -245,6 +246,31 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
       .then(() => {}, () => {})
   }, [consultationId, role])
 
+  // Doctor-only mirror of markSelfConnected/clearPatientLeft above — called
+  // from the doctor's call screens when the app backgrounds mid-call
+  // (markDoctorLeft) and when it returns to the foreground (clearDoctorLeft),
+  // so the patient's "Doctor Left" notification (migration 107) reflects a
+  // deliberate-enough signal rather than every brief reconnect blip, which
+  // doctor_reconnecting already covers for the live in-call UI.
+  const markDoctorLeft = useCallback(() => {
+    if (role !== 'doctor' || !consultationId) return
+    supabase
+      .from('consultations')
+      .update({ doctor_left_at: new Date().toISOString() })
+      .eq('id', consultationId)
+      .eq('status', 'in_progress')
+      .then(() => {}, () => {})
+  }, [consultationId, role])
+
+  const clearDoctorLeft = useCallback(() => {
+    if (role !== 'doctor' || !consultationId) return
+    supabase
+      .from('consultations')
+      .update({ doctor_left_at: null })
+      .eq('id', consultationId)
+      .then(() => {}, () => {})
+  }, [consultationId, role])
+
   return {
     phase: derived.phase,
     elapsedSeconds: derived.elapsedSeconds,
@@ -253,6 +279,8 @@ export function useConsultationState({ consultationId, role, localAgoraReconnect
     isPeerConnected: role === 'doctor' ? !!row?.patient_connected_at : !!row?.doctor_connected_at,
     markSelfConnected,
     clearPatientLeft,
+    markDoctorLeft,
+    clearDoctorLeft,
     patientHasLeft: !!row?.patient_left_at,
     rawStatus: row?.status ?? null,
   }

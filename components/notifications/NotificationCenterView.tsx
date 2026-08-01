@@ -44,6 +44,22 @@ const TYPE_META: Record<string, { icon: React.ComponentProps<typeof Ionicons>['n
   appointment_start:     { icon: 'alarm-outline',               color: colors.tealGreen },
   followup_reminder:     { icon: 'refresh-outline',             color: colors.interactiveBlue },
   doctor_approved:       { icon: 'shield-checkmark-outline',   color: colors.success },
+  doctor_connected:      { icon: 'videocam-outline',           color: colors.tealGreen },
+  doctor_left:           { icon: 'person-remove-outline',      color: colors.warning },
+  ended_abnormally:      { icon: 'alert-circle-outline',       color: colors.error },
+  doctor_delayed:        { icon: 'time-outline',                color: colors.warning },
+  rating_reminder:       { icon: 'star-outline',                color: '#F59E0B' },
+  payment_success:       { icon: 'checkmark-circle-outline',   color: colors.success },
+  payment_failed:        { icon: 'close-circle-outline',       color: colors.error },
+  password_changed:      { icon: 'shield-checkmark-outline',   color: colors.success },
+  profile_updated:       { icon: 'person-circle-outline',      color: colors.tealGreen },
+  withdrawal_approved:   { icon: 'cash-outline',                color: colors.success },
+  withdrawal_rejected:   { icon: 'cash-outline',                color: colors.error },
+  withdrawal_paid:       { icon: 'wallet-outline',              color: colors.tealGreen },
+  doctor_rejected:       { icon: 'close-circle-outline',        color: colors.error },
+  doctor_suspended:      { icon: 'ban-outline',                 color: colors.error },
+  doctor_reinstated:     { icon: 'shield-checkmark-outline',    color: colors.success },
+  document_update_reviewed: { icon: 'document-text-outline',    color: colors.careBlue },
 }
 const DEFAULT_META = { icon: 'notifications-outline' as const, color: colors.steelGrey }
 

@@ -111,21 +111,37 @@ export function ChangeEmailModal({
         return
       }
 
+      // Snapshot the current primary before changing anything — if the
+      // Supabase sync below fails, this lets us roll Clerk back to it. The
+      // old address is only destroyed once Supabase confirms the new email,
+      // so the two systems can never permanently disagree about the
+      // account's email.
+      const previousPrimaryId = user.primaryEmailAddress?.id ?? null
+
       await user.update({ primaryEmailAddressId: pendingAddress.id })
 
-      // Drop every other email address on the account so the new one is
-      // unambiguously the login email, matching the "new email becomes the
-      // login email" requirement.
+      const token = await getToken()
+      const { error: syncError } = token
+        ? await getAuthClient(token)
+            .from('users')
+            .update({ email: pendingAddress.emailAddress })
+            .eq('clerk_id', user.id)
+        : { error: new Error('Not authenticated') }
+
+      if (syncError) {
+        console.error('Failed to sync new email to Supabase, rolling back Clerk primary email:', syncError)
+        if (previousPrimaryId) {
+          await user.update({ primaryEmailAddressId: previousPrimaryId }).catch(() => {})
+        }
+        setError('Could not save your new email. Please try again.')
+        return
+      }
+
+      // Only safe to drop every other email address now that Supabase
+      // agrees — this is what makes the new one unambiguously the login
+      // email.
       const others = user.emailAddresses.filter((e) => e.id !== pendingAddress.id)
       await Promise.all(others.map((e) => e.destroy().catch(() => {})))
-
-      const token = await getToken()
-      if (token) {
-        await getAuthClient(token)
-          .from('users')
-          .update({ email: pendingAddress.emailAddress })
-          .eq('clerk_id', user.id)
-      }
 
       onSuccess(pendingAddress.emailAddress)
       reset()

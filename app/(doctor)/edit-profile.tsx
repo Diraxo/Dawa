@@ -31,10 +31,12 @@ import { colors } from '@/constants/colors'
 import { COUNTRIES, getFlag } from '@/constants/countries'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
+import { sanitize } from '@/lib/sanitize'
 import { getAuthClient, supabase } from '@/lib/supabase'
 
 function FormField({
@@ -151,6 +153,7 @@ export default function EditDoctorProfileScreen() {
   const { getToken } = useAuth()
   const router = useRouter()
   const { photoUrl: dbPhotoUrl, refresh: refreshPhoto } = useOwnProfilePhoto()
+  const guardNav = useNavGuard()
 
   const [firstName, setFirstName] = useState(user?.firstName ?? '')
   const [lastName, setLastName] = useState(user?.lastName ?? '')
@@ -251,6 +254,16 @@ export default function EditDoctorProfileScreen() {
       return
     }
 
+    if (!firstName.trim() || !lastName.trim()) {
+      Alert.alert('Error', 'Please enter your first and last name.')
+      return
+    }
+    const phoneDigits = phone.replace(/[^0-9]/g, '')
+    if (phone.trim() && (phoneDigits.length < 6 || /[^0-9+\-() ]/.test(phone.trim()))) {
+      Alert.alert('Error', 'Please enter a valid phone number.')
+      return
+    }
+
     setSaving(true)
     try {
       // Each concern is committed to its own system independently. If a later
@@ -258,11 +271,23 @@ export default function EditDoctorProfileScreen() {
       // committed (both remotely and in local `initial*` state) instead of
       // being silently retried or reported as if nothing saved — otherwise a
       // partial failure looks like data "reverting" on next load.
+      //
+      // The name itself is a two-phase write (Clerk, then mirrored onto
+      // users.full_name below) — `initial*` is only committed once BOTH
+      // sides agree, and if the users-table write fails, Clerk is rolled
+      // back to these captured values so the two systems can never
+      // permanently disagree about the doctor's name.
+      const previousFirstName = initialFirstName
+      const previousLastName = initialLastName
+      // Strip HTML/script-breakout characters before anything is persisted —
+      // this utility previously existed but was never wired up anywhere.
+      const cleanFirstName = sanitize.text(firstName)
+      const cleanLastName = sanitize.text(lastName)
+      const cleanBio = sanitize.text(bio)
+      const cleanHospitalName = sanitize.text(hospitalName)
       if (nameChanged) {
         try {
-          await user.update({ firstName, lastName })
-          setInitialFirstName(firstName)
-          setInitialLastName(lastName)
+          await user.update({ firstName: cleanFirstName, lastName: cleanLastName })
         } catch (e) {
           console.error('Failed to update name (Clerk):', e)
           throw new Error('Could not update your name. Please try again.')
@@ -278,18 +303,18 @@ export default function EditDoctorProfileScreen() {
       // storage or be able to surface a photo error.
       let profilePhotoUrl: string | null = null
       let photoUploadFailed = false
+      const avatarPath = `${user.id}/avatar.jpg`
       if (photoChanged) {
+        // Upload the new photo first (upsert overwrites avatar.jpg
+        // atomically) and only touch anything else once that succeeds — if
+        // upload fails, the existing avatar must be left completely alone.
+        // Cleanup of any stale differently-named files (older flows used
+        // different filenames) is deferred until after the DB row itself is
+        // updated below, so a crash mid-save can never leave the doctor with
+        // no photo at all.
         try {
-          // Remove any previously uploaded file(s) for this doctor first —
-          // different flows (registration vs. this screen) have historically
-          // used different filenames, which left orphaned duplicates behind.
-          const { data: existing } = await client.storage.from('profile-photos').list(user.id)
-          if (existing && existing.length > 0) {
-            await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
-          }
           const response = await fetch(localImageUri!)
           const arrayBuffer = await response.arrayBuffer()
-          const avatarPath = `${user.id}/avatar.jpg`
           const { error: uploadError } = await client.storage
             .from('profile-photos')
             .upload(avatarPath, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
@@ -306,7 +331,7 @@ export default function EditDoctorProfileScreen() {
         const { error: userError } = await client
           .from('users')
           .update({
-            full_name: `${firstName} ${lastName}`.trim(),
+            full_name: `${cleanFirstName} ${cleanLastName}`.trim(),
             phone,
             country,
             ...(profilePhotoUrl ? { profile_photo_url: profilePhotoUrl } : {}),
@@ -314,14 +339,38 @@ export default function EditDoctorProfileScreen() {
           .eq('clerk_id', user.id)
         if (userError) {
           console.error('Failed to update users row (phone/country/photo):', userError)
+          if (nameChanged) {
+            await user.update({ firstName: previousFirstName, lastName: previousLastName }).catch((e) => {
+              console.error('Failed to roll back Clerk name after users-table write failure:', e)
+            })
+          }
           throw new Error(
             phoneChanged
               ? 'Could not update your phone number. Please try again.'
               : 'Could not save your changes. Please try again.'
           )
         }
+        if (nameChanged) {
+          setInitialFirstName(cleanFirstName)
+          setInitialLastName(cleanLastName)
+        }
         setInitialPhone(phone)
         setInitialCountry(country)
+
+        if (profilePhotoUrl) {
+          // Only now that the new photo is uploaded and the DB row points
+          // at it is it safe to clean up any stale, differently-named files
+          // left behind by older flows (registration vs. this screen).
+          try {
+            const { data: existing } = await client.storage.from('profile-photos').list(user.id)
+            const stale = (existing ?? []).filter((f) => f.name !== 'avatar.jpg')
+            if (stale.length > 0) {
+              await client.storage.from('profile-photos').remove(stale.map((f) => `${user.id}/${f.name}`))
+            }
+          } catch (e) {
+            console.error('Failed to clean up stale profile photo file(s):', e)
+          }
+        }
       }
 
       // Professional-details update only runs when those fields actually
@@ -330,7 +379,7 @@ export default function EditDoctorProfileScreen() {
       if (professionalChanged) {
         const { data: updatedRows, error: profileError } = await client
           .from('doctor_profiles')
-          .update({ bio, hospital_name: hospitalName, languages })
+          .update({ bio: cleanBio, hospital_name: cleanHospitalName, languages })
           .eq('user_id', dbUserId)
           .select('id')
         if (profileError) {
@@ -341,15 +390,15 @@ export default function EditDoctorProfileScreen() {
           console.error('doctor_profiles update matched 0 rows for user_id:', dbUserId)
           throw new Error('Could not save your professional details. Please try again.')
         }
-        setInitialBio(bio)
-        setInitialHospitalName(hospitalName)
+        setInitialBio(cleanBio)
+        setInitialHospitalName(cleanHospitalName)
         setInitialLanguages(languages)
       }
 
       if (photoChanged) setLocalImageUri(null)
       refreshPhoto()
       if (profilePhotoUrl) pushOwnPhotoToStream(profilePhotoUrl)
-      if (nameChanged) pushOwnNameToStream(`${firstName} ${lastName}`.trim())
+      if (nameChanged) pushOwnNameToStream(`${cleanFirstName} ${cleanLastName}`.trim())
 
       if (photoChanged && photoUploadFailed) {
         Alert.alert('Saved with a Problem', 'Your profile was updated, but the photo failed to upload. Please try again.')
@@ -397,6 +446,11 @@ export default function EditDoctorProfileScreen() {
   }
 
   const displayImage = localImageUri ?? dbPhotoUrl ?? user?.imageUrl
+  // OAuth-provider avatar URLs (Clerk's imageUrl, when there's no uploaded
+  // photo) can expire or 404 without any DB-side signal — fall back to the
+  // initials placeholder instead of a permanently broken image.
+  const [avatarLoadFailed, setAvatarLoadFailed] = useState(false)
+  useEffect(() => { setAvatarLoadFailed(false) }, [displayImage])
   const initial = (firstName[0] ?? 'D').toUpperCase()
 
   return (
@@ -424,8 +478,12 @@ export default function EditDoctorProfileScreen() {
           {/* Avatar */}
           <View style={styles.avatarSection}>
             <Pressable style={styles.avatarWrap} onPress={() => setShowPhotoPicker(true)}>
-              {displayImage ? (
-                <Image source={{ uri: displayImage }} style={styles.avatar} />
+              {displayImage && !avatarLoadFailed ? (
+                <Image
+                  source={{ uri: displayImage }}
+                  style={styles.avatar}
+                  onError={() => setAvatarLoadFailed(true)}
+                />
               ) : (
                 <View style={styles.avatarFallback}>
                   <Text style={styles.avatarInitial}>{initial}</Text>
@@ -483,7 +541,7 @@ export default function EditDoctorProfileScreen() {
             </Pressable>
           </View>
 
-          <Pressable style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]} onPress={handleSave} disabled={saving}>
+          <Pressable style={({ pressed }) => [styles.saveWrap, pressed && { opacity: 0.88 }]} onPress={guardNav(handleSave)} disabled={saving}>
             <LinearGradient colors={gradients.interactive} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.saveGrad}>
               <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save Changes'}</Text>
             </LinearGradient>

@@ -28,6 +28,8 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { LANGUAGES } from '@/constants/languages'
 import { markOAuthInFlight } from '@/lib/oauthResume'
+import { otpLimiter } from '@/lib/otpLimiter'
+import { resolveAuthDestination } from '@/lib/resolveAuthDestination'
 import { shadow } from '@/lib/shadow'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
@@ -80,10 +82,8 @@ export default function SignUpScreen() {
     redirectingRef.current = true
     try {
       // Always query Supabase — if the row was deleted, send to role selection
-      const { data } = await supabase.from('users').select('role').eq('clerk_id', clerkId).single()
-      if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
-      else if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-      else router.replace('/(auth)/role' as never)
+      const dest = await resolveAuthDestination(supabase, clerkId)
+      router.replace(dest.route as never)
     } catch {
       // Supabase unreachable (network error) — fall back to cached role
       if (localRole === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
@@ -158,6 +158,12 @@ export default function SignUpScreen() {
     }
     if (!valid) return
 
+    const limit = await otpLimiter.canRequest(normalizedEmail)
+    if (!limit.allowed) {
+      setEmailError(limit.message ?? 'Please wait before requesting another code.')
+      return
+    }
+
     setLoading(true)
     try {
       const nameParts = fullName.trim().split(/\s+/)
@@ -165,6 +171,7 @@ export default function SignUpScreen() {
       const lastName = nameParts.slice(1).join(' ') || undefined
       await signUp.create({ emailAddress: normalizedEmail, password, firstName, ...(lastName && { lastName }) })
       await signUp.prepareEmailAddressVerification({ strategy: 'email_code' })
+      await otpLimiter.recordRequest(normalizedEmail)
       router.push({
         pathname: '/(auth)/verify',
         params: { email: normalizedEmail, type: 'signup' },

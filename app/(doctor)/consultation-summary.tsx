@@ -36,6 +36,7 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { images } from '@/constants/images'
 import { useNavGuard } from '@/hooks/useNavGuard'
+import { stripDrPrefix } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
 import { getAuthClient } from '@/lib/supabase'
 
@@ -196,7 +197,7 @@ export default function DoctorConsultationSummaryScreen() {
             const { data: dp } = await getAuthClient(token)
               .from('doctor_profiles').select('id, specialty').eq('user_id', (ud as any).id).single()
             if (dp) setDoctorProfileId((dp as any).id)
-            const rawDoctorName = ((ud as any).full_name ?? user.fullName ?? '').replace(/^Dr\.?\s*/i, '').trim()
+            const rawDoctorName = stripDrPrefix((ud as any).full_name ?? user.fullName ?? '')
             setDoctorReportInfo({
               name: rawDoctorName ? `Dr. ${rawDoctorName}` : 'Doctor',
               specialty: (dp as any)?.specialty ?? '',

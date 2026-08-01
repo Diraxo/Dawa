@@ -24,10 +24,12 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
+import { useDoctorPresenceHeartbeat } from '@/hooks/useDoctorPresenceHeartbeat'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
 import { callkeep } from '@/lib/callkeep'
 import { ghostDebug } from '@/lib/logger'
+import { stripDrPrefix } from '@/lib/nameFormat'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { ethiopiaTodayRange, SLOT_DURATION_MINS } from '@/lib/slotGeneration'
 import { shadow } from '@/lib/shadow'
@@ -108,7 +110,7 @@ export default function DoctorHomeScreen() {
   const { unreadCount } = useNotificationCenter(dbUserId)
 
   const rawFirstName = user?.firstName ?? user?.fullName?.split(' ')[0] ?? 'Doctor'
-  const firstName = rawFirstName.replace(/^Dr\.?\s*/i, '').trim() || 'Doctor'
+  const firstName = stripDrPrefix(rawFirstName) || 'Doctor'
 
   const [schedule, setSchedule] = useState<ScheduleItem[]>([])
   // Today's Schedule must drop an expired, never-started item purely because
@@ -132,6 +134,7 @@ export default function DoctorHomeScreen() {
   const [dashboardLoadError, setDashboardLoadError] = useState<string | null>(null)
   const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
   const { isOnline, setIsOnline, toggling: togglingOnline, toggle: toggleOnline } = useDoctorOnlineToggle(doctorProfileId, { resyncOnForeground: true })
+  useDoctorPresenceHeartbeat(doctorProfileId, isOnline)
   const guardNav = useNavGuard()
 
   // Re-run whenever a consultation change comes in over Realtime (see the

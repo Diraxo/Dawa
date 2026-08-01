@@ -93,6 +93,29 @@ export function ethiopiaTodayRange(): { startIso: string; endIso: string } {
   return { startIso: start.toISOString(), endIso: end.toISOString() }
 }
 
+// Same [start, end) UTC-instant construction as ethiopiaTodayRange(), for a
+// caller-supplied YYYY-MM-DD calendar date instead of only "today" — for
+// querying rows (e.g. slot_locks) that fall within one specific Ethiopia
+// calendar day.
+export function ethiopiaDayRange(dayValue: string): { startIso: string; endIso: string } {
+  const [year, month, day] = dayValue.split('-').map(Number)
+  const start = new Date(Date.UTC(year, month - 1, day, -3, 0, 0))
+  const end = new Date(Date.UTC(year, month - 1, day + 1, -3, 0, 0))
+  return { startIso: start.toISOString(), endIso: end.toISOString() }
+}
+
+// Re-labels an already-known instant (e.g. a booked slot_locks.slot_start)
+// back into this file's "HH:MM AM/PM" slot format, anchored to Ethiopia
+// wall-clock time via the same Intl-based derivation as nowInEthiopia()
+// rather than the device's own getHours()/getMinutes() — the inverse of
+// parseScheduledAt(). Booked-slot display previously used the device-local
+// components here, so a patient whose device timezone isn't Ethiopia's could
+// see a free slot mislabeled "Booked" or vice versa (Phase-4 audit M2).
+export function formatSlotFromIso(iso: string): string {
+  const { hour, minute } = nowInEthiopia(new Date(iso).getTime())
+  return formatTimeMins(hour * 60 + minute)
+}
+
 // Adds `days` to a YYYY-MM-DD calendar date via UTC arithmetic (never a
 // device-local Date), so day rollover can't be nudged by the device's own
 // timezone either.

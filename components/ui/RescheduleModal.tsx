@@ -18,13 +18,15 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useServerNow } from '@/lib/serverClock'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import {
   SLOT_DURATION_MINS,
-  formatTimeMins,
   isSlotPast,
   getAvailableSlots,
   getNextDays,
   parseScheduledAt,
+  ethiopiaDayRange,
+  formatSlotFromIso,
   type Availability,
 } from '@/lib/slotGeneration'
 
@@ -107,20 +109,19 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
     // Doctor editing working hours/blocked dates while this sheet is open
     // must update the offered dates/slots live — this modal previously
     // fetched availability once and never picked up a schedule change until
-    // re-opened, unlike BookingModal's parent-fed live doctor prop.
-    const channel = supabase
-      .channel(`reschedule-doctor-availability-${doctorId}-${Date.now()}`)
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorId}` },
-        (payload) => {
-          if (cancelled) return
-          setAvailability((payload.new as any)?.availability ?? null)
-        }
-      )
-      .subscribe()
+    // re-opened, unlike BookingModal's parent-fed live doctor prop. Stable
+    // per-doctor topic through the shared ref-counted manager (not a
+    // Date.now()-suffixed one-off channel) — Phase-4 audit M9.
+    const unsubscribe = subscribeRealtime(
+      `reschedule-doctor-availability:${doctorId}`,
+      [{ event: 'UPDATE', schema: 'public', table: 'doctor_profiles', filter: `id=eq.${doctorId}` }],
+      (_event, payload) => {
+        if (cancelled) return
+        setAvailability((payload.new as any)?.availability ?? null)
+      },
+    )
 
-    return () => { cancelled = true; supabase.removeChannel(channel) }
+    return () => { cancelled = true; unsubscribe() }
   }, [visible, appointment?.doctorId])
 
   // Which generated time slots for the selected day are already booked —
@@ -131,25 +132,23 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
       return
     }
     let cancelled = false
-    const dayStart = new Date(`${selectedDayValue}T00:00:00`)
-    const dayEnd = new Date(`${selectedDayValue}T23:59:59.999`)
+    // Ethiopia-anchored bounds, not device-local `T00:00:00` — matches
+    // BookingModal's identical fix (Phase-4 audit M2).
+    const { startIso: dayStartIso, endIso: dayEndIso } = ethiopiaDayRange(selectedDayValue)
 
     const fetchBookedTimes = () => {
       supabase
         .from('slot_locks')
         .select('slot_start')
         .eq('doctor_id', appointment.doctorId)
-        .gte('slot_start', dayStart.toISOString())
-        .lte('slot_start', dayEnd.toISOString())
+        .gte('slot_start', dayStartIso)
+        .lt('slot_start', dayEndIso)
         .gt('expires_at', new Date().toISOString())
         .then(({ data, error }) => {
           if (cancelled) return
           if (error || !data) { setBookedTimes(new Set()); return }
           setBookedTimes(new Set(
-            data.map((row: any) => {
-              const d = new Date(row.slot_start)
-              return formatTimeMins(d.getHours() * 60 + d.getMinutes())
-            })
+            data.map((row: any) => formatSlotFromIso(row.slot_start))
           ))
         })
     }
@@ -159,24 +158,18 @@ export function RescheduleModal({ visible, appointment, onClose, onRescheduled }
     // Another patient booking/cancelling the same day while this sheet is
     // open must flip that slot's availability live — mirrors BookingModal's
     // identical subscription (this modal previously fetched once and never
-    // updated until re-opened).
-    // Guards against the recurring stale-channel race (see history) —
-    // selectedDayValue changes on every day-picker tap, and tapping back to a
-    // previously-selected day can re-run this effect before the prior
-    // mount's async removeChannel() for that same topic has finished.
-    const rescheduleTopic = `reschedule-slot-locks-${appointment.doctorId}-${selectedDayValue}`
-    const staleReschedule = supabase.getChannels().find((c) => c.topic === `realtime:${rescheduleTopic}`)
-    if (staleReschedule) supabase.removeChannel(staleReschedule)
-    const channel = supabase
-      .channel(rescheduleTopic)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${appointment.doctorId}` },
-        () => fetchBookedTimes()
-      )
-      .subscribe()
+    // updated until re-opened). Shared ref-counted manager (not a raw
+    // supabase.channel()) so a same-tick unmount+remount for the same
+    // doctor/day (day-picker tap back-and-forth) reuses the still-live
+    // channel instead of racing removeChannel()'s async unsubscribe —
+    // Phase-4 audit M9.
+    const unsubscribe = subscribeRealtime(
+      `reschedule-slot-locks:${appointment.doctorId}:${selectedDayValue}`,
+      [{ event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${appointment.doctorId}` }],
+      () => fetchBookedTimes(),
+    )
 
-    return () => { cancelled = true; supabase.removeChannel(channel) }
+    return () => { cancelled = true; unsubscribe() }
   }, [visible, appointment?.doctorId, selectedDayValue])
 
   const slots = availability ? getAvailableSlots(availability, selectedDayValue ?? '') : []

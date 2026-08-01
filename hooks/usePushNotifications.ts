@@ -7,7 +7,8 @@ import { useUser } from '@clerk/clerk-expo'
 
 import { supabase } from '@/lib/supabase'
 import { registerCallTokens } from '@/lib/voipPush'
-import { reclaimTokenFromOtherUsers } from '@/lib/pushTokens'
+import { reclaimTokenFromOtherUsers, upsertDevice } from '@/lib/pushTokens'
+import { getOrCreateDeviceId } from '@/lib/deviceId'
 import { logger } from '@/lib/logger'
 import { useActiveConsultationScreenStore } from '@/store/activeConsultationScreenStore'
 
@@ -240,6 +241,20 @@ async function _register(clerkUserId: string, onPermissionDenied: () => void) {
 
     if (error) {
       logger.warn('[PushNotifications] Failed to save push_token:', error.message)
+    }
+
+    // Additive multi-device registration (migration 109, Phase-5 audit H4) —
+    // does not replace the legacy write above, which both notification edge
+    // functions still fall back to for any device that hasn't registered
+    // here yet.
+    if (Platform.OS === 'ios' || Platform.OS === 'android') {
+      const deviceId = await getOrCreateDeviceId()
+      await upsertDevice({
+        deviceId,
+        platform: Platform.OS,
+        expoPushToken: pushToken,
+        appVersion: Constants.expoConfig?.version ?? null,
+      })
     }
 
     // Register the platform-native device token with Stream Chat so Stream

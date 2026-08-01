@@ -1,5 +1,10 @@
 // React Native has no DOM, so we strip HTML with regex instead of DOMPurify.
-const DANGEROUS_CHARS = /[<>"'`]/g;
+// Deliberately excludes the single quote: it's the only one of these
+// characters that shows up in otherwise-legitimate input (names like
+// "O'Brien"/"D'Angelo", contractions in bio text, addresses like "O'Malley
+// Ave") — stripping it would corrupt real data for no injection-safety
+// benefit once <, >, ", and ` are already gone.
+const DANGEROUS_CHARS = /[<>"`]/g;
 const HTML_TAG = /<[^>]*>/g;
 const SAFE_RICH_TAGS = /(<\/?(p|br|strong|em|ul|ol|li)\b[^>]*>)/gi;
 

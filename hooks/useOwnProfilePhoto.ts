@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useAuth } from '@clerk/clerk-expo'
 import { useCallback, useEffect, useState } from 'react'
+import { AppState } from 'react-native'
 
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
@@ -68,6 +69,19 @@ export function useOwnProfilePhoto() {
 
   useEffect(() => {
     refresh()
+  }, [refresh])
+
+  // Realtime alone misses any change made while this device's socket was
+  // suspended in the background (the OS drops the connection, and missed
+  // events aren't retroactively redelivered on reconnect) — re-fetch once on
+  // every foreground return so a photo changed elsewhere while backgrounded
+  // shows up immediately instead of only on next remount. Mirrors
+  // useDoctorOnlineToggle's resyncOnForeground.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refresh()
+    })
+    return () => sub.remove()
   }, [refresh])
 
   useEffect(() => {

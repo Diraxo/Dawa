@@ -437,6 +437,25 @@ export default function DoctorPhoneConsultationScreen() {
     return () => sub.remove()
   }, [callStatus, consultationId, displayName, patientUserId, patientPhotoUrl])
 
+  // ── Patient-facing "Doctor Left" notification (migration 107) ────────────
+  // Isolated from the effect above on purpose — only ever writes
+  // doctor_left_at, never touches the notification-scheduling logic it
+  // manages. Fires once per backgrounding (the presence trigger only
+  // notifies on the NULL -> NOT NULL transition), clears on return. Not
+  // gated to iOS-only like the effect above — the underlying DB write has no
+  // platform dependency.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const inCall = callStatus === 'connected' || callStatus === 'reconnecting'
+      if (nextState === 'background' && inCall) {
+        state.markDoctorLeft()
+      } else if (nextState === 'active' && inCall) {
+        state.clearDoctorLeft()
+      }
+    })
+    return () => sub.remove()
+  }, [callStatus, state.markDoctorLeft, state.clearDoctorLeft])
+
   // ── Token fetch ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!channelName) return
