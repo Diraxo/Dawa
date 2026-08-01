@@ -124,7 +124,7 @@ function ResetPasswordContent() {
 
         <button
           type="submit"
-          disabled={!isFormReady || loading}
+          disabled={!isLoaded || !isFormReady || loading}
           className="btn-primary w-full disabled:opacity-50"
         >
           {loading ? 'Resetting…' : 'Reset Password →'}

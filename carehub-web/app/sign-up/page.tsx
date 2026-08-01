@@ -216,7 +216,7 @@ export default function SignUpPage() {
 
         <button
           type="submit"
-          disabled={!isFormReady || loading}
+          disabled={!suLoaded || !isFormReady || loading}
           className="btn-primary w-full disabled:opacity-50"
         >
           {loading ? 'Creating account…' : 'Continue →'}
@@ -232,7 +232,7 @@ export default function SignUpPage() {
       <div className="flex flex-col gap-3">
         <button
           onClick={handleGoogle}
-          disabled={oauthLoading}
+          disabled={!suLoaded || oauthLoading}
           className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-60"
         >
           {googleLoading ? (

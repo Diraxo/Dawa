@@ -71,7 +71,7 @@ export default function ForgotPasswordPage() {
 
         <button
           type="submit"
-          disabled={!isValidEmail(email) || loading}
+          disabled={!isLoaded || !isValidEmail(email) || loading}
           className="btn-primary w-full disabled:opacity-50"
         >
           {loading ? 'Sending code…' : 'Send Reset Code →'}

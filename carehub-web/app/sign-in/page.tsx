@@ -177,8 +177,8 @@ export default function SignInPage() {
 
         <button
           type="submit"
-          disabled={loading || !isFormReady}
-          aria-disabled={loading || !isFormReady}
+          disabled={!isLoaded || loading || !isFormReady}
+          aria-disabled={!isLoaded || loading || !isFormReady}
           className="btn-primary w-full disabled:opacity-50"
         >
           {loading ? 'Signing in…' : 'Sign In →'}
@@ -194,7 +194,7 @@ export default function SignInPage() {
       <div className="flex flex-col gap-3">
         <button
           onClick={handleGoogle}
-          disabled={oauthLoading}
+          disabled={!isLoaded || oauthLoading}
           className="btn-outline w-full flex items-center gap-3 justify-center disabled:opacity-60"
         >
           {googleLoading ? (

@@ -171,7 +171,7 @@ function VerifyContent() {
 
       <button
         onClick={() => handleVerify()}
-        disabled={loading || code.join('').length < 6}
+        disabled={(type === 'signup' ? !suLoaded : !siLoaded) || loading || code.join('').length < 6}
         className="btn-primary w-full disabled:opacity-50"
       >
         {loading ? 'Verifying…' : 'Continue →'}
