@@ -51,13 +51,14 @@ import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import * as ImagePicker from 'expo-image-picker'
-import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
+import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString, waitForInteractions } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
 import { getPersistedCameraOff, setPersistedCameraOff, clearPersistedCameraOff } from '@/lib/callCameraStorage'
 import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
@@ -687,6 +688,17 @@ export default function DoctorVideoConsultationScreen() {
         // Speaking-indicator pulse — 300ms updates, smoothed over 3 samples,
         // with local voice-activity detection enabled.
         try { engine!.enableAudioVolumeIndication(300, 3, true) } catch {}
+        // This screen (unlike the patient's, which sits on a ringing/waiting
+        // screen first) mounts its local self-view canvas immediately on
+        // push — startPreview() must wait for the push transition to fully
+        // settle first, or the freshly-created SurfaceView/TextureView can
+        // report ready before Android has actually attached its Surface,
+        // silently dropping the first frames. See waitForInteractions in
+        // lib/agora.ts.
+        if (cameraGranted) {
+          await waitForInteractions()
+          if (!mounted) return
+        }
         // Agora's own RtcSurfaceView docs (see AgoraRtcRenderView.d.ts) state
         // that, before joining a channel, startPreview() must be called
         // BEFORE enableVideo() for the local preview canvas to bind frames —
@@ -919,6 +931,48 @@ export default function DoctorVideoConsultationScreen() {
     }
     setShowEndSheet(true)
   }
+
+  // Accidental back-press (hardware back / iOS swipe-back / header back) must
+  // never silently drop the doctor out of a live consultation, but it also
+  // must not force open the full End Consultation summary form the way the
+  // visible red hang-up button (handleEnd above) does. Mirrors the doctor
+  // phone screen's handleLeaveScreen and the patient's "Leave Call": stays
+  // in_progress, only signals the peer via the same markDoctorLeft the
+  // AppState-background path already uses, and the doctor can rejoin by
+  // re-opening this same screen at any time.
+  const handleLeaveScreen = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
+    const isCallActive = state.phase === 'on_call' || state.phase === 'reconnecting' || state.phase === 'waiting_for_patient'
+    if (!isCallActive) {
+      Alert.alert('Cancel Call', 'Cancel this outgoing call?', [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Cancel Call', style: 'destructive',
+          onPress: () => {
+            try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
+            setActive(null)
+            confirmExit(goToConsultations)
+          },
+        },
+      ])
+      return
+    }
+    showSimpleAlert('confirm', 'Leave Call', 'The consultation stays active — you can come back anytime.', [
+      { text: 'Stay', style: 'outline', onPress: () => setSimpleAlert(null) },
+      {
+        text: 'Leave', style: 'danger',
+        onPress: () => {
+          setSimpleAlert(null)
+          state.markDoctorLeft()
+          try { getAgoraEngine()?.stopPreview(); getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
+          confirmExit(goToConsultations)
+        },
+      },
+    ])
+  }
+  const handleLeaveScreenRef = useRef(handleLeaveScreen)
+  handleLeaveScreenRef.current = handleLeaveScreen
+  const { confirmExit } = useConsultationBackGuard(state.phase !== 'ended', () => handleLeaveScreenRef.current(), channelName)
 
   const isConnecting = callStatus === 'connecting'
 

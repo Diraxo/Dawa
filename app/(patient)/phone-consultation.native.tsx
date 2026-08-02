@@ -45,6 +45,7 @@ import { callkeep } from '@/lib/callkeep'
 import { logger } from '@/lib/logger'
 import { formatDoctorName } from '@/lib/nameFormat'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
@@ -898,11 +899,19 @@ export default function PhoneConsultationScreen() {
           // pointed at this same consultation, so reopening the app or
           // tapping the ongoing-call notification takes the patient straight
           // back in.
-          goToAppointments()
+          confirmExit(goToAppointments)
         },
       },
     ])
   }
+
+  const handleEndRef = useRef(handleEnd)
+  handleEndRef.current = handleEnd
+  // Hardware back (Android) and the cross-platform navigation-removal event
+  // (iOS swipe-back/header-back, any programmatic back) previously bypassed
+  // this "Leave Call" confirmation entirely and silently popped the stack —
+  // now both route through the same already-correct handleEnd flow above.
+  const { confirmExit } = useConsultationBackGuard(state.phase !== 'ended', () => handleEndRef.current(), channelName)
 
   const netLabel = networkQuality === 0 ? '' : networkQuality <= 2 ? 'Excellent' : networkQuality <= 4 ? 'Good' : 'Poor'
   const netColor = networkQuality <= 2 ? colors.success : networkQuality <= 4 ? colors.warning : colors.error

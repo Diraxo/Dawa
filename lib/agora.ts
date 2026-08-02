@@ -1,3 +1,5 @@
+import { InteractionManager } from 'react-native'
+
 // Pre-load react-native-agora at module level so any TurboModule crash is caught
 // here rather than propagating uncaught during Expo Router's route-tree build.
 // In Expo Go or unlinked builds the native side isn't registered; _rna stays null
@@ -55,6 +57,24 @@ export async function fetchAgoraToken(
   if (!res.ok) throw new Error(`Agora token fetch failed: ${res.status}`)
   const { token } = await res.json()
   return token as string
+}
+
+// react-native-screens' native-stack push transition keeps the incoming
+// screen's Android Fragment mid-transaction for the duration of the
+// animation — a SurfaceView/TextureView that mounts and calls
+// engine.startPreview()/enableVideo() while that transaction is still in
+// flight can report itself "ready" to Agora before the OS has actually
+// attached its Surface, so the very first camera frames get dropped and
+// nothing re-triggers a redraw until something (e.g. switchCamera, which
+// stops+restarts capture) forces the SDK to rebind. Screens that mount their
+// local preview immediately on push (no intervening ringing/waiting screen
+// to absorb the transition) are the ones exposed to this race. Awaiting
+// runAfterInteractions before touching the camera guarantees the push
+// transition (registered with InteractionManager by react-navigation) has
+// fully settled first, regardless of how fast permission checks/token
+// fetches happen to resolve.
+export function waitForInteractions(): Promise<void> {
+  return new Promise(resolve => InteractionManager.runAfterInteractions(() => resolve()))
 }
 
 // djb2 hash → stable uint32 UID for Agora (full uint32 range avoids collisions)

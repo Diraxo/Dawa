@@ -169,6 +169,9 @@ const so: TranslationKeys = {
   endedChats: 'Dhammaaday',
   noMessages: 'Weli fariin ma jirto',
   noMessagesDesc: 'Bilow la-tashiga si aad u xarriiqdo',
+  messagesConnectionError: 'Xiriirku wuu fashilmay',
+  messagesConnectionErrorDesc: 'Lama xiriiri karin fariimaha. Hubi xiriirkaaga internetka oo isku day mar kale.',
+  retry: 'Isku day mar kale',
 
   // Doctor tabs
   consultationsTab: 'La-tashiyaadka',

@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons'
 import { Tabs } from 'expo-router'
+import { ActivityIndicator, View } from 'react-native'
 
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
+import { useConsultationPresenceStore } from '@/store/consultationPresenceStore'
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name']
 
@@ -28,6 +30,23 @@ export default function PatientTabsLayout() {
   // all times — a second copy here just raced the same query/navigation and
   // could redirect twice for the same status transition (seen as a
   // "duplicate consultation" for the patient).
+  //
+  // What IS read here is that recovery's synchronous cache of "does this
+  // patient currently have an active consultation" (consultationPresenceStore) —
+  // landing on any tab (e.g. a chat-message notification tapped while a video
+  // call is still ongoing) previously showed that tab's content for as long
+  // as the parent's DB round trip took before it redirected back, a visible
+  // flash. Blocking on the cached flag instead means the redirect the parent
+  // is already about to perform never has anything to visibly interrupt.
+  const hasActiveConsultation = useConsultationPresenceStore((s) => s.hasActiveConsultation)
+
+  if (hasActiveConsultation) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mistWhite }}>
+        <ActivityIndicator color={colors.tealGreen} />
+      </View>
+    )
+  }
 
   return (
     <Tabs

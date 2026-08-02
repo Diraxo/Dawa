@@ -23,6 +23,12 @@ Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req)
   if (req.method === 'OPTIONS') return new Response(null, { headers: cors })
 
+  const json = (data: unknown, status: number) =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { ...cors, 'Content-Type': 'application/json' },
+    })
+
   const body = await req.json().catch(() => null)
   if (!body?.operation || !body?.identifier) {
     return json({ error: 'Missing required fields' }, 400)
@@ -135,11 +141,4 @@ async function recordFailure(
     },
     { onConflict: 'identifier,attempt_type' },
   )
-}
-
-function json(data: unknown, status: number) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...cors, 'Content-Type': 'application/json' },
-  })
 }

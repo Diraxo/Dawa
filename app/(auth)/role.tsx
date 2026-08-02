@@ -30,6 +30,26 @@ import { useDoctorStore } from '@/store/doctorStore'
 
 type Role = 'patient' | 'doctor'
 
+// Clerk's Supabase JWT template tokens are short-lived (~60s). A token
+// prefetched on mount can still be sitting in prefetchedTokenRef by the time
+// the user taps Continue — decode its `exp` claim so we never hand PostgREST
+// a token that's already dead (or about to die mid-flight), which it rejects
+// as PGRST303 "JWT expired" rather than falling back to anon like a missing
+// token would.
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(decodeURIComponent(escape(atob(base64))))
+  } catch {
+    return null
+  }
+}
+
+function isJwtFreshEnough(token: string, bufferMs = 5000): boolean {
+  const json = decodeJwtPayload(token)
+  return !!json && typeof json.exp === 'number' && json.exp * 1000 - bufferMs > Date.now()
+}
+
 // ─── Illustration components ──────────────────────────────────────────────────
 
 function PatientIllustration() {
@@ -101,6 +121,14 @@ export default function RoleScreen() {
   // batched, so two taps fired in the same tick both still see the old
   // `loading === false` and would otherwise both upsert the profile row.
   const submittingRef = useRef(false)
+  // Warms Clerk's token cache in the background from the moment this screen
+  // mounts (right after sign-up/SSO), instead of only reaching for a token
+  // when Continue is tapped. That gives the race described in handleContinue
+  // the entire time the user spends looking at the two role cards to resolve
+  // on its own — Google/Apple SSO users often land here and tap within a
+  // second, which wasn't a wide enough window for the on-tap retry alone to
+  // reliably cover on real devices.
+  const prefetchedTokenRef = useRef<string | null>(null)
 
   useEffect(() => {
     supabaseEmailAuth.auth.getSession().then(({ data: { session } }) => {
@@ -122,10 +150,41 @@ export default function RoleScreen() {
           .select('role')
           .eq('clerk_id', user.id)
           .single()
-        if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-        else if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+        // Must set the store's role before navigating — (patient)/_layout.tsx
+        // and (doctor)/_layout.tsx guard on userRole matching their segment
+        // and have no grace period for "signed in but role still null", so
+        // landing on tabs without this bounces straight back out to sign-in
+        // (which then resolves the role itself and sends the user back here
+        // a second later — reads as the tab silently returning to Home).
+        if (data?.role === 'patient') {
+          setUserRole('patient')
+          router.replace('/(patient)/(tabs)/home' as never)
+        } else if (data?.role === 'doctor') {
+          setUserRole('doctor')
+          router.replace('/(doctor)/(tabs)/home' as never)
+        }
       } catch {}
     })()
+  }, [userLoaded, user?.id, setUserRole])
+
+  useEffect(() => {
+    if (!userLoaded || !user?.id) return
+    let cancelled = false
+    ;(async () => {
+      for (const delay of [0, 400, 800, 1200, 1600]) {
+        if (cancelled) return
+        if (delay) await new Promise((r) => setTimeout(r, delay))
+        try {
+          const token = await getToken({ skipCache: true })
+          if (token) {
+            prefetchedTokenRef.current = token
+            return
+          }
+        } catch {}
+      }
+      if (!cancelled) console.warn('[role] token prefetch never resolved after mount retries')
+    })()
+    return () => { cancelled = true }
   }, [userLoaded, user?.id])
 
   useEffect(() => {
@@ -139,11 +198,19 @@ export default function RoleScreen() {
           .select('role')
           .eq('clerk_id', supaUser.id)
           .single()
-        if (data?.role === 'patient') router.replace('/(patient)/(tabs)/home' as never)
-        else if (data?.role === 'doctor') router.replace('/(doctor)/(tabs)/home' as never)
+        // See the matching comment in the Clerk-user effect above — the
+        // store's role must be set before navigating into tabs, or the
+        // layout guard bounces this straight back out.
+        if (data?.role === 'patient') {
+          setUserRole('patient')
+          router.replace('/(patient)/(tabs)/home' as never)
+        } else if (data?.role === 'doctor') {
+          setUserRole('doctor')
+          router.replace('/(doctor)/(tabs)/home' as never)
+        }
       } catch {}
     })()
-  }, [supaUserLoaded, supaUser?.id, userLoaded, user])
+  }, [supaUserLoaded, supaUser?.id, userLoaded, user, setUserRole])
 
   // ── Toggle + bounce animation ─────────────────────────────────────────────
   const bounce = (anim: Animated.Value, select: boolean) => {
@@ -197,13 +264,33 @@ export default function RoleScreen() {
       // nothing to return and falls back to the (unrelated, unauthenticated)
       // Supabase-native session. That sends this upsert as `anon`, which the
       // users_insert_own RLS policy rejects with 42501. Fetching the token
-      // directly here — the same pattern sign-in.tsx and
-      // oauth-native-callback.tsx already use for this exact race — avoids
-      // depending on that effect having fired yet.
+      // directly here avoids depending on that effect having fired yet —
+      // but plain getToken() also has its own race: right after setActive(),
+      // Clerk's in-memory token cache can still return a stale `null` for a
+      // brief window. A single fixed-delay retry wasn't a reliable enough
+      // bound on that window (the 42501 kept recurring under real device
+      // conditions even after that landed), so this polls skipCache with
+      // short backoff for up to ~2.4s total before giving up.
       let client = supabase
+      let usedToken: string | null = null
       if (isClerkUser) {
-        const token = await getToken()
-        if (token) client = getAuthClient(token)
+        let token: string | null =
+          prefetchedTokenRef.current && isJwtFreshEnough(prefetchedTokenRef.current)
+            ? prefetchedTokenRef.current
+            : null
+        if (!token) {
+          for (const delay of [0, 300, 400, 500, 600, 600]) {
+            if (delay) await new Promise((r) => setTimeout(r, delay))
+            token = await getToken({ skipCache: true })
+            if (token) break
+          }
+        }
+        if (token) {
+          usedToken = token
+          client = getAuthClient(token)
+        } else {
+          console.warn('[role] no Clerk token available at submit time — upsert will go out unauthenticated and is expected to 42501')
+        }
       }
       const record = isClerkUser
         ? {
@@ -231,6 +318,22 @@ export default function RoleScreen() {
         // diagnosable, and only show the connection message when the error
         // actually looks like a network failure.
         console.error('[role] users upsert failed:', upsertError)
+        if (upsertError.code === '42501') {
+          // The two prior fixes (retry loop, then prefetch-on-mount) both
+          // targeted "no token yet" — but that path logs its own warning
+          // just above and this is a 42501 anyway, so a token was handed to
+          // PostgREST. Log what was actually in it: if `sub` doesn't match
+          // the row's clerk_id, or `role` isn't 'authenticated', the RLS
+          // rejection is happening for a reason neither prior fix addresses.
+          const claims = usedToken ? decodeJwtPayload(usedToken) : null
+          console.error('[role] 42501 with token present — full decoded payload:', {
+            hasToken: !!usedToken,
+            expectedClerkId: user?.id,
+            subMatchesClerkId: claims?.sub === user?.id,
+            nowSec: Math.floor(Date.now() / 1000),
+            claims,
+          })
+        }
         const msg = upsertError.message?.toLowerCase() ?? ''
         const isNetworkError = msg.includes('network') || msg.includes('fetch') || !upsertError.code
         // A stale `users` row from a previous account (deleted via Clerk

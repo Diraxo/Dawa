@@ -1,21 +1,26 @@
 import { useAuth } from '@clerk/clerk-expo'
 import { useEffect, useRef } from 'react'
+import { Platform } from 'react-native'
 
 import { getAuthClient } from '@/lib/supabase'
+import { getOrCreateDeviceId } from '@/lib/deviceId'
 
-const INTERVAL_MS = 60_000
+const INTERVAL_MS = 30_000
 
 /**
- * Touches doctor_profiles.last_seen_at every 60s while the doctor is online
- * — migration 042 added this column for a server-side stale-doctor sweep,
- * but migration 060 removed that sweep (and every other auto-offline
- * mechanism) as a deliberate product decision: is_online must never change
- * except via an explicit Go Offline action. That migration never left a
- * writer behind, so last_seen_at has been frozen/NULL ever since, silently
- * breaking the "recently online" doctor sort (patient home, carehub-web
- * patient page). This only ever writes a timestamp — it must never read
- * back is_online or flip it, so it cannot reintroduce any auto-offline
- * behavior.
+ * Calls update_doctor_heartbeat() every 30s while the doctor is online —
+ * migration 113 turns this into the input for server-side Away detection
+ * (get_doctor_presence()): is_online stays the doctor's own explicit
+ * preference and is never auto-flipped, but a doctor whose heartbeat goes
+ * stale for 2+ minutes now reads as 'away' to patients and is blocked from
+ * new On-Demand bookings, without ever touching is_online itself. The write
+ * goes through a SECURITY DEFINER RPC (not a direct table update) so
+ * last_seen_at is always server time — a client-supplied timestamp could
+ * otherwise be used to fake perpetual availability, defeating the point.
+ * Tagged with platform='mobile' so this staleness rule only ever applies to
+ * doctors who have used the app — carehub-web has no equivalent writer, so a
+ * web-only doctor's last_seen_platform stays null and their presence keeps
+ * resolving exactly as before this migration.
  */
 export function useDoctorPresenceHeartbeat(doctorProfileId: string | null, isOnline: boolean) {
   const { getToken } = useAuth()
@@ -32,12 +37,12 @@ export function useDoctorPresenceHeartbeat(doctorProfileId: string | null, isOnl
 
     async function ping() {
       try {
-        const token = await getToken()
+        const [token, deviceId] = await Promise.all([getToken(), getOrCreateDeviceId()])
         if (!token || !doctorProfileId) return
-        await getAuthClient(token)
-          .from('doctor_profiles')
-          .update({ last_seen_at: new Date().toISOString() })
-          .eq('id', doctorProfileId)
+        await getAuthClient(token).rpc('update_doctor_heartbeat', {
+          p_device: deviceId,
+          p_platform: Platform.OS,
+        })
       } catch {
         // Network failure — next tick will retry. Do not throw.
       }

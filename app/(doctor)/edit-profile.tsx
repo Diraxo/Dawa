@@ -33,11 +33,11 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
-import { waitForModalDismiss } from '@/lib/imagePicker'
+import { prepareImageForUpload, UnsupportedImageFormatError, waitForModalDismiss } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { sanitize } from '@/lib/sanitize'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { deleteProfilePhotos, getAuthClient, supabase, uploadProfilePhoto } from '@/lib/supabase'
 
 function FormField({
   label,
@@ -165,6 +165,7 @@ export default function EditDoctorProfileScreen() {
   const [languages, setLanguages] = useState<string[]>([])
   const [showLanguagePicker, setShowLanguagePicker] = useState(false)
   const [localImageUri, setLocalImageUri] = useState<string | null>(null)
+  const [localImageMimeType, setLocalImageMimeType] = useState<string | null>(null)
   const [showPhotoPicker, setShowPhotoPicker] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -230,7 +231,10 @@ export default function EditDoctorProfileScreen() {
         return
       }
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.8 })
-      if (!result.canceled && result.assets[0]) setLocalImageUri(result.assets[0].uri)
+      if (!result.canceled && result.assets[0]) {
+        setLocalImageUri(result.assets[0].uri)
+        setLocalImageMimeType(result.assets[0].mimeType ?? null)
+      }
     } catch (e) {
       console.error('Gallery picker failed:', e)
       Alert.alert('Error', 'Could not open the photo library. Please try again.')
@@ -303,27 +307,20 @@ export default function EditDoctorProfileScreen() {
       // storage or be able to surface a photo error.
       let profilePhotoUrl: string | null = null
       let photoUploadFailed = false
-      const avatarPath = `${user.id}/avatar.jpg`
+      let photoUploadErrorMessage: string | null = null
       if (photoChanged) {
-        // Upload the new photo first (upsert overwrites avatar.jpg
+        // Upload the new photo first (upsert overwrites avatar.<ext>
         // atomically) and only touch anything else once that succeeds — if
         // upload fails, the existing avatar must be left completely alone.
-        // Cleanup of any stale differently-named files (older flows used
-        // different filenames) is deferred until after the DB row itself is
-        // updated below, so a crash mid-save can never leave the doctor with
-        // no photo at all.
+        // The edge function itself cleans up any stale differently-named
+        // file left behind by an older flow or format switch.
         try {
-          const response = await fetch(localImageUri!)
-          const arrayBuffer = await response.arrayBuffer()
-          const { error: uploadError } = await client.storage
-            .from('profile-photos')
-            .upload(avatarPath, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
-          if (uploadError) throw uploadError
-          const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(avatarPath)
-          profilePhotoUrl = `${urlData.publicUrl}?v=${Date.now()}`
+          const prepared = await prepareImageForUpload(localImageUri!, localImageMimeType)
+          profilePhotoUrl = await uploadProfilePhoto(token, prepared.buffer, prepared.mimeType)
         } catch (e) {
           console.error('Failed to upload profile photo:', e)
           photoUploadFailed = true
+          if (e instanceof UnsupportedImageFormatError) photoUploadErrorMessage = e.message
         }
       }
 
@@ -356,21 +353,6 @@ export default function EditDoctorProfileScreen() {
         }
         setInitialPhone(phone)
         setInitialCountry(country)
-
-        if (profilePhotoUrl) {
-          // Only now that the new photo is uploaded and the DB row points
-          // at it is it safe to clean up any stale, differently-named files
-          // left behind by older flows (registration vs. this screen).
-          try {
-            const { data: existing } = await client.storage.from('profile-photos').list(user.id)
-            const stale = (existing ?? []).filter((f) => f.name !== 'avatar.jpg')
-            if (stale.length > 0) {
-              await client.storage.from('profile-photos').remove(stale.map((f) => `${user.id}/${f.name}`))
-            }
-          } catch (e) {
-            console.error('Failed to clean up stale profile photo file(s):', e)
-          }
-        }
       }
 
       // Professional-details update only runs when those fields actually
@@ -395,13 +377,19 @@ export default function EditDoctorProfileScreen() {
         setInitialLanguages(languages)
       }
 
-      if (photoChanged) setLocalImageUri(null)
+      if (photoChanged) {
+        setLocalImageUri(null)
+        setLocalImageMimeType(null)
+      }
       refreshPhoto()
       if (profilePhotoUrl) pushOwnPhotoToStream(profilePhotoUrl)
       if (nameChanged) pushOwnNameToStream(`${cleanFirstName} ${cleanLastName}`.trim())
 
       if (photoChanged && photoUploadFailed) {
-        Alert.alert('Saved with a Problem', 'Your profile was updated, but the photo failed to upload. Please try again.')
+        Alert.alert(
+          'Saved with a Problem',
+          photoUploadErrorMessage ?? 'Your profile was updated, but the photo failed to upload. Please try again.'
+        )
       } else {
         Alert.alert('Saved', 'Your profile has been updated.')
       }
@@ -432,12 +420,10 @@ export default function EditDoctorProfileScreen() {
       const token = await getToken()
       if (!token) throw new Error('No token')
       const client = getAuthClient(token)
-      const { data: existing } = await client.storage.from('profile-photos').list(user.id)
-      if (existing && existing.length > 0) {
-        await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
-      }
+      await deleteProfilePhotos(token)
       await client.from('users').update({ profile_photo_url: null }).eq('clerk_id', user.id)
       setLocalImageUri(null)
+      setLocalImageMimeType(null)
       refreshPhoto()
       pushOwnPhotoToStream(null)
     } catch {

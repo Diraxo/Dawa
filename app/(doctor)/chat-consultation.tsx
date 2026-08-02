@@ -74,6 +74,7 @@ import { markChannelReadLocally } from '@/lib/readCache'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
@@ -246,10 +247,29 @@ export default function DoctorChatConsultationScreen() {
   // chat-then-back cycle in a session, growing JS-thread contention from the
   // pile of orphaned listeners that delayed live message delivery elsewhere.
   // Only cold-start/deep-link entry (no prior screen) has nothing to pop to.
-  const handleBack = () => {
+  const goBack = () => {
     if (router.canGoBack()) router.back()
     else router.replace('/(doctor)/(tabs)/messages' as never)
   }
+
+  // Mirrors the patient chat screen's "Leave Consultation?" confirm — this
+  // screen previously had no confirmation and no back-press guard at all
+  // (Android hardware back and iOS swipe-back/header-back both silently
+  // popped the stack), the exact inconsistency between doctor/patient and
+  // chat/voice/video screens flagged as a release blocker.
+  const handleBack = () => {
+    if (!ended) {
+      showSimpleAlert('confirm', 'Leave Consultation?', 'You can rejoin from the Consultations tab.', [
+        { text: 'Stay', style: 'outline', onPress: () => setSimpleAlert(null) },
+        { text: 'Leave', style: 'danger', onPress: () => { setSimpleAlert(null); confirmExit(goBack) } },
+      ])
+    } else {
+      goBack()
+    }
+  }
+  const handleBackRef = useRef(handleBack)
+  handleBackRef.current = handleBack
+  const { confirmExit } = useConsultationBackGuard(!ended, () => handleBackRef.current(), effectiveChannelId)
 
   // Auto-clear: reaching this chat directly (tab nav, deep link, resume)
   // rather than by tapping the notification still means it's been "handled"

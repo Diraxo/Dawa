@@ -22,6 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
 import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 import { Doctor } from '@/components/ui/DoctorCard'
+import { DoctorPresence } from '@/lib/doctorPresence'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
@@ -143,6 +144,11 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   const [creditLoading, setCreditLoading] = useState(false)
   const [doctorBusy, setDoctorBusy] = useState(false)
   const [doctorScheduledSoon, setDoctorScheduledSoon] = useState(false)
+  // Authoritative — mirrors get_doctor_presence() (migration 113), the same
+  // function book_appointment_slot() checks server-side before payment.
+  // doctor.is_online alone is stale/untrustworthy: it doesn't reflect a
+  // doctor whose app died/backgrounded past the heartbeat timeout.
+  const [doctorPresence, setDoctorPresence] = useState<DoctorPresence | 'busy'>('offline')
   const [conflictAlert, setConflictAlert] = useState<{
     visible: boolean
     variant: AlertVariant
@@ -159,7 +165,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   const days = getNextDays(14, doctor?.availability ?? undefined, nowMs)
   const selectedDayValue = days[selectedDay]?.value
 
-  const canStartNow = Boolean(doctor?.is_online) && !doctorBusy && !doctorScheduledSoon
+  const canStartNow = doctorPresence === 'available' && !doctorBusy && !doctorScheduledSoon
 
   // Doctor is BUSY when they already have an accepted/in-progress consultation.
   // Checked via RPC (not a direct table read) so a patient never needs SELECT
@@ -167,6 +173,14 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
   const checkDoctorBusy = async (doctorId: string) => {
     const { data } = await supabase.rpc('is_doctor_busy', { p_doctor_id: doctorId })
     return Boolean(data)
+  }
+
+  // Server-authoritative presence — 'available' | 'away' | 'offline' | 'busy'.
+  // 'away' means the toggle is on but the doctor's mobile heartbeat has gone
+  // stale for 2+ minutes (migration 113); treated the same as offline here.
+  const checkDoctorPresence = async (doctorId: string): Promise<DoctorPresence | 'busy'> => {
+    const { data } = await supabase.rpc('get_doctor_presence', { p_doctor_id: doctorId })
+    return (data as DoctorPresence | 'busy') ?? 'offline'
   }
 
   // Doctor has a scheduled consultation starting within the configurable
@@ -189,6 +203,7 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
     const refresh = () => {
       checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
       checkDoctorScheduledSoon(doctor.id).then(soon => { if (!cancelled) setDoctorScheduledSoon(soon) })
+      checkDoctorPresence(doctor.id).then(presence => { if (!cancelled) setDoctorPresence(presence) })
     }
     refresh()
     const interval = setInterval(refresh, 10_000)
@@ -459,12 +474,31 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
       if (userErr || !userData) throw new Error('Could not find your user profile.')
       patientUserId = userData.id
 
-      // Final busy/scheduled-soon re-check right before payment — the
-      // periodic poll above could be stale by up to 10s, and the patient
+      // Final presence/busy/scheduled-soon re-check right before payment —
+      // the periodic poll above could be stale by up to 10s, and the patient
       // must never be charged for an On-Demand consultation with a doctor
-      // who became unavailable in that window. book_appointment_slot() also
-      // enforces both server-side (DOCTOR_BUSY / DOCTOR_SCHEDULED_SOON
-      // below) as the authoritative last-resort guard.
+      // who became unavailable (including going Away) in that window.
+      // book_appointment_slot() also enforces all of this server-side as the
+      // authoritative last-resort guard.
+      if (timing === 'now') {
+        const presence = await checkDoctorPresence(doctor.id)
+        setDoctorPresence(presence)
+        if (presence === 'away' || presence === 'offline') {
+          showConflictAlert(
+            'warning',
+            'Doctor Unavailable',
+            presence === 'away'
+              ? 'This doctor appears to be away right now. Please try again shortly or choose another doctor.'
+              : 'This doctor is currently offline. Please choose another doctor.',
+            [
+              { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+              { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
+            ],
+          )
+          return
+        }
+      }
+
       if (timing === 'now' && await checkDoctorBusy(doctor.id)) {
         setDoctorBusy(true)
         showConflictAlert(
@@ -994,13 +1028,15 @@ export function BookingModal({ visible, doctor, onClose, initialStep, initialCon
                   <Ionicons name="flash" size={22} color={timing === 'now' ? colors.mistWhite : colors.tealGreen} />
                   <Text style={[styles.timingLabel, timing === 'now' && styles.timingLabelSelected]}>On-Demand</Text>
                   <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>
-                    {!doctor.is_online
+                    {doctorPresence === 'offline'
                       ? 'Doctor Offline'
-                      : doctorBusy
-                        ? 'In Another Consultation'
-                        : doctorScheduledSoon
-                          ? 'Scheduled Appointment Soon'
-                          : 'Start Now'}
+                      : doctorPresence === 'away'
+                        ? 'Doctor Away'
+                        : doctorBusy
+                          ? 'In Another Consultation'
+                          : doctorScheduledSoon
+                            ? 'Scheduled Appointment Soon'
+                            : 'Start Now'}
                   </Text>
                 </Pressable>
                 <Pressable

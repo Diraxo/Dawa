@@ -9,7 +9,8 @@ import { logger } from '@/lib/logger'
 export function useStreamConnection() {
   const { isSignedIn, getToken } = useAuth()
   const { user } = useUser()
-  const { setUser, connectStream, disconnectStream, isStreamConnected } = useAuthStore()
+  const { setUser, connectStream, disconnectStream, isStreamConnected, streamConnectRetryTick } =
+    useAuthStore()
   const connectingRef = useRef(false)
 
   // The client's own connection state can drop silently (backgrounding,
@@ -36,23 +37,40 @@ export function useStreamConnection() {
 
     const connect = async () => {
       connectingRef.current = true
+      useAuthStore.setState({ streamConnectionError: false })
       try {
         const clerkToken = await getToken()
-        if (!clerkToken) return
+        if (!clerkToken) {
+          useAuthStore.setState({ streamConnectionError: true })
+          return
+        }
 
         const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!
-        const res = await fetch(
-          `${supabaseUrl}/functions/v1/generate-stream-token`,
-          {
+        // Bare fetch() never times out on its own — a stalled request (dead
+        // wifi, cold-starting edge function) would otherwise leave
+        // `connectingRef` true and `isStreamConnected` false forever, with
+        // no error surfaced, which is exactly what left screens gated on
+        // isStreamConnected spinning indefinitely.
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 15000)
+        let res: Response
+        try {
+          res = await fetch(`${supabaseUrl}/functions/v1/generate-stream-token`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${clerkToken}`,
             },
-          }
-        )
+            signal: controller.signal,
+          })
+        } finally {
+          clearTimeout(timeout)
+        }
 
-        if (!res.ok) return
+        if (!res.ok) {
+          useAuthStore.setState({ streamConnectionError: true })
+          return
+        }
 
         const { token } = await res.json() as { token: string; userId: string }
 
@@ -79,11 +97,12 @@ export function useStreamConnection() {
         await connectStream(token)
       } catch (err) {
         logger.error('[Stream] connection failed:', err)
+        useAuthStore.setState({ streamConnectionError: true })
       } finally {
         connectingRef.current = false
       }
     }
 
     connect()
-  }, [isSignedIn, user?.id])
+  }, [isSignedIn, user?.id, streamConnectRetryTick])
 }

@@ -175,6 +175,9 @@
   endedChats: 'Ended',
   noMessages: 'No messages yet',
   noMessagesDesc: 'Start a consultation to begin chatting',
+  messagesConnectionError: 'Connection failed',
+  messagesConnectionErrorDesc: "Couldn't connect to messages. Check your internet connection and try again.",
+  retry: 'Retry',
 
   // Doctor tabs
   consultationsTab: 'Consultations',

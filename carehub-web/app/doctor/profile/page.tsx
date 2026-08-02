@@ -3,7 +3,7 @@
 import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { deleteProfilePhotos, getAuthClient, supabase, uploadProfilePhoto } from '@/lib/supabase'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { stripDrPrefix } from '@/lib/utils'
 import VerifiedBadge from '@/components/ui/VerifiedBadge'
@@ -183,15 +183,8 @@ export default function DoctorProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      // Path must be clerk_id/filename so the RLS foldername policy passes
-      // (storage.foldername(name)[1] = clerk_id) — matches mobile convention.
-      const path = `${user.id}/avatar.jpg`
 
-      const { error: uploadError } = await client.storage.from('profile-photos').upload(path, file, { upsert: true, contentType: 'image/jpeg' })
-      if (uploadError) throw uploadError
-
-      const { data: { publicUrl } } = client.storage.from('profile-photos').getPublicUrl(path)
-      const cacheBustedUrl = `${publicUrl}?v=${Date.now()}`
+      const cacheBustedUrl = await uploadProfilePhoto(token, file, 'image/jpeg')
       await client.from('users').update({ profile_photo_url: cacheBustedUrl }).eq('id', userRowId)
 
       setPhotoRemoved(false)
@@ -214,10 +207,7 @@ export default function DoctorProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      const { data: existing } = await client.storage.from('profile-photos').list(user.id)
-      if (existing && existing.length > 0) {
-        await client.storage.from('profile-photos').remove(existing.map(f => `${user.id}/${f.name}`))
-      }
+      await deleteProfilePhotos(token)
       await client.from('users').update({ profile_photo_url: null }).eq('id', userRowId)
 
       setPhotoRemoved(true)

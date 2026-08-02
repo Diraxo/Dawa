@@ -243,7 +243,7 @@ export default function WaitingRoomScreen() {
                 doctorPhotoUrl:   doctorInfoRef.current?.photoUrl ?? '',
               },
             })
-          } else if (newStatus === 'declined') {
+          } else if (newStatus === 'declined' || newStatus === 'doctor_missed') {
             navigated.current = true
             AsyncStorage.removeItem(PENDING_KEY)
             // Fetch credit details from DB and show credit UI in-place
@@ -312,7 +312,7 @@ export default function WaitingRoomScreen() {
             doctorPhotoUrl:   doctorInfoRef.current?.photoUrl ?? '',
           },
         })
-      } else if (s === 'declined') {
+      } else if (s === 'declined' || s === 'doctor_missed') {
         navigated.current = true
         AsyncStorage.removeItem(PENDING_KEY)
         supabase

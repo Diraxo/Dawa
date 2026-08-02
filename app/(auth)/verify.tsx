@@ -50,6 +50,19 @@ export default function VerifyScreen() {
   // state) is required since state updates are batched and wouldn't be
   // visible to the second synchronous call yet.
   const verifyingRef = useRef(false)
+  // Once verification succeeds and navigation is kicked off, no further call
+  // may re-run it — RN's controlled OTPInput hidden TextInput can fire
+  // onChangeText more than once for the identical final code (a known RN
+  // quirk around autofill/suggestion-bar dismissal and Android IME composing
+  // events), and OTPInput.handleChangeText always builds a brand-new array
+  // even when the digits are unchanged. That defeats `verifyingRef` alone
+  // (already reset to false by the first call's `finally` block) and used to
+  // let a stray duplicate event re-run attemptEmailAddressVerification —
+  // which Clerk can resolve again as `status: 'complete'` with the same
+  // session — triggering a second router.replace('/(auth)/role') stacked on
+  // top of the first, which is what produced the repeated slide-in Role
+  // screens and the broken back button.
+  const hasSucceededRef = useRef(false)
 
   // ── Countdown timer ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -63,7 +76,7 @@ export default function VerifyScreen() {
 
   // ── Verify OTP ────────────────────────────────────────────────────────────
   const verifyCode = async (codeStr: string) => {
-    if (verifyingRef.current) return
+    if (verifyingRef.current || hasSucceededRef.current) return
     verifyingRef.current = true
     setLoading(true)
     setError('')
@@ -71,6 +84,7 @@ export default function VerifyScreen() {
       if (flowType === 'signup' && suLoaded && signUp) {
         const result = await signUp.attemptEmailAddressVerification({ code: codeStr })
         if (result.status === 'complete' && result.createdSessionId) {
+          hasSucceededRef.current = true
           await suSetActive!({ session: result.createdSessionId })
           router.replace('/(auth)/role' as never)
         } else {
@@ -83,6 +97,7 @@ export default function VerifyScreen() {
           code: codeStr,
         })
         if (result.status === 'needs_new_password') {
+          hasSucceededRef.current = true
           router.replace({
             pathname: '/(auth)/reset-password',
             params: { email: email ?? '' },
@@ -118,13 +133,22 @@ export default function VerifyScreen() {
     setError('')
   }
 
-  // Auto-submit as soon as all 6 digits are filled
+  // Auto-submit as soon as all 6 digits are filled. Depends on the joined
+  // *string*, not the `code` array — OTPInput's hidden TextInput can fire
+  // onChangeText more than once for the identical final code (autofill /
+  // suggestion-bar / IME quirks), and OTPInput.handleChangeText always
+  // builds a brand-new array even when the digits are unchanged. An
+  // array-identity dependency treated that duplicate event as a "change" and
+  // re-ran verifyCode after the first call had already succeeded and reset
+  // verifyingRef in its `finally` — a string dependency makes a byte-for-byte
+  // duplicate a real no-op.
+  const codeStr = code.join('')
   useEffect(() => {
-    if (code.every((d) => d !== '') && !loading) {
-      verifyCode(code.join(''))
+    if (codeStr.length === CODE_LENGTH && !loading) {
+      verifyCode(codeStr)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code])
+  }, [codeStr])
 
   // ── Resend OTP ────────────────────────────────────────────────────────────
   const handleResend = async () => {

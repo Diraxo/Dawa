@@ -25,7 +25,7 @@ async function call(
       },
       body: JSON.stringify({ operation, identifier, attempt_type: 'login', options }),
     })
-    return res.json()
+    return await res.json()
   } catch {
     // Fail open — never block login if the edge function is unreachable
     return { allowed: true, remainingAttempts: 5 }

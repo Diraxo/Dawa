@@ -59,7 +59,7 @@ export default function MessagesScreen() {
   const { t } = useTranslation()
   const router = useRouter()
   const guardNav = useNavGuard()
-  const { isStreamConnected, userId } = useAuthStore()
+  const { isStreamConnected, userId, streamConnectionError, retryStreamConnection } = useAuthStore()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [loading, setLoading] = useState(false)
@@ -498,6 +498,19 @@ export default function MessagesScreen() {
     )
   }
 
+  const ConnectionErrorState = (
+    <View style={styles.emptyWrap}>
+      <View style={styles.emptyIcon}>
+        <Ionicons name="cloud-offline-outline" size={48} color={colors.steelGrey} />
+      </View>
+      <Text style={styles.emptyTitle}>{t('messagesConnectionError')}</Text>
+      <Text style={styles.emptySub}>{t('messagesConnectionErrorDesc')}</Text>
+      <Pressable style={styles.retryButton} onPress={retryStreamConnection} hitSlop={8}>
+        <Text style={styles.retryButtonText}>{t('retry')}</Text>
+      </Pressable>
+    </View>
+  )
+
   const EmptyState = (
     <View style={styles.emptyWrap}>
       <View style={styles.emptyIcon}>
@@ -509,7 +522,7 @@ export default function MessagesScreen() {
       <Text style={styles.emptySub}>
         {searchQuery
           ? `No conversations match "${searchQuery}"`
-          : !isStreamConnected
+          : !userId
           ? 'Sign in to see your consultations.'
           : t('noMessagesDesc')}
       </Text>
@@ -553,8 +566,21 @@ export default function MessagesScreen() {
         </View>
       </View>
 
-      {/* ── Conversation list ── */}
-      {loading && conversations.length === 0 ? (
+      {/* ── Conversation list ──
+          `!isStreamConnected` is folded into the spinner condition (not just
+          `loading`) so it covers the brief post-cold-start window before the
+          chat socket reconnects — `userId` persists across restarts and is
+          the real "signed in" signal; isStreamConnected resetting to false
+          on every launch shouldn't by itself read as "no conversations yet".
+          `streamConnectionError` is checked first and separately: a failed
+          connection attempt is not retried automatically (see
+          useStreamConnection), so without this branch `isStreamConnected`
+          stays false forever and the spinner above would too — a brand-new
+          account with zero conversations and a flaky first connection would
+          never see anything but a spinner. */}
+      {streamConnectionError && conversations.length === 0 ? (
+        ConnectionErrorState
+      ) : (loading || !isStreamConnected) && conversations.length === 0 ? (
         <View style={styles.centerWrap}>
           <ActivityIndicator color={colors.careBlue} size="large" />
         </View>
@@ -681,5 +707,17 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
     lineHeight: 21,
+  },
+  retryButton: {
+    marginTop: 8,
+    backgroundColor: colors.careBlue,
+    borderRadius: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+  },
+  retryButtonText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 14,
+    color: colors.mistWhite,
   },
 })

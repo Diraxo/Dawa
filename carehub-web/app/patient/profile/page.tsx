@@ -3,7 +3,7 @@
 import { useUser, useAuth, useClerk } from '@clerk/nextjs'
 import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { deleteProfilePhotos, getAuthClient, supabase, uploadProfilePhoto } from '@/lib/supabase'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
 import { getInitials } from '@/lib/utils'
 import { COUNTRIES } from '@/lib/countries'
@@ -128,14 +128,8 @@ export default function PatientProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      // Path must be clerk_id/filename so the RLS foldername policy passes
-      // (storage.foldername(name)[1] = clerk_id) — matches mobile convention.
-      const path = `${user.id}/avatar.jpg`
 
-      const { error: uploadError } = await client.storage.from('profile-photos').upload(path, file, { upsert: true, contentType: 'image/jpeg' })
-      if (uploadError) throw uploadError
-
-      const { data: { publicUrl } } = client.storage.from('profile-photos').getPublicUrl(path)
+      const publicUrl = await uploadProfilePhoto(token, file, 'image/jpeg')
       await client.from('users').update({ profile_photo_url: publicUrl }).eq('id', userId)
 
       setPhotoRemoved(false)
@@ -157,10 +151,9 @@ export default function PatientProfilePage() {
       const token = await getToken()
       if (!token) return
       const client = getAuthClient(token)
-      const path = `${user.id}/avatar.jpg`
 
       // Best-effort — a missing/already-deleted file must not block clearing the DB field.
-      await client.storage.from('profile-photos').remove([path]).catch(() => {})
+      await deleteProfilePhotos(token).catch(() => {})
       await client.from('users').update({ profile_photo_url: null }).eq('id', userId)
 
       // Deliberately falls back to the default initials avatar, not Clerk's photo.

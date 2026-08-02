@@ -54,7 +54,7 @@ import { SpeakingPulse } from '@/components/consultation/SpeakingPulse'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import * as ImagePicker from 'expo-image-picker'
-import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString } from '@/lib/agora'
+import { fetchAgoraToken, getAgoraEngine, releaseAgoraEngine, uidFromString, waitForInteractions } from '@/lib/agora'
 import { getPersistedMute, setPersistedMute, clearPersistedMute } from '@/lib/callMuteStorage'
 import { getPersistedCameraOff, setPersistedCameraOff, clearPersistedCameraOff } from '@/lib/callCameraStorage'
 import { getAuthClient, supabase } from '@/lib/supabase'
@@ -71,6 +71,7 @@ import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
 import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
 
@@ -827,6 +828,20 @@ export default function VideoConsultationScreen() {
         // Speaking-indicator pulse — 300ms updates, smoothed over 3 samples,
         // with local voice-activity detection enabled.
         try { engine!.enableAudioVolumeIndication(300, 3, true) } catch {}
+        // Normally this screen sits on the ringing/waiting-room screen first,
+        // which gives the push transition plenty of time to settle before
+        // the self-view canvas ever mounts. But answering via CallKeep (OS
+        // call screen) or resuming an already-answered call
+        // (skipRinging/resumeElapsed) mounts the self-view canvas immediately
+        // on push, same as the doctor's screen — startPreview() must wait for
+        // that push transition to fully settle first, or the freshly-created
+        // SurfaceView/TextureView can report ready before Android has
+        // actually attached its Surface, silently dropping the first frames.
+        // See waitForInteractions in lib/agora.ts.
+        if (cameraGranted) {
+          await waitForInteractions()
+          if (!mounted) return
+        }
         // Agora's own RtcSurfaceView docs (see AgoraRtcRenderView.d.ts) state
         // that, before joining a channel, startPreview() must be called
         // BEFORE enableVideo() for the local preview canvas to bind frames —
@@ -1028,11 +1043,19 @@ export default function VideoConsultationScreen() {
           // in app/_layout.tsx) pointed at this same consultation, so
           // reopening the app or tapping the ongoing-call notification takes
           // the patient straight back in instead of to a "call ended" screen.
-          goToAppointments()
+          confirmExit(goToAppointments)
         },
       },
     ])
   }
+
+  const handleEndRef = useRef(handleEnd)
+  handleEndRef.current = handleEnd
+  // Hardware back (Android) and the cross-platform navigation-removal event
+  // (iOS swipe-back/header-back, any programmatic back) previously bypassed
+  // this "Leave Call" confirmation entirely and silently popped the stack —
+  // now both route through the same already-correct handleEnd flow above.
+  const { confirmExit } = useConsultationBackGuard(state.phase !== 'ended', () => handleEndRef.current(), channelName)
 
   // Ring pulse animation
   const ringPulse = useRef(new Animated.Value(1)).current

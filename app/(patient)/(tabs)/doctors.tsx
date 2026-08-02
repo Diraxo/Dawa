@@ -19,6 +19,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { usePatientDoctors } from '@/hooks/usePatientDoctors'
+import { computeDoctorPresence } from '@/lib/doctorPresence'
 import { shadow } from '@/lib/shadow'
 import { useTranslation } from 'react-i18next'
 
@@ -34,7 +35,7 @@ export default function DoctorsScreen() {
   // Single source of truth, shared with the Home screen's "Available
   // Now"/"Top Rated" widgets — see hooks/usePatientDoctors.ts. `isLoading` is
   // only ever true before the first fetch has resolved.
-  const { doctors: allDoctors, isLoading, refresh } = usePatientDoctors()
+  const { doctors: allDoctors, isLoading, presenceTick, refresh } = usePatientDoctors()
 
   // Tab screens stay mounted across tab switches, so the hook's own realtime
   // subscription (UPDATE-only) never sees a newly-approved doctor appear —
@@ -70,10 +71,16 @@ export default function DoctorsScreen() {
         d.subtitle?.toLowerCase().includes(q)
       )
     }
-    // Online doctors always first
-    list.sort((a, b) => (b.is_online !== a.is_online ? (b.is_online ? 1 : -1) : 0))
+    // Available doctors first, then Away, then Offline — presence, not just
+    // the raw is_online toggle, so a doctor whose heartbeat has gone stale
+    // no longer outranks a genuinely available one.
+    const presenceRank = { available: 0, away: 1, offline: 2 } as const
+    list.sort((a, b) => presenceRank[computeDoctorPresence(a)] - presenceRank[computeDoctorPresence(b)])
     return list
-  }, [searchQuery, allDoctors])
+  // presenceTick forces a re-sort when only the derived presence (not the
+  // underlying doctors array) has changed — see hooks/usePatientDoctors.ts.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, allDoctors, presenceTick])
 
   const handleViewProfile = guardNav((id: string) => {
     router.push({ pathname: '/(patient)/doctor-profile', params: { id } })
@@ -118,11 +125,13 @@ export default function DoctorsScreen() {
         renderItem={({ item }) => (
           <DoctorCard
             doctor={item}
+            presence={computeDoctorPresence(item)}
             mode="list"
             onPress={handleViewProfile}
             onBook={setBookingDoctor}
           />
         )}
+        extraData={presenceTick}
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
           isLoading ? (

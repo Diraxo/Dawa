@@ -10,6 +10,7 @@ import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { capitalizeLanguage } from '@/lib/languageFormat'
 import { VerifiedBadge } from '@/components/ui/VerifiedBadge'
+import { computeDoctorPresence, DoctorPresence } from '@/lib/doctorPresence'
 
 export type Doctor = {
   id: string
@@ -26,6 +27,7 @@ export type Doctor = {
   video_price: number
   is_online: boolean
   last_seen_at?: string | null
+  last_seen_platform?: string | null
   profile_photo_url?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
   languages?: string[] | null
@@ -44,9 +46,18 @@ type Props = {
   // viewport (e.g. Home's "show 2 full cards" carousels) instead of the
   // component's own fixed default width.
   cardWidth?: number
+  // Recomputed by the caller on every render (including the 30s presence
+  // tick from usePatientDoctors) and passed as a plain string so this memoed
+  // component's shallow prop comparison actually picks up an Away timeout —
+  // `doctor` itself doesn't change object identity when only time has
+  // passed, so deriving presence from `doctor` inside this component would
+  // never re-render on a stale-heartbeat transition. Falls back to a
+  // point-in-time computation from `doctor` for callers that don't pass it.
+  presence?: DoctorPresence
 }
 
-function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: Props) {
+function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth, presence }: Props) {
+  const resolvedPresence = presence ?? computeDoctorPresence(doctor)
   if (mode === 'list') {
     return (
       <View style={L.card}>
@@ -67,13 +78,22 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: P
                 <Ionicons name="person" size={34} color={colors.steelGrey} />
               </View>
             )}
-            {doctor.is_online && <View style={L.onlineDot} />}
+            {resolvedPresence !== 'offline' && (
+              <View style={[L.onlineDot, resolvedPresence === 'away' && L.awayDot]} />
+            )}
           </View>
           <View style={L.info}>
             <View style={L.nameRow}>
               <Text style={L.name} numberOfLines={1}>{doctor.name}</Text>
               {doctor.status === 'approved' && <VerifiedBadge size={15} />}
             </View>
+            {resolvedPresence !== 'offline' && (
+              <View style={[L.presencePill, resolvedPresence === 'away' && L.presencePillAway]}>
+                <Text style={[L.presencePillText, resolvedPresence === 'away' && L.presencePillTextAway]}>
+                  {resolvedPresence === 'available' ? 'Available Now' : 'Away'}
+                </Text>
+              </View>
+            )}
             <Text style={L.specialty} numberOfLines={1}>{doctor.specialty}</Text>
             {doctor.subtitle ? (
               <Text style={L.hospital} numberOfLines={1}>{doctor.subtitle}</Text>
@@ -138,7 +158,9 @@ function DoctorCardImpl({ doctor, onPress, onBook, mode = 'grid', cardWidth }: P
             <Ionicons name="person" size={30} color={colors.steelGrey} />
           </View>
         )}
-        {doctor.is_online && <View style={G.onlineDot} />}
+        {resolvedPresence !== 'offline' && (
+          <View style={[G.onlineDot, resolvedPresence === 'away' && G.awayDot]} />
+        )}
       </View>
       <View style={G.nameRow}>
         <Text style={G.name} numberOfLines={1}>{doctor.name}</Text>
@@ -210,9 +232,17 @@ const L = StyleSheet.create({
     backgroundColor: colors.success,
     borderWidth: 2.5, borderColor: colors.mistWhite,
   },
+  awayDot: { backgroundColor: colors.warning },
   info: { flex: 1, paddingTop: 2 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
   name: { fontFamily: fonts.bold, fontSize: 16, color: colors.inkBlack, flexShrink: 1 },
+  presencePill: {
+    alignSelf: 'flex-start', paddingHorizontal: 7, paddingVertical: 2,
+    borderRadius: 8, backgroundColor: `${colors.success}18`, marginBottom: 3,
+  },
+  presencePillAway: { backgroundColor: `${colors.warning}18` },
+  presencePillText: { fontFamily: fonts.semiBold, fontSize: 10, color: colors.success },
+  presencePillTextAway: { color: colors.warning },
   specialty: { fontFamily: fonts.medium, fontSize: 13, color: colors.tealGreen, marginBottom: 2 },
   hospital: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', marginBottom: 4 },
   languageRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
@@ -254,6 +284,7 @@ const G = StyleSheet.create({
     backgroundColor: colors.success,
     borderWidth: 2, borderColor: colors.mistWhite,
   },
+  awayDot: { backgroundColor: colors.warning },
   nameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 2 },
   name: { fontFamily: fonts.bold, fontSize: 13, color: colors.inkBlack, flexShrink: 1 },
   subtitle: { fontFamily: fonts.regular, fontSize: 11, color: '#6B7280', marginBottom: 2 },

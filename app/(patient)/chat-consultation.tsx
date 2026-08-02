@@ -7,7 +7,6 @@ import {
   ActivityIndicator,
   AppState,
   AppStateStatus,
-  BackHandler,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -75,6 +74,7 @@ import { useHeartbeat } from '@/hooks/useHeartbeat'
 import { useConsultationState } from '@/hooks/useConsultationState'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { useNavGuard } from '@/hooks/useNavGuard'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
 import { localizeNotificationPhoto } from '@/lib/notificationPhoto'
@@ -597,7 +597,7 @@ export default function ChatConsultationScreen() {
         {
           text: t('leave'),
           style: 'danger',
-          onPress: () => { setSimpleAlert(null); goToMessages() },
+          onPress: () => { setSimpleAlert(null); confirmExit(goToMessages) },
         },
       ])
     } else {
@@ -605,20 +605,13 @@ export default function ChatConsultationScreen() {
     }
   }
 
-  // Android hardware back previously bypassed the "leave consultation"
-  // confirmation above entirely (no BackHandler listener existed), falling
-  // through to the native stack's default pop instead of this screen's own
-  // routing — kept current via a ref so the listener (registered once) always
-  // runs the latest handleBack, not a stale closure over consultationState.
+  // Covers hardware back (Android) and the cross-platform navigation removal
+  // event, which also catches iOS's swipe-back gesture and the header back
+  // button/any programmatic back — previously only Android hardware back was
+  // guarded here, leaving iOS with no protection at all.
   const handleBackRef = useRef(handleBack)
   handleBackRef.current = handleBack
-  useEffect(() => {
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      handleBackRef.current()
-      return true
-    })
-    return () => sub.remove()
-  }, [])
+  const { confirmExit } = useConsultationBackGuard(consultationState === 'active', () => handleBackRef.current(), channelId)
 
   const handleAvatarPress = async () => {
     if (!doctorProfile && channelId) {

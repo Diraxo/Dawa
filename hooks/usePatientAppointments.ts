@@ -152,9 +152,26 @@ function emit() {
   listeners.forEach((l) => l())
 }
 
+// Coalesces bursts of same-turn patch() calls into a single emit() — see
+// hooks/usePatientDoctors.ts's identical helper for why: useSyncExternalStore
+// forces an immediate, unbatched re-render per emit(), and a burst of
+// same-turn realtime events (RN's bridge can deliver several queued
+// WebSocket messages within one JS turn) would otherwise fire that many
+// synchronous re-renders back-to-back, tripping React's "Maximum update
+// depth exceeded" guard even though nothing is actually looping.
+let emitScheduled = false
+function scheduleEmit() {
+  if (emitScheduled) return
+  emitScheduled = true
+  queueMicrotask(() => {
+    emitScheduled = false
+    emit()
+  })
+}
+
 function patch(next: Partial<StoreState>) {
   state = { ...state, ...next }
-  emit()
+  scheduleEmit()
 }
 
 function cacheKeys(clerkId: string) {

@@ -24,6 +24,7 @@ function mapDoctor(d: any): Doctor {
     video_price: Number(d.video_price) ?? 0,
     is_online: d.is_online ?? false,
     last_seen_at: d.last_seen_at ?? null,
+    last_seen_platform: d.last_seen_platform ?? null,
     profile_photo_url: d.users?.profile_photo_url ?? null,
     availability: d.availability ?? null,
     languages: d.languages ?? null,
@@ -36,6 +37,13 @@ function mapDoctor(d: any): Doctor {
 interface StoreState {
   doctors: Doctor[]
   isLoading: boolean
+  // Bumped every 30s (see PRESENCE_TICK_MS below) purely to force a new
+  // `state` reference so useSyncExternalStore subscribers re-render and
+  // recompute computeDoctorPresence() — a doctor's heartbeat going stale
+  // produces no realtime event (silence isn't a DB write), so Away
+  // transitions need a local timeout re-check, not just the is_online/
+  // last_seen_at push events already handled below.
+  presenceTick: number
 }
 
 // ─── Module-level singleton store ──────────────────────────────────────────
@@ -50,7 +58,7 @@ interface StoreState {
 // other screen's own. This is public, not-per-patient data, so — unlike
 // hooks/usePatientAppointments.ts — there is exactly one instance of it, not
 // one per signed-in user.
-let state: StoreState = { doctors: [], isLoading: true }
+let state: StoreState = { doctors: [], isLoading: true, presenceTick: 0 }
 const listeners = new Set<() => void>()
 let started = false
 let consumerCount = 0
@@ -58,6 +66,9 @@ let teardownTimer: ReturnType<typeof setTimeout> | null = null
 let inFlightRefresh: Promise<void> | null = null
 let unsubscribeDoctorProfiles: (() => void) | null = null
 let unsubscribeUsers: (() => void) | null = null
+let presenceTickTimer: ReturnType<typeof setInterval> | null = null
+
+const PRESENCE_TICK_MS = 30_000
 
 // Realtime-derived fields always win over a REST fetch that resolves after
 // the realtime event already landed — every fetch result is merged through
@@ -68,9 +79,28 @@ function emit() {
   listeners.forEach((l) => l())
 }
 
+// Coalesces bursts of same-turn patch() calls into a single emit(). Without
+// this, useSyncExternalStore forces an immediate, unbatched re-render on
+// every single emit() (its tearing-prevention design) — fine for one-off
+// updates, but a bulk `doctor_profiles` UPDATE (e.g. the once-a-minute
+// mark_stale_doctors_offline cron flipping many doctors offline in one
+// statement) fans out to one realtime event per affected row, all delivered
+// in the same JS turn by RN's bridge. Dozens of synchronous forced re-renders
+// back-to-back with no chance to yield trips React's "Maximum update depth
+// exceeded" guard even though nothing is actually looping.
+let emitScheduled = false
+function scheduleEmit() {
+  if (emitScheduled) return
+  emitScheduled = true
+  queueMicrotask(() => {
+    emitScheduled = false
+    emit()
+  })
+}
+
 function patch(next: Partial<StoreState>) {
   state = { ...state, ...next }
-  emit()
+  scheduleEmit()
 }
 
 function mergeKnownRealtime(docs: Doctor[]): Doctor[] {
@@ -125,6 +155,7 @@ function subscribeChannels() {
       const p: Partial<Doctor> = {
         is_online: updated.is_online as boolean,
         last_seen_at: (updated.last_seen_at ?? null) as string | null,
+        last_seen_platform: (updated.last_seen_platform ?? null) as string | null,
         languages: (updated.languages ?? undefined) as string[] | null | undefined,
         availability: (updated.availability ?? null) as Doctor['availability'],
         bio: (updated.bio ?? undefined) as string | undefined,
@@ -181,6 +212,10 @@ function ensureStarted() {
     if (!started) return
     subscribeChannels()
   })()
+
+  presenceTickTimer = setInterval(() => {
+    patch({ presenceTick: state.presenceTick + 1 })
+  }, PRESENCE_TICK_MS)
 }
 
 function subscribeStore(listener: () => void) {
@@ -206,6 +241,10 @@ function subscribeStore(listener: () => void) {
       unsubscribeUsers?.()
       unsubscribeDoctorProfiles = null
       unsubscribeUsers = null
+      if (presenceTickTimer) {
+        clearInterval(presenceTickTimer)
+        presenceTickTimer = null
+      }
       started = false
     }, 0)
   }
@@ -229,6 +268,11 @@ export function usePatientDoctors() {
   return {
     doctors: snapshot.doctors,
     isLoading: snapshot.isLoading,
+    // Exposed so callers that memoize/derive from `doctors` (whose array
+    // reference is intentionally stable across a presence-only tick) can
+    // still force a recompute — e.g. FlatList's `extraData`, or as a
+    // useMemo dependency for a presence-based sort. See StoreState above.
+    presenceTick: snapshot.presenceTick,
     refresh: refreshNow,
   }
 }

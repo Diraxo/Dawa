@@ -50,7 +50,7 @@ export default function SignUpScreen() {
   const { startSSOFlow } = useSSO()
   const { isSignedIn, userId } = useAuth()
 
-  const { userRole: localRole } = useAuthStore()
+  const { userRole: localRole, setUserRole } = useAuthStore()
 
   const [langDropdown, setLangDropdown] = useState(false)
   const currentLang =
@@ -92,6 +92,14 @@ export default function SignUpScreen() {
     try {
       // Always query Supabase — if the row was deleted, send to role selection
       const dest = await resolveAuthDestination(supabase, clerkId)
+      // Must set the store's role before navigating into tabs — (patient)/
+      // _layout.tsx and (doctor)/_layout.tsx guard on userRole matching
+      // their segment and have no grace period for "signed in but role
+      // still null", so landing on tabs without this bounces straight back
+      // out to sign-in (which then resolves the role itself and sends the
+      // user back here a second later — reads as the tab silently
+      // returning to Home for a brand-new account).
+      if (dest.role) setUserRole(dest.role)
       router.replace(dest.route as never)
     } catch {
       // Supabase unreachable (network error) — fall back to cached role
@@ -101,7 +109,7 @@ export default function SignUpScreen() {
     } finally {
       redirectingRef.current = false
     }
-  }, [router, localRole])
+  }, [router, localRole, setUserRole])
 
   // Clear form every time this screen comes into focus (prevents OS autofill persistence)
   useFocusEffect(

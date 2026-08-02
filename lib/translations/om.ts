@@ -156,6 +156,9 @@ const om: TranslationKeys = {
   endedChats: 'Kan Xumurame',
   noMessages: 'Hanga yoonaatti ergaa hin jiru',
   noMessagesDesc: 'Mariitti dubbachuuf eegali',
+  messagesConnectionError: "Walitti dhufeenyi hin milkoofne",
+  messagesConnectionErrorDesc: "Ergaawwan wajjin walitti dhufeenya uumuu hin dandeenye. Interneetii keessan mirkaneessaatii irra deebi'aa yaalaa.",
+  retry: "Irra deebi'ii yaali",
 
   consultationsTab: 'Mariittiiwwan',
   incomingConsultations: 'Dhufaa Jiru',

@@ -4,6 +4,7 @@ import { Alert, AppState } from 'react-native'
 
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
+import { callkeep } from '@/lib/callkeep'
 
 /**
  * Single write path + realtime subscription for `doctor_profiles.is_online`,
@@ -34,10 +35,12 @@ export function useDoctorOnlineToggle(doctorProfileId: string | null, opts?: { r
     )
   }, [doctorProfileId])
 
-  // Re-sync from the DB when the app returns to the foreground — the
-  // app-level background handler flips is_online false server-side when the
-  // doctor backgrounds the app, so local state would otherwise show a stale
-  // "Online" after resuming.
+  // Re-sync from the DB when the app returns to the foreground — is_online
+  // can change from another session (web, another device) while this one was
+  // backgrounded, so local state would otherwise show a stale value after
+  // resuming. Nothing in this app auto-flips is_online; see
+  // hooks/useDoctorPresenceHeartbeat.ts for the separate, non-authoritative
+  // Away/presence signal that layers on top of this toggle instead.
   useEffect(() => {
     if (!doctorProfileId || !opts?.resyncOnForeground) return
     const sub = AppState.addEventListener('change', (next) => {
@@ -68,6 +71,14 @@ export function useDoctorOnlineToggle(doctorProfileId: string | null, opts?: { r
         .eq('id', doctorProfileId)
       if (error) throw error
       setIsOnline(newStatus)
+
+      // Going online is the doctor opting in to receive incoming calls right
+      // now — re-verify Android's ConnectionService PhoneAccount here too
+      // (not just at app start) so a doctor who enabled it, then went
+      // offline, then disabled it again before coming back online is caught
+      // before their first request ever arrives. No-op on iOS/web and
+      // when going offline.
+      if (newStatus) callkeep.ensurePhoneAccountEnabled()
     } catch {
       Alert.alert('Connection Error', 'Could not update your online status. Please try again.')
     } finally {

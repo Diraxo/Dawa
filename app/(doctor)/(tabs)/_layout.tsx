@@ -9,6 +9,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
+import { useConsultationPresenceStore } from '@/store/consultationPresenceStore'
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name']
 
@@ -94,6 +95,16 @@ export default function DoctorTabsLayout() {
   // doctor-status (approved/rejected/suspended) ack popup, which is unrelated.
 
   const [retryTick, setRetryTick] = useState(0)
+
+  // Synchronous cache of "does this doctor currently have an active
+  // consultation" (consultationPresenceStore), kept in sync by
+  // useActiveConsultationRecovery in the parent app/(doctor)/_layout.tsx.
+  // Landing on any tab (e.g. a notification tapped while a call is still
+  // ongoing) previously showed that tab's content for as long as the
+  // parent's DB round trip took before it redirected back, a visible flash
+  // — blocking on the cached flag instead means the redirect the parent is
+  // already about to perform never has anything to visibly interrupt.
+  const hasActiveConsultation = useConsultationPresenceStore((s) => s.hasActiveConsultation)
 
   useEffect(() => {
     if (!userId) return
@@ -240,7 +251,7 @@ export default function DoctorTabsLayout() {
     )
   }
 
-  if (!statusChecked || blocked) {
+  if (!statusChecked || blocked || hasActiveConsultation) {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mistWhite }}>
         <ActivityIndicator color={colors.tealGreen} />

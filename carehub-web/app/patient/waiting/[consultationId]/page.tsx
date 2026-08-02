@@ -99,7 +99,7 @@ export default function WaitingRoomPage() {
         if (s === 'accepted' || s === 'in_progress' || s === 'active') {
           navigated.current = true
           router.replace(`/patient/consultation/${t}/${consultationId}`)
-        } else if (s === 'declined') {
+        } else if (s === 'declined' || s === 'doctor_missed') {
           navigated.current = true
           setDeclined(true)
         } else if (s === 'cancelled') {
@@ -147,7 +147,7 @@ export default function WaitingRoomPage() {
       }
 
       // Declined/cancelled before we loaded
-      if (data?.status === 'declined') {
+      if (data?.status === 'declined' || data?.status === 'doctor_missed') {
         navigated.current = true
         setStatus(data.status)
         setDeclined(true)
@@ -182,7 +182,7 @@ export default function WaitingRoomPage() {
           if (updated.status === 'accepted' || updated.status === 'in_progress' || updated.status === 'active') {
             navigated.current = true
             router.replace(`/patient/consultation/${updated.type}/${consultationId}`)
-          } else if (updated.status === 'declined') {
+          } else if (updated.status === 'declined' || updated.status === 'doctor_missed') {
             navigated.current = true
             setDeclined(true)
           } else if (updated.status === 'cancelled') {

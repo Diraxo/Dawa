@@ -1,6 +1,5 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
-import { File as ExpoFile } from 'expo-file-system'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useRouter } from 'expo-router'
 import { useEffect, useState } from 'react'
@@ -23,9 +22,10 @@ import { OutlineButton } from '@/components/ui/OutlineButton'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
+import { getImageBuffer, prepareImageForUpload } from '@/lib/imagePicker'
 import { shadow } from '@/lib/shadow'
 import { pushOwnPhotoToStream } from '@/lib/stream'
-import { getAuthClient, supabase } from '@/lib/supabase'
+import { getAuthClient, supabase, uploadProfilePhoto } from '@/lib/supabase'
 import { useDoctorStore } from '@/store/doctorStore'
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -46,17 +46,6 @@ function getExt(uri: string, fileName: string | null): string {
   return (fileName ?? uri).split('.').pop()?.toLowerCase() ?? 'pdf'
 }
 
-async function getFileBuffer(uri: string): Promise<ArrayBuffer> {
-  // data: URIs (from web FileReader) and web in general — use fetch
-  if (Platform.OS === 'web' || uri.startsWith('data:')) {
-    const resp = await fetch(uri)
-    return resp.arrayBuffer()
-  }
-  // Native — use expo-file-system
-  const bytes = await new ExpoFile(uri).bytes()
-  return bytes.buffer as ArrayBuffer
-}
-
 async function uploadDocument(
   client: ReturnType<typeof getAuthClient>,
   clerkId: string,
@@ -66,7 +55,7 @@ async function uploadDocument(
 ): Promise<string> {
   const ext = getExt(uri, fileName)
   const path = `${clerkId}/${label}-${Date.now()}.${ext}`
-  const buffer = await getFileBuffer(uri)
+  const buffer = await getImageBuffer(uri)
   const { error } = await client.storage
     .from('doctor-documents')
     .upload(path, buffer, {
@@ -168,30 +157,12 @@ export default function RegistrationStep4() {
       // Upload profile photo from step 1 if available
       if (store.regProfilePhotoUri) {
         try {
-          const photoBuffer = await getFileBuffer(store.regProfilePhotoUri)
-          let photoExt = 'jpg'
-          if (store.regProfilePhotoUri.startsWith('data:')) {
-            photoExt = store.regProfilePhotoUri.match(/^data:image\/([^;]+)/)?.[1] ?? 'jpg'
-          } else {
-            photoExt = store.regProfilePhotoUri.split('.').pop()?.toLowerCase() ?? 'jpg'
-          }
-          // Path must be clerk_id/filename so the RLS foldername policy passes
-          const photoPath = `${user.id}/profile.${photoExt}`
-          const { error: photoErr } = await client.storage
-            .from('profile-photos')
-            .upload(photoPath, photoBuffer, {
-              contentType: `image/${photoExt === 'jpg' ? 'jpeg' : photoExt}`,
-              upsert: true,
-            })
-          if (!photoErr) {
-            uploadedDocs.push({ bucket: 'profile-photos', path: photoPath })
-            const { data: photoUrlData } = client.storage.from('profile-photos').getPublicUrl(photoPath)
-            const cacheBustedUrl = `${photoUrlData.publicUrl}?v=${Date.now()}`
-            await client.from('users')
-              .update({ profile_photo_url: cacheBustedUrl })
-              .eq('clerk_id', user.id)
-            pushOwnPhotoToStream(cacheBustedUrl)
-          }
+          const prepared = await prepareImageForUpload(store.regProfilePhotoUri)
+          const cacheBustedUrl = await uploadProfilePhoto(token, prepared.buffer, prepared.mimeType, 'profile')
+          await client.from('users')
+            .update({ profile_photo_url: cacheBustedUrl })
+            .eq('clerk_id', user.id)
+          pushOwnPhotoToStream(cacheBustedUrl)
         } catch {
           // Photo upload failed — proceed without blocking registration
         }

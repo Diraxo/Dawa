@@ -59,3 +59,42 @@ export function getAuthClient(clerkToken: string) {
   }
   return client
 }
+
+// Supabase Storage's own JWT verification does not honor third-party
+// (Clerk) RS256 tokens the way the Data API does — auth.jwt()->>'sub' comes
+// back unpopulated inside Storage's RLS check, so an authenticated client's
+// direct storage.upload()/remove() always fails with "new row violates row
+// level security policy" even though the identical token authenticates every
+// DB query fine (matches the open, unresolved supabase/supabase#34948).
+// Route profile-photo writes through the upload-profile-photo edge function
+// instead, which verifies the Clerk token itself (same jose/JWKS pattern as
+// agora-token, apply-credit, etc.) and writes with the service-role key.
+export async function uploadProfilePhoto(
+  clerkToken: string,
+  file: Blob,
+  mimeType: string,
+  baseName: 'avatar' | 'profile' = 'avatar'
+): Promise<string> {
+  const res = await fetch(`${url}/functions/v1/upload-profile-photo?name=${baseName}`, {
+    method: 'POST',
+    headers: { 'Content-Type': mimeType, Authorization: `Bearer ${clerkToken}`, apikey: anon },
+    body: file,
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.error ?? `Photo upload failed (${res.status})`)
+  }
+  const { url: publicUrl } = await res.json()
+  return publicUrl as string
+}
+
+export async function deleteProfilePhotos(clerkToken: string): Promise<void> {
+  const res = await fetch(`${url}/functions/v1/upload-profile-photo`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${clerkToken}`, apikey: anon },
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.error ?? `Photo delete failed (${res.status})`)
+  }
+}

@@ -21,6 +21,7 @@ import { DawaLogo } from "@/components/ui/DawaLogo"
 import { colors } from "@/constants/colors"
 import { fonts } from "@/constants/fonts"
 import { useAuthDestination } from "@/hooks/useAuthDestination"
+import { useAuthStore } from "@/store/authStore"
 
 // Best-effort — a failed security notification must never block the
 // password-reset success flow the patient is actively waiting on.
@@ -49,6 +50,7 @@ export default function ResetPasswordScreen() {
   const { top, bottom } = useSafeAreaInsets()
   const { isLoaded, signIn, setActive } = useSignIn()
   const { getToken } = useAuth()
+  const { setUserRole } = useAuthStore()
 
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -64,6 +66,11 @@ export default function ResetPasswordScreen() {
   // status) by Clerk id — never by email — and never falls back to Role
   // Selection just because the lookup temporarily failed.
   const { arm: armDestination, retry: retryDestination, error: destinationError } = useAuthDestination((dest) => {
+    // Must set the store's role before the delayed navigation below fires —
+    // (patient)/_layout.tsx and (doctor)/_layout.tsx guard on userRole
+    // matching their segment, so landing on tabs without this bounces
+    // straight back out to sign-in and immediately back again.
+    if (dest.role) setUserRole(dest.role)
     targetRouteRef.current = dest.route
     setLoading(false)
     setSuccessAlert(true)

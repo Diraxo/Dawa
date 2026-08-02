@@ -29,7 +29,19 @@ export default function OAuthNativeCallback() {
     if (!isSignedIn || !userId) return
     ;(async () => {
       try {
-        const token = await getToken()
+        // Same race as app/(auth)/role.tsx's handleContinue: right after
+        // setActive() from the OAuth redirect, isSignedIn/userId flip true
+        // before Clerk's in-memory token cache is guaranteed to return a
+        // token. A plain getToken() here can come back null, which sends
+        // resolveAuthDestination's lookup out as `anon` — RLS then returns
+        // zero rows instead of erroring, so an existing patient/doctor gets
+        // silently misrouted back to role selection instead of home.
+        let token: string | null = null
+        for (const delay of [0, 300, 400, 500, 600, 600]) {
+          if (delay) await new Promise((r) => setTimeout(r, delay))
+          token = await getToken({ skipCache: true })
+          if (token) break
+        }
         const client = token ? getAuthClient(token) : supabase
         const dest = await resolveAuthDestination(client, userId)
         console.log('[OAuth callback] destination resolved:', dest.route)

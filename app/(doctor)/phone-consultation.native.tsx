@@ -36,6 +36,7 @@ import { streamClient, watchConsultationChannel } from '@/lib/stream'
 import { supabase, getAuthClient } from '@/lib/supabase'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
 import { useConsultationState } from '@/hooks/useConsultationState'
+import { useConsultationBackGuard } from '@/hooks/useConsultationBackGuard'
 import { useConsultationCompletion } from '@/hooks/useConsultationCompletion'
 import { formatCallDuration } from '@/lib/callDuration'
 import { useHeartbeat } from '@/hooks/useHeartbeat'
@@ -798,6 +799,52 @@ export default function DoctorPhoneConsultationScreen() {
     }
     setShowEndSheet(true)
   }
+
+  // Accidental back-press (hardware back / iOS swipe-back / header back) must
+  // never silently drop the doctor out of a live consultation, but it also
+  // must not force open the full End Consultation summary form the way the
+  // visible red hang-up button (handleEnd above) does — that's a much bigger
+  // ask than a stray back-swipe warrants. This is the doctor-side mirror of
+  // the patient's "Leave Call" (patient/phone-consultation.native.tsx): stays
+  // in_progress, only signals the peer via the same markDoctorLeft the
+  // AppState-background path already uses, and the doctor can rejoin by
+  // re-opening this same screen at any time.
+  const handleLeaveScreen = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {})
+    const isCallActive = state.phase === 'on_call' || state.phase === 'reconnecting' || state.phase === 'waiting_for_patient'
+    if (!isCallActive) {
+      // Ringing/connecting an outgoing call — same "Cancel Call" semantics as
+      // the visible End button's non-active branch, just routed through
+      // confirmExit so the guard doesn't re-intercept the resulting nav.
+      Alert.alert('Cancel Call', 'Cancel this outgoing call?', [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Cancel Call', style: 'destructive',
+          onPress: () => {
+            try { getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
+            setActive(null)
+            confirmExit(goToConsultations)
+          },
+        },
+      ])
+      return
+    }
+    showSimpleAlert('confirm', 'Leave Call', 'The consultation stays active — you can come back anytime.', [
+      { text: 'Stay', style: 'outline', onPress: () => setSimpleAlert(null) },
+      {
+        text: 'Leave', style: 'danger',
+        onPress: () => {
+          setSimpleAlert(null)
+          state.markDoctorLeft()
+          try { getAgoraEngine()?.leaveChannel(); releaseAgoraEngine() } catch {}
+          confirmExit(goToConsultations)
+        },
+      },
+    ])
+  }
+  const handleLeaveScreenRef = useRef(handleLeaveScreen)
+  handleLeaveScreenRef.current = handleLeaveScreen
+  const { confirmExit } = useConsultationBackGuard(state.phase !== 'ended', () => handleLeaveScreenRef.current(), channelName)
 
   const netLabel = networkQuality === 0 ? '' : networkQuality <= 2 ? 'Excellent' : networkQuality <= 4 ? 'Good' : 'Poor'
   const netColor = networkQuality <= 2 ? colors.success : networkQuality <= 4 ? colors.warning : colors.error

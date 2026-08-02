@@ -13,6 +13,48 @@
 
 import { Platform } from 'react-native'
 
+// Doctor-side fallback ring when Android's ConnectionService PhoneAccount
+// isn't enabled (see the 'incoming_call' branch below) — same Notifee
+// full-screen alert (same id/tag) the 'incoming_request' branch already uses
+// for chat requests, so it collapses/dedupes with any 'incoming_request'
+// message for the same consultation and is silenced by the same
+// stopIncomingRequestRing() call incoming-request.tsx already makes on
+// mount.
+async function ringDoctorFallback(uuid, hasVideo, patientName) {
+  try {
+    const { default: notifee, AndroidImportance, AndroidVisibility } = require('@notifee/react-native')
+    await notifee.createChannel({
+      id: 'incoming_requests_v2',
+      name: 'Incoming Patient Requests',
+      importance: AndroidImportance.MAX,
+      visibility: AndroidVisibility.PRIVATE,
+      sound: 'default',
+      vibrationPattern: [0, 500, 300, 500, 300, 500],
+    })
+    const typeTitle = hasVideo ? 'Video Consultation' : 'Voice Consultation'
+    await notifee.displayNotification({
+      id: `incoming-request-${uuid}`,
+      title: `New ${typeTitle} request`,
+      body: `${patientName || 'A patient'} is waiting for you`,
+      data: { screen: 'incoming_request', consultationId: uuid },
+      android: {
+        channelId: 'incoming_requests_v2',
+        importance: AndroidImportance.MAX,
+        category: 'call',
+        fullScreenAction: { id: 'default', launchActivity: 'default' },
+        pressAction: { id: 'default', launchActivity: 'default' },
+        autoCancel: true,
+        ongoing: true,
+        loopSound: true,
+        tag: `incoming-request-${uuid}`,
+      },
+    })
+    console.log('[Callkeep] Notifee fallback ring displayed for', uuid)
+  } catch (e) {
+    console.error('[Callkeep] Notifee fallback ring failed:', e)
+  }
+}
+
 // ── Android: Firebase background message handler (app killed / background) ────
 // This headless task runs in a separate JS context without any React UI.
 // It must not import any UI component or navigate — only display the call.
@@ -29,9 +71,9 @@ if (Platform.OS === 'android') {
       // backgrounded/killed — dismiss any ConnectionService call screen for
       // this consultation instead of leaving it ringing.
       if (callType === 'cancel_call') {
+        const uuid = String(remoteMessage.data.uuid ?? remoteMessage.data.consultationId ?? '')
         try {
           const RNCallKeep = require('react-native-callkeep').default
-          const uuid = String(remoteMessage.data.uuid ?? remoteMessage.data.consultationId ?? '')
           if (uuid) {
             RNCallKeep.endCall(uuid)
             require('@react-native-async-storage/async-storage').default
@@ -39,6 +81,20 @@ if (Platform.OS === 'android') {
           }
         } catch (e) {
           console.error('[Callkeep] Background cancel failed:', e)
+        }
+        // Also cancel the doctor's chat-request tray notification (see the
+        // 'incoming_request' branch below) — this signal is sent whenever a
+        // ringing request leaves the state it represents regardless of
+        // consultation type, but a chat request has no CallKeep screen to
+        // end, only this Notifee notification, which is otherwise left
+        // looping (loopSound below) with nothing to ever stop it.
+        try {
+          if (uuid) {
+            const { default: notifee } = require('@notifee/react-native')
+            await notifee.cancelNotification(`incoming-request-${uuid}`)
+          }
+        } catch (e) {
+          console.error('[IncomingRequest] Background cancel failed:', e)
         }
         return
       }
@@ -138,6 +194,18 @@ if (Platform.OS === 'android') {
               fullScreenAction: { id: 'default', launchActivity: 'default' },
               pressAction: { id: 'default', launchActivity: 'default' },
               autoCancel: true,
+              // `ongoing` (can't be swiped away) + `loopSound` (Android's
+              // FLAG_INSISTENT — repeats the channel's sound+vibration for
+              // as long as the notification stays visible) together give a
+              // chat request the same "keeps ringing until resolved"
+              // behavior CallKeep's native ConnectionService screen already
+              // gives phone/video requests, without needing a foreground
+              // service. Stopped by notifee.cancelNotification, called from
+              // the 'cancel_call' branch above, incoming-request.tsx on
+              // mount, and useIncomingConsultationAlert.ts when the request
+              // drops off the doctor's waiting queue.
+              ongoing: true,
+              loopSound: true,
               // Best-effort cross-transport dedup: the server's Expo push
               // fallback for this same event (handle-consultation-notification's
               // 'new_request' case) now sets its own Android `tag` to this
@@ -314,16 +382,60 @@ if (Platform.OS === 'android') {
           // nothing to recover and just logs a warning
         }
 
+        // Verify Android's ConnectionService PhoneAccount is actually
+        // enabled before relying on it — registering it (RNCallKeep.setup(),
+        // called from lib/callkeep.ts's init()) does not enable it; the
+        // doctor must separately grant it under Settings → Apps → Default
+        // apps → Calling accounts, and nothing else ever prompts them to.
+        // If it isn't enabled, displayIncomingCall() below produces no UI at
+        // all — no ring, no error, nothing the doctor could act on. This
+        // headless context is a fresh JS instance each invocation (see the
+        // module-reload comment in lib/callkeep.ts), so the app's own
+        // cached check there isn't available here — probe fresh instead.
+        // Scoped to direction 'doctor' (a patient's on-demand phone/video
+        // request ringing the doctor) — the patient-facing ring is
+        // unaffected.
+        let phoneAccountAvailable = true
+        if (direction === 'doctor') {
+          try {
+            const [serviceAvailable, hasAccount] = await Promise.all([
+              RNCallKeep.isConnectionServiceAvailable ? RNCallKeep.isConnectionServiceAvailable() : true,
+              RNCallKeep.hasPhoneAccount ? RNCallKeep.hasPhoneAccount() : true,
+            ])
+            phoneAccountAvailable = !!serviceAvailable && !!hasAccount
+          } catch (e) {
+            // Check itself failed — don't treat that as proof of
+            // unavailability, fall through to the normal native attempt.
+            phoneAccountAvailable = true
+          }
+        }
+
+        if (!phoneAccountAvailable) {
+          console.warn('[Callkeep] Android phone account unavailable — ringing via Notifee fallback for', uuid)
+          await ringDoctorFallback(uuid, hasVideo, callerHandle)
+          return
+        }
+
         // Display the native Android ConnectionService call screen
         console.log('[Callkeep] Calling displayIncomingCall for', uuid, 'direction=', direction)
-        RNCallKeep.displayIncomingCall(
-          uuid,
-          callerHandle,       // handle (shown under the name)
-          callerHandle,       // localizedCallerName (primary display name)
-          'generic',          // handleType
-          hasVideo,           // hasVideo
-        )
-        console.log('[Callkeep] displayIncomingCall returned for', uuid)
+        try {
+          RNCallKeep.displayIncomingCall(
+            uuid,
+            callerHandle,       // handle (shown under the name)
+            callerHandle,       // localizedCallerName (primary display name)
+            'generic',          // handleType
+            hasVideo,           // hasVideo
+          )
+          console.log('[Callkeep] displayIncomingCall returned for', uuid)
+        } catch (e) {
+          console.error('[Callkeep] displayIncomingCall threw:', e)
+          // Reactive fallback — the proactive check above passed (or was
+          // skipped for a non-doctor ring) but the actual native call still
+          // failed. Last line of defense against silence for the doctor.
+          if (direction === 'doctor') {
+            await ringDoctorFallback(uuid, hasVideo, callerHandle)
+          }
+        }
       } catch (e) {
         console.error('[Callkeep] Background display failed:', e)
       }

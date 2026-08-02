@@ -6,6 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useUser } from '@clerk/clerk-expo'
 
 import { supabase } from '@/lib/supabase'
+import { callkeep } from '@/lib/callkeep'
 import { registerCallTokens } from '@/lib/voipPush'
 import { reclaimTokenFromOtherUsers, upsertDevice } from '@/lib/pushTokens'
 import { getOrCreateDeviceId } from '@/lib/deviceId'
@@ -21,10 +22,26 @@ const INCOMING_REQUEST_DEDUP_WINDOW_MS = 15_000
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
     // Suppress foreground display for data-only call payloads that arrive via
-    // the regular FCM notification channel (belt-and-suspenders deduplication).
+    // the regular FCM notification channel (belt-and-suspenders deduplication)
+    // — CallKeep's own native ring already covers this, normally.
+    //
+    // Exception: the doctor-facing ring (screen: 'incoming_request' — a
+    // patient's on-demand phone/video request) on Android when the
+    // ConnectionService PhoneAccount isn't enabled. In that case CallKeep
+    // never displayed anything at all (see lib/callkeep.ts's
+    // displayIncomingCall, which falls back to a Notifee ring instead of a
+    // no-op native call) — suppressing this redundant fallback push too
+    // would leave the doctor with literally nothing. The patient-facing ring
+    // (screen: 'consultation') is unaffected and keeps relying on CallKeep.
     const data = notification.request.content.data as Record<string, unknown>
     if (data?.callType === 'incoming_call') {
-      return SUPPRESS
+      const isUnrungDoctorRing =
+        data?.screen === 'incoming_request' &&
+        Platform.OS === 'android' &&
+        !callkeep.isPhoneAccountAvailable()
+      if (!isUnrungDoctorRing) {
+        return SUPPRESS
+      }
     }
 
     // The 'new_request' Expo push fallback (handle-consultation-notification's

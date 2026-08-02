@@ -156,6 +156,9 @@ const am: TranslationKeys = {
   endedChats: 'ያለቀ',
   noMessages: 'እስካሁን መልዕክት የለም',
   noMessagesDesc: 'ለመወያየት ምክክር ጀምሩ',
+  messagesConnectionError: 'ግንኙነት አልተሳካም',
+  messagesConnectionErrorDesc: 'ወደ መልዕክቶች መገናኘት አልተቻለም። የበይነመረብ ግንኙነትዎን ያረጋግጡ እና እንደገና ይሞክሩ።',
+  retry: 'እንደገና ሞክር',
 
   consultationsTab: 'ምክክሮች',
   incomingConsultations: 'ወደ ገቢ',

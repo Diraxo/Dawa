@@ -5,6 +5,7 @@ import { createJSONStorage, persist } from 'zustand/middleware'
 import { streamClient } from '@/lib/stream'
 import { logger } from '@/lib/logger'
 import { useActiveConsultationStore } from '@/store/activeConsultationStore'
+import { useConsultationPresenceStore } from '@/store/consultationPresenceStore'
 import { useDoctorStore } from '@/store/doctorStore'
 
 type UserRole = 'patient' | 'doctor' | null
@@ -15,6 +16,17 @@ interface AuthState {
   userName: string | null
   userPhotoUrl: string | null
   isStreamConnected: boolean
+  // True once a connection attempt has failed and given up (bad/expired
+  // token, generate-stream-token unreachable, connectUser rejected, or the
+  // attempt timed out). Distinct from `isStreamConnected === false`, which is
+  // also the state while a connection is still in flight — without this,
+  // screens gating a spinner on `!isStreamConnected` can't tell "still
+  // connecting" from "gave up," so a failed attempt (no automatic retry,
+  // see useStreamConnection) left them spinning forever with no way out.
+  streamConnectionError: boolean
+  // Bumped by retryStreamConnection() to force useStreamConnection's effect
+  // to re-run and attempt another connection after a failure.
+  streamConnectRetryTick: number
   _hasHydrated: boolean
   // Set synchronously (before any await) the instant a cold-launch push
   // notification tap is about to route somewhere specific (e.g. the doctor's
@@ -30,6 +42,7 @@ interface AuthState {
   clearAuth: () => void
   setHasHydrated: (v: boolean) => void
   setPendingNotificationRoute: (v: boolean) => void
+  retryStreamConnection: () => void
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -40,12 +53,16 @@ export const useAuthStore = create<AuthState>()(
       userName: null,
       userPhotoUrl: null,
       isStreamConnected: false,
+      streamConnectionError: false,
+      streamConnectRetryTick: 0,
       _hasHydrated: false,
       pendingNotificationRoute: false,
 
       setUserRole: (role) => set({ userRole: role }),
       setHasHydrated: (v) => set({ _hasHydrated: v }),
       setPendingNotificationRoute: (v) => set({ pendingNotificationRoute: v }),
+      retryStreamConnection: () =>
+        set((s) => ({ streamConnectionError: false, streamConnectRetryTick: s.streamConnectRetryTick + 1 })),
 
       setUser: (userId, name, photoUrl) =>
         set({ userId, userName: name, userPhotoUrl: photoUrl }),
@@ -63,9 +80,10 @@ export const useAuthStore = create<AuthState>()(
             },
             token
           )
-          set({ isStreamConnected: true })
+          set({ isStreamConnected: true, streamConnectionError: false })
         } catch (err) {
           logger.error('[Stream] connectUser failed:', err)
+          set({ streamConnectionError: true })
         }
       },
 
@@ -97,6 +115,13 @@ export const useAuthStore = create<AuthState>()(
         // on the signed-out sign-in screen and surviving into the next account
         // signed into on the same device.
         useActiveConsultationStore.getState().setActive(null)
+
+        // Not persisted, but not role-scoped either — without clearing here,
+        // a stale hasActiveConsultation=true from the account that just
+        // signed out could block the next tabs render on a shared device
+        // until the new account's own recovery check corrects it.
+        useConsultationPresenceStore.getState().setHasActiveConsultation(false)
+        useConsultationPresenceStore.getState().setVoluntarilyLeftConsultationId(null)
 
         // dawa-doctor-storage persists registration-draft fields
         // (regFullName, regLicenseNumber, regBio, etc.) plus isOnline/

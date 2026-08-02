@@ -1,20 +1,17 @@
 import { useAuth, useUser } from '@clerk/clerk-expo'
 import { Ionicons } from '@expo/vector-icons'
 import { LinearGradient } from 'expo-linear-gradient'
-import { useRootNavigationState, useRouter } from 'expo-router'
-import * as Notifications from 'expo-notifications'
+import { useRouter } from 'expo-router'
 import { Image } from 'expo-image'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   AppState,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
-  Vibration,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -27,7 +24,6 @@ import { useDoctorOnlineToggle } from '@/hooks/useDoctorOnlineToggle'
 import { useDoctorPresenceHeartbeat } from '@/hooks/useDoctorPresenceHeartbeat'
 import { useNavGuard } from '@/hooks/useNavGuard'
 import { useOwnProfilePhoto } from '@/hooks/useOwnProfilePhoto'
-import { callkeep } from '@/lib/callkeep'
 import { ghostDebug } from '@/lib/logger'
 import { stripDrPrefix } from '@/lib/nameFormat'
 import { subscribeRealtime } from '@/lib/realtimeChannelManager'
@@ -36,43 +32,12 @@ import { shadow } from '@/lib/shadow'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { getCachedJson, setCachedJson } from '@/lib/persistentCache'
 import { useNotificationCenter } from '@/hooks/useNotificationCenter'
-import { navigateFamilyRoute } from '@/lib/notificationNav'
-import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
+import { useDoctorQueueStore } from '@/store/doctorQueueStore'
 import { useDoctorStore } from '@/store/doctorStore'
 import { useTranslation } from 'react-i18next'
 
 const CONSULTATION_ICONS: Record<'chat' | 'phone' | 'video', keyof typeof Ionicons.glyphMap> = {
   chat: 'chatbubble-ellipses', phone: 'call', video: 'videocam',
-}
-
-// A new incoming request was previously only ever surfaced visually (the
-// full-screen incoming-request modal) — nothing alerted a doctor whose eyes
-// weren't already on the screen, unlike the web overlay's audible chime.
-// Vibration.vibrate's `repeat` flag rings continuously until cancelled or
-// the pattern is superseded, matching a phone-call-style alert; the local
-// notification (through the 'incoming_requests_v2' Android channel, already
-// configured with sound: 'default' — see hooks/usePushNotifications.ts)
-// plays the actual ringtone-equivalent sound and is what a silenced device
-// automatically downgrades to vibrate-only for, so a single call here
-// correctly handles both "normal mode" and "silent mode" per the OS's own
-// ringer-mode contract instead of this code trying to detect ringer mode
-// itself (not reliably possible from JS on either platform).
-const RING_VIBRATION_PATTERN = [0, 700, 400, 700, 400, 700]
-const RING_DURATION_MS = 25_000
-
-function ringIncomingRequest(title: string, body: string, consultationId: string) {
-  Vibration.vibrate(RING_VIBRATION_PATTERN, true)
-  setTimeout(() => Vibration.cancel(), RING_DURATION_MS)
-  Notifications.scheduleNotificationAsync({
-    content: {
-      title,
-      body,
-      sound: 'default',
-      data: { screen: 'incoming_request', consultationId },
-      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests_v2' } : {}),
-    },
-    trigger: null,
-  }).catch(() => {})
 }
 
 interface ScheduleItem {
@@ -101,7 +66,6 @@ function formatWaiting(waitingStartedAt: string): string {
 export default function DoctorHomeScreen() {
   const { t } = useTranslation()
   const router = useRouter()
-  const rootNavigationState = useRootNavigationState()
   const { user } = useUser()
   const { getToken } = useAuth()
   const { doctorStatus } = useDoctorStore()
@@ -167,11 +131,12 @@ export default function DoctorHomeScreen() {
     }
   }
 
-  // Mirror `schedule`/`queueList` so the users-table realtime handler (below)
-  // can check "is this changed patient one of mine?" without a stale closure.
+  // Mirror `schedule` so the users-table realtime handler (below) can check
+  // "is this changed patient one of mine?" without a stale closure. The
+  // waiting queue's equivalent check reads store/doctorQueueStore.ts
+  // directly instead (that queue is now populated globally, not here).
   const scheduleRef = useRef<ScheduleItem[]>([])
   useEffect(() => { scheduleRef.current = schedule }, [schedule])
-  const queueListRef = useRef<{ id: string; patientId: string; patientName: string; waitingStartedAt: string }[]>([])
 
   // ── Load doctor profile ID + today's data ─────────────────────────────────
   // Wrapped in try/catch/finally with real loading/error state — previously
@@ -237,15 +202,13 @@ export default function DoctorHomeScreen() {
       setDoctorProfileId(profileId)
       setIsOnline(p.is_online ?? false)
 
-      // Stats/today's-schedule are independent of each other (and of the
-      // waiting-request check below) once profileId+token are known — no
-      // reason to pay three sequential round trips for data that doesn't
-      // depend on one another.
+      // Stats/today's-schedule are independent of each other once
+      // profileId+token are known — no reason to pay two sequential round
+      // trips for data that doesn't depend on one another. (The
+      // waiting-request check that used to run alongside these now lives in
+      // hooks/useIncomingConsultationAlert.ts, mounted globally.)
       await Promise.all([
         refreshStats(profileId, client),
-        // Show incoming request modal for any consultation already waiting
-        // when the doctor opens the screen (Realtime only catches future updates)
-        checkForWaitingRequest(profileId, token),
         loadTodaySchedule(client),
       ])
     } catch (err: any) {
@@ -298,127 +261,22 @@ export default function DoctorHomeScreen() {
     )
   }, [doctorProfileId])
 
-  // ── Show incoming request only once payment is confirmed, and only while
-  // the doctor is NOT already busy in another consultation ─────────────────
-  // "Busy" (accepted/in_progress) is re-checked on every call — a scheduled
-  // booking can activate mid-session, and the doctor must not be interrupted
-  // until their current consultation ends (matches web's IncomingRequestOverlay).
-  const shownConsultationIds = useRef(new Set<string>())
-
-  const checkForWaitingRequest = async (profileId: string, token: string) => {
-    const client = getAuthClient(token)
-
-    const { data: busy } = await client.rpc('is_doctor_busy', { p_doctor_id: profileId })
-
-    const { data: waitingList } = await client
-      .from('consultations')
-      .select('id, type, patient_id, patient_amount, waiting_started_at')
-      .eq('doctor_id', profileId)
-      .eq('status', 'waiting_for_doctor')
-      .eq('payment_status', 'paid')
-      .order('waiting_started_at', { ascending: true })
-
-    const list = waitingList ?? []
-    ghostDebug('[incoming-consultation] checkForWaitingRequest', {
-      profileId, busy, waitingIds: list.map((w) => w.id),
-    })
-    if (list.length === 0) {
-      setQueueList([])
-    } else {
-      const { data: queuePatients } = await supabase
-        .from('users')
-        .select('id, full_name')
-        .in('id', list.map((w) => w.patient_id))
-      const nameById = new Map((queuePatients ?? []).map((p) => [p.id, p.full_name]))
-      setQueueList(
-        list.map((w) => ({
-          id: w.id,
-          patientId: w.patient_id,
-          patientName: nameById.get(w.patient_id) ?? 'Patient',
-          waitingStartedAt: w.waiting_started_at ?? new Date().toISOString(),
-        }))
-      )
-    }
-
-    if (busy) return
-
-    // Skip past requests already offered once — not just list[0]. A
-    // waiting_for_doctor row never auto-expires (migration 062), so if the
-    // oldest queued request was shown but never resolved (doctor backed out
-    // without accepting/declining, or a background accept/decline write
-    // failed), it stays list[0] forever. Bailing out on list[0] alone would
-    // permanently hide every other patient queued behind it.
-    const waiting = list.find((w) => !shownConsultationIds.current.has(w.id))
-    if (!waiting) return
-    // Another surface (a push-notification tap, or the Consultations tab)
-    // already has the single incoming-request full screen open for this
-    // exact consultation — don't navigate there a second time. This is the
-    // single source of truth check: see store/activeIncomingRequestStore.ts.
-    if (useActiveIncomingRequestStore.getState().shownRequestId === waiting.id) {
-      ghostDebug('[incoming-consultation] skipped — already shown elsewhere', { consultationId: waiting.id })
-      return
-    }
-    // Phone/video requests already ring through the native ConnectionService
-    // incoming-call UI (see lib/callkeep.ts + the 'new_request' case in
-    // supabase/functions/handle-consultation-notification) as soon as the
-    // FCM push arrives — usually well before this 10s poll cycle would ever
-    // run. Skip the vibrate+notification+navigate fallback below while
-    // that's actively ringing so the doctor doesn't get a redundant second
-    // alert/navigation stacked underneath the OS call screen. If the doctor
-    // declines/ignores it there, isCallActive() goes false and the next poll
-    // picks the still-'waiting_for_doctor' row back up normally.
-    if (callkeep.isCallActive(waiting.id)) return
-    // The root layout may not have mounted its navigator yet (this can fire
-    // from the initial-mount effect on a cold launch) — pushing before then
-    // throws and silently drops the navigation. Don't mark it shown in that
-    // case either, so the next 10s poll cycle retries the whole thing.
-    if (!rootNavigationState?.key) return
-    shownConsultationIds.current.add(waiting.id)
-
-    const { data: patientData } = await supabase
-      .from('users')
-      .select('full_name, clerk_id, profile_photo_url')
-      .eq('id', waiting.patient_id)
-      .single()
-
-    ringIncomingRequest(
-      'New consultation request',
-      `${(patientData as any)?.full_name ?? 'A patient'} is waiting for you`,
-      waiting.id,
-    )
-    ghostDebug('[incoming-consultation] navigating to incoming-request from Home', { consultationId: waiting.id })
-
-    // Routed through the shared dedup helper (already used by the
-    // push-notification-tap path in notificationNav.ts) rather than a raw
-    // router.push — this surface's own Realtime/poll detection previously
-    // could stack a second live instance of this screen for the same
-    // consultation on top of one a notification tap (or the Consultations
-    // tab) had already pushed, since only the notification path checked the
-    // nav tree before navigating.
-    navigateFamilyRoute(
-      router,
-      rootNavigationState,
-      '/(doctor)/incoming-request',
-      {
-        patientName:      (patientData as any)?.full_name ?? 'Patient',
-        patientId:        waiting.patient_id ?? '',
-        patientClerkId:   (patientData as any)?.clerk_id ?? '',
-        patientPhotoUrl:  (patientData as any)?.profile_photo_url ?? '',
-        consultationType: waiting.type ?? 'chat',
-        consultationId:   waiting.id,
-      },
-      'push',
-    )
-  }
+  // Incoming-request detection/ring/navigate now lives in
+  // hooks/useIncomingConsultationAlert.ts, mounted globally from
+  // app/(doctor)/_layout.tsx so it keeps running no matter which tab or
+  // screen the doctor has open — see that hook for why this used to (and
+  // no longer needs to) live here. This screen only reads the resulting
+  // queue for its own "N patients waiting" widget below.
+  const queueList = useDoctorQueueStore((s) => s.queueList)
 
   useEffect(() => {
     if (!doctorProfileId) return
 
     // Listens for '*' (not just UPDATE) so that the doctor's OWN active
-    // consultation flipping to 'completed' also re-triggers a check — that's
-    // the only signal that a queued waiting_for_doctor request should now be
-    // surfaced (it's a different row, so it never gets its own event otherwise).
-    const topic = `doctor-requests-${doctorProfileId}`
+    // consultation flipping to 'completed' also re-triggers a refresh — a
+    // scheduled booking activating, or the day's stats, can change off the
+    // back of that transition too.
+    const topic = `doctor-schedule-${doctorProfileId}`
     const stale = supabase.getChannels().find((c) => c.topic === `realtime:${topic}`)
     if (stale) supabase.removeChannel(stale)
 
@@ -433,7 +291,7 @@ export default function DoctorHomeScreen() {
           filter: `doctor_id=eq.${doctorProfileId}`,
         },
         async (payload) => {
-          ghostDebug('[realtime] doctor-requests channel event', {
+          ghostDebug('[realtime] doctor-schedule channel event', {
             doctorProfileId,
             eventType: (payload as any).eventType,
             consultationId: (payload.new as any)?.id ?? (payload.old as any)?.id,
@@ -443,7 +301,6 @@ export default function DoctorHomeScreen() {
           if (!token) return
           const client = getAuthClient(token)
           await Promise.all([
-            checkForWaitingRequest(doctorProfileId, token),
             loadTodaySchedule(client),
             refreshStats(doctorProfileId, client),
           ])
@@ -460,59 +317,38 @@ export default function DoctorHomeScreen() {
           const updated = payload.new as any
           const isRelevant =
             scheduleRef.current.some((s) => s.patientId === updated.id) ||
-            queueListRef.current.some((q) => q.patientId === updated.id)
+            useDoctorQueueStore.getState().queueList.some((q) => q.patientId === updated.id)
           if (!isRelevant) return
           const token = await getToken()
           if (!token) return
-          await Promise.all([
-            checkForWaitingRequest(doctorProfileId, token),
-            loadTodaySchedule(getAuthClient(token)),
-          ])
+          await loadTodaySchedule(getAuthClient(token))
         }
       )
       .subscribe()
 
     realtimeChannelRef.current = channel
 
-    // Polling fallback — catches the case where the busy consultation ends
-    // (freeing the doctor up) but Realtime doesn't deliver that row's event
-    // for some reason, matching the web overlay's 5s poll safety net.
-    const poll = setInterval(async () => {
-      const token = await getToken()
-      if (token) await checkForWaitingRequest(doctorProfileId, token)
-    }, 10_000)
-
-    return () => { supabase.removeChannel(channel); clearInterval(poll) }
+    return () => { supabase.removeChannel(channel) }
   }, [doctorProfileId])
 
   // Realtime sockets get suspended while the OS backgrounds the app (locked
-  // screen, app-switch) — a scheduled booking that becomes ready, or a fresh
-  // on-demand request, can fire its postgres_changes event while nobody's
-  // listening. The 10s poll above only re-checks the waiting-request queue,
-  // not Today's Schedule, so a scheduled consultation could still be missed
-  // on resume. Mirrors useDoctorOnlineToggle's resyncOnForeground.
+  // screen, app-switch) — a scheduled booking that becomes ready can fire
+  // its postgres_changes event while nobody's listening. Re-sync Today's
+  // Schedule on foreground return. Mirrors useDoctorOnlineToggle's
+  // resyncOnForeground (the equivalent resync for the waiting queue lives in
+  // hooks/useIncomingConsultationAlert.ts, mounted globally).
   useEffect(() => {
     if (!doctorProfileId) return
     const sub = AppState.addEventListener('change', (next) => {
       if (next !== 'active') return
       getToken().then(async (token) => {
         if (!token) return
-        await Promise.all([
-          checkForWaitingRequest(doctorProfileId, token),
-          loadTodaySchedule(getAuthClient(token)),
-        ])
+        await loadTodaySchedule(getAuthClient(token))
       })
     })
     return () => sub.remove()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctorProfileId])
-
-  // Ordered waiting queue (matches web's IncomingRequestOverlay) — shown so
-  // the doctor sees who's next instead of just a count, especially while
-  // busy in another consultation and the incoming-request full screen can't
-  // be shown yet.
-  const [queueList, setQueueList] = useState<{ id: string; patientId: string; patientName: string; waitingStartedAt: string }[]>([])
-  useEffect(() => { queueListRef.current = queueList }, [queueList])
 
   const isPending = doctorStatus && doctorStatus !== 'approved'
 
@@ -604,7 +440,9 @@ export default function DoctorHomeScreen() {
               <View style={styles.onlineDot}>
                 <View style={[styles.onlineDotInner, { backgroundColor: isOnline ? colors.success : colors.steelGrey }]} />
               </View>
-              <Text style={styles.onlineLabel}>{isOnline ? 'Online · Taking Patients' : 'Go Online'}</Text>
+              <Text style={styles.onlineLabel}>
+                {isOnline ? 'Accepting On-Demand Consultations' : 'Accept On-Demand Consultations'}
+              </Text>
               <Switch
                 value={isOnline}
                 onValueChange={toggleOnline}

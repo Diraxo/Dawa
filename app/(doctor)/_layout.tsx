@@ -3,6 +3,7 @@ import { Stack, useRouter } from 'expo-router'
 import { useEffect, useRef, useState } from 'react'
 
 import { useActiveConsultationRecovery } from '@/hooks/useActiveConsultationRecovery'
+import { useIncomingConsultationAlert } from '@/hooks/useIncomingConsultationAlert'
 import { useAuthStore } from '@/store/authStore'
 
 // Same Clerk token-cache race app/(auth)/splash.tsx guards against: isLoaded
@@ -41,7 +42,20 @@ export default function DoctorLayout() {
     // (see authStore.clearAuth), so its presence here means isSignedIn=false
     // is most likely transient. Give Clerk a brief grace window before
     // concluding the user is genuinely signed out.
-    if (!isSignedIn && cachedUserId && signedOutRetries < MAX_SIGNED_OUT_RETRIES) {
+    //
+    // userRole === null while already signed in is the same kind of
+    // transient gap, not a real mismatch: several post-auth redirects
+    // (role.tsx's "already onboarded" bounce, sign-up.tsx's
+    // checkRoleAndRedirect) navigate straight into tabs and only set the
+    // store's role a moment later (or, if that call was ever missed, not at
+    // all) — this must not be told apart from "still loading" here, or the
+    // very first render after any such redirect bounces straight back out
+    // to sign-in and immediately back again, which is exactly what reads as
+    // a tab silently returning to Home. A definite wrong role (e.g. a
+    // patient account on this doctor layout) is not this case and still
+    // redirects immediately below.
+    const roleStillResolving = isSignedIn && userRole === null
+    if (((!isSignedIn && cachedUserId) || roleStillResolving) && signedOutRetries < MAX_SIGNED_OUT_RETRIES) {
       const timer = setTimeout(() => setSignedOutRetries((n) => n + 1), SIGNED_OUT_RETRY_MS)
       return () => clearTimeout(timer)
     }
@@ -53,7 +67,14 @@ export default function DoctorLayout() {
   // DB-driven session recovery — restores the doctor straight into the
   // incoming request screen or the live consultation after app kill,
   // refresh, or backgrounding, instead of leaving them on the tabs Home.
-  useActiveConsultationRecovery('doctor', isLoaded && isSignedIn && userRole === 'doctor' && _hasHydrated)
+  const doctorSessionActive = isLoaded && isSignedIn && userRole === 'doctor' && _hasHydrated
+  useActiveConsultationRecovery('doctor', doctorSessionActive)
+
+  // Global incoming-consultation detection/ring/navigate — lives here
+  // (not in (tabs)/home.tsx) so it keeps running for the doctor's entire
+  // session regardless of which tab or nested screen is on top. See
+  // hooks/useIncomingConsultationAlert.ts for why Home was the wrong place.
+  useIncomingConsultationAlert(doctorSessionActive)
 
   return <Stack screenOptions={{ headerShown: false }} />
 }

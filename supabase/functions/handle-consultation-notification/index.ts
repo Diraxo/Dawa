@@ -1117,6 +1117,12 @@ Deno.serve(async (req: Request) => {
       const patientFCM    = patient.fcm_token   ?? null
       const patientVoIP   = patient.voip_token  ?? null
 
+      // If the doctor has more than one device signed in, the other one(s)
+      // may still be ringing this same request — stop them now that it's
+      // been accepted from whichever device the doctor actually responded
+      // from (mirrors the 'declined' case's equivalent signal).
+      await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
+
       const title = `${NOTIF_TYPE_TITLE[consult.type as string] ?? 'Consultation'} with ${formatDoctorName(doctorUser.full_name, 'your doctor')}`
       const body  = isCallType
         ? `${formatDoctorName(doctorUser.full_name, 'Your doctor')} is calling. Tap to join.`
@@ -1184,6 +1190,12 @@ Deno.serve(async (req: Request) => {
     // ── Patient: doctor declined ─────────────────────────────────────────────
     case 'declined': {
       const creditAmount = Number((consult as any).credit_amount ?? (consult as any).patient_amount ?? 0)
+
+      // If the doctor has more than one device signed in, the other one(s)
+      // may still be ringing this same request — stop them now that it's
+      // been resolved on whichever device the doctor actually responded
+      // from.
+      await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
 
       const patientId    = patient.id         ?? null
       const patientToken = patient.push_token ?? null
@@ -1262,6 +1274,12 @@ Deno.serve(async (req: Request) => {
     case 'doctor_missed': {
       const creditAmount = Number((consult as any).credit_amount ?? (consult as any).patient_amount ?? 0)
 
+      // The doctor's own device(s) may still be ringing this request (a
+      // chat request's loopSound Notifee notification, or a phone/video
+      // request's CallKeep screen) — stop it now that it's been recorded as
+      // missed, same as the 'cancelled'/'missed_call' cases.
+      await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
+
       const patientId    = patient.id         ?? null
       const patientToken = patient.push_token ?? null
       const patientTitle = 'Doctor Did Not Respond'
@@ -1338,14 +1356,17 @@ Deno.serve(async (req: Request) => {
       const cancelledByPatient = !!patientId && cancelledBy === patientId
       const cancelledByDoctor  = !!doctorId  && cancelledBy === doctorId
 
-      // If this was a phone/video request, the other party's device may
-      // still be mid-ring on the incoming-call UI — dismiss it immediately
-      // instead of letting it ring out to its own ~60s timeout for a request
-      // that no longer exists.
-      if (isCallType) {
-        await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
-        await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
-      }
+      // The other party's device may still be mid-ring — a phone/video
+      // request rings via the native ConnectionService/CallKit incoming-call
+      // UI, a chat request rings via a client-side loopSound Notifee
+      // notification (see index.js / lib/voipPush.ts) — dismiss it
+      // immediately instead of letting either ring indefinitely (chat) or
+      // out to its own ~60s timeout (call) for a request that no longer
+      // exists. Sent for every consultation type: this used to be gated to
+      // `isCallType`, which left a cancelled/declined chat request's
+      // continuously-ringing notification with nothing to ever stop it.
+      await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
+      await sendCallCancelSignal(supabase, doctorUser.id ?? null, { fcm_token: doctorUser.fcm_token, voip_token: doctorUser.voip_token }, consultation_id)
 
       // ── Patient side — skipped entirely if the patient is the one who cancelled ──
       if (!cancelledByPatient) {
@@ -1415,7 +1436,9 @@ Deno.serve(async (req: Request) => {
       const body  = `${patient.full_name ?? 'A patient'} missed your ${typeLabel}. The request has been marked as missed.`
       const pushBody = `A patient missed your ${typeLabel}. The request has been marked as missed.`
 
-      if (isCallType) await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
+      // Not gated to isCallType — see the 'cancelled' case above for why a
+      // chat request's ring also needs this signal.
+      await sendCallCancelSignal(supabase, patient.id ?? null, { fcm_token: patient.fcm_token, voip_token: patient.voip_token }, consultation_id)
 
       let notificationId: string | null = null
       if (doctorId) {

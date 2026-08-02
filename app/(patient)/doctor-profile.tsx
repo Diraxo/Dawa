@@ -21,6 +21,7 @@ import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { useUserProfileRealtime } from '@/hooks/useUserProfileRealtime'
+import { computeDoctorPresence } from '@/lib/doctorPresence'
 import { capitalizeLanguage } from '@/lib/languageFormat'
 import { formatDoctorName, normalizeNameCase } from '@/lib/nameFormat'
 import { shadow } from '@/lib/shadow'
@@ -39,7 +40,8 @@ interface DoctorData {
   id: string; name: string; subtitle?: string; specialty: string
   rating_average: number; review_count: number; years_experience?: number
   bio?: string; chat_price: number; phone_price: number; video_price: number
-  is_online: boolean; profile_photo_url?: string | null; userId?: string | null
+  is_online: boolean; last_seen_at?: string | null; last_seen_platform?: string | null
+  profile_photo_url?: string | null; userId?: string | null
   availability?: Record<string, { enabled: boolean; startTime: string; endTime: string }> | null
   languages?: string[] | null
   status?: string | null
@@ -106,9 +108,18 @@ export default function DoctorProfileScreen() {
   // snapshot. Every fetch result is merged through this ref (realtime always
   // wins) before it reaches state.
   const realtimeKnownRef = useRef<Partial<Pick<DoctorData,
-    'is_online' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
+    'is_online' | 'last_seen_at' | 'last_seen_platform' | 'languages' | 'availability' | 'bio' | 'specialty' | 'subtitle' |
     'years_experience' | 'chat_price' | 'phone_price' | 'video_price' | 'rating_average' | 'review_count' | 'status'
   >>>({})
+
+  // Recomputes the presence label on a timeout, not just a push event — a
+  // doctor's heartbeat going stale produces no realtime UPDATE (silence
+  // isn't a DB write). Mirrors hooks/usePatientDoctors.ts's presenceTick.
+  const [presenceTick, setPresenceTick] = useState(0)
+  useEffect(() => {
+    const interval = setInterval(() => setPresenceTick(t => t + 1), 30_000)
+    return () => clearInterval(interval)
+  }, [])
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 
   useEffect(() => {
@@ -161,6 +172,8 @@ export default function DoctorProfileScreen() {
           phone_price: Number(dp.phone_price) ?? 0,
           video_price: Number(dp.video_price) ?? 0,
           is_online: dp.is_online ?? false,
+          last_seen_at: dp.last_seen_at ?? null,
+          last_seen_platform: dp.last_seen_platform ?? null,
           profile_photo_url: (dp as any).users?.profile_photo_url ?? null,
           userId: (dp as any).users?.id ?? null,
           availability: (dp as any).availability ?? null,
@@ -206,6 +219,8 @@ export default function DoctorProfileScreen() {
             const updated = payload.new as any
             const patch = {
               is_online: (updated.is_online ?? false) as boolean,
+              last_seen_at: (updated.last_seen_at ?? null) as string | null,
+              last_seen_platform: (updated.last_seen_platform ?? null) as string | null,
               languages: (updated.languages ?? undefined) as string[] | null | undefined,
               availability: (updated.availability ?? null) as DoctorData['availability'],
               bio: (updated.bio ?? undefined) as string | undefined,
@@ -223,6 +238,8 @@ export default function DoctorProfileScreen() {
             setDoctor(prev => prev ? {
               ...prev,
               is_online: patch.is_online,
+              last_seen_at: patch.last_seen_at ?? prev.last_seen_at,
+              last_seen_platform: patch.last_seen_platform ?? prev.last_seen_platform,
               languages: patch.languages ?? prev.languages,
               availability: patch.availability ?? prev.availability,
               bio: patch.bio ?? prev.bio,
@@ -367,12 +384,20 @@ export default function DoctorProfileScreen() {
                 <Ionicons name="person" size={52} color={colors.steelGrey} />
               </View>
             )}
-            {doctor.is_online && (
-              <View style={styles.onlineBadge}>
-                <View style={styles.onlineDot} />
-                <Text style={styles.onlineText}>{t('online')}</Text>
-              </View>
-            )}
+            {(() => {
+              // presenceTick is a dependency only in spirit — reading it here
+              // (even unused beyond forcing this closure to re-run) is what
+              // makes the 30s away-timeout re-render actually recompute this.
+              void presenceTick
+              const presence = computeDoctorPresence(doctor)
+              if (presence === 'offline') return null
+              return (
+                <View style={[styles.onlineBadge, presence === 'away' && styles.awayBadge]}>
+                  <View style={[styles.onlineDot, presence === 'away' && styles.awayDot]} />
+                  <Text style={[styles.onlineText, presence === 'away' && styles.awayText]}>{presence === 'available' ? t('online') : 'Away'}</Text>
+                </View>
+              )
+            })()}
           </View>
 
           <View style={styles.heroNameRow}>
@@ -637,6 +662,9 @@ const styles = StyleSheet.create({
   },
   onlineDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
   onlineText: { fontFamily: fonts.semiBold, fontSize: 11, color: colors.success },
+  awayBadge: {},
+  awayDot: { backgroundColor: colors.warning },
+  awayText: { color: colors.warning },
   heroNameRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 4 },
   heroName: { fontFamily: fonts.bold, fontSize: 22, color: colors.inkBlack, textAlign: 'center' },
   heroSpecialty: { fontFamily: fonts.medium, fontSize: 15, color: colors.tealGreen, textAlign: 'center', marginBottom: 6 },

@@ -7,7 +7,6 @@ import {
   Image,
   StyleSheet,
   Text,
-  Vibration,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -21,6 +20,7 @@ import { shadow } from '@/lib/shadow'
 import { createConsultationChannel } from '@/lib/stream'
 import { getAuthClient, supabase } from '@/lib/supabase'
 import { markNotificationsReadForConsultation } from '@/lib/notificationCenter'
+import { stopIncomingRequestRing } from '@/hooks/useIncomingConsultationAlert'
 import { useAuthStore } from '@/store/authStore'
 import { useActiveIncomingRequestStore } from '@/store/activeIncomingRequestStore'
 import { ghostDebug, logger } from '@/lib/logger'
@@ -31,14 +31,6 @@ const DECLINE_REASONS = ['Currently busy', 'Wrong specialty', 'Technical issue',
 export default function IncomingRequestScreen() {
   const { t } = useTranslation()
 
-  // Home's checkForWaitingRequest() starts a repeating ring (Vibration.vibrate
-  // with repeat: true) right before navigating here — it auto-stops after
-  // 25s, but stop it the instant this screen mounts (the doctor has already
-  // seen the request) rather than leaving the phone buzzing through however
-  // long they take to actually tap Accept/Decline.
-  useEffect(() => {
-    Vibration.cancel()
-  }, [])
   const router = useRouter()
   const { getToken } = useAuth()
   const { user } = useUser()
@@ -66,6 +58,17 @@ export default function IncomingRequestScreen() {
     logger.log('[IncomingRequestScreen] Mounted — final pipeline stage reached, consultationId=', consultationId)
     ghostDebug('[incoming-consultation] IncomingRequestScreen mounted', { consultationId, consultationType })
     return () => { ghostDebug('[incoming-consultation] IncomingRequestScreen unmounted', { consultationId }) }
+  }, [consultationId])
+
+  // The doctor may have been alerted via useIncomingConsultationAlert.ts's
+  // continuous ring (vibration + a looping Notifee notification) right
+  // before landing here, or via the FCM-triggered background/foreground
+  // ring (index.js / lib/voipPush.ts) — reaching this screen at all means
+  // the doctor has already seen the request, so stop ringing immediately
+  // rather than leaving the phone buzzing/looping through however long they
+  // take to actually tap Accept/Decline.
+  useEffect(() => {
+    if (consultationId) stopIncomingRequestRing(consultationId)
   }, [consultationId])
 
   // Auto-clear: reaching this screen directly (Home tab tap, realtime

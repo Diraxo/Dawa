@@ -156,6 +156,9 @@ const ar: TranslationKeys = {
   endedChats: 'منتهٍ',
   noMessages: 'لا توجد رسائل بعد',
   noMessagesDesc: 'ابدأ استشارة للتحدث',
+  messagesConnectionError: 'فشل الاتصال',
+  messagesConnectionErrorDesc: 'تعذر الاتصال بالرسائل. تحقق من اتصالك بالإنترنت وحاول مرة أخرى.',
+  retry: 'إعادة المحاولة',
 
   consultationsTab: 'الاستشارات',
   incomingConsultations: 'الواردة',

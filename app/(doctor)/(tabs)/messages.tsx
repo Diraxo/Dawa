@@ -60,7 +60,7 @@ export default function DoctorMessagesScreen() {
   const { t } = useTranslation()
   const router = useRouter()
   const guardNav = useNavGuard()
-  const { isStreamConnected, userId } = useAuthStore()
+  const { isStreamConnected, userId, streamConnectionError, retryStreamConnection } = useAuthStore()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [loading, setLoading] = useState(false)
@@ -320,6 +320,17 @@ export default function DoctorMessagesScreen() {
     </View>
   )
 
+  const ConnectionErrorState = (
+    <View style={styles.emptyWrap}>
+      <Ionicons name="cloud-offline-outline" size={52} color={colors.steelGrey} />
+      <Text style={styles.emptyTitle}>{t('messagesConnectionError')}</Text>
+      <Text style={styles.emptyText}>{t('messagesConnectionErrorDesc')}</Text>
+      <Pressable style={styles.retryButton} onPress={retryStreamConnection} hitSlop={8}>
+        <Text style={styles.retryButtonText}>{t('retry')}</Text>
+      </Pressable>
+    </View>
+  )
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -358,14 +369,26 @@ export default function DoctorMessagesScreen() {
         )}
       </View>
 
-      {/* ── Content ── */}
-      {!isStreamConnected ? (
+      {/* ── Content ──
+          `userId` (persisted from a prior sign-in) is the real "authenticated"
+          signal — `isStreamConnected` just tracks the chat socket, which resets
+          to false on every cold start and takes a moment to reconnect. Gating
+          the "Not connected / sign in" message on isStreamConnected instead of
+          userId meant an authenticated doctor with zero conversations saw a
+          false "Not connected" screen during that reconnect window (most
+          visible right after approval, when Messages is opened for the first
+          time). Only show the sign-in message when there's truly no known
+          user; otherwise fall back to the loading spinner while the socket
+          finishes connecting. */}
+      {!userId ? (
         <View style={styles.emptyWrap}>
           <Ionicons name="wifi-outline" size={52} color={colors.steelGrey} />
           <Text style={styles.emptyTitle}>{t('notConnected')}</Text>
           <Text style={styles.emptyText}>{t('signInToSeeConversations')}</Text>
         </View>
-      ) : loading && conversations.length === 0 ? (
+      ) : streamConnectionError && conversations.length === 0 ? (
+        ConnectionErrorState
+      ) : (loading || !isStreamConnected) && conversations.length === 0 ? (
         <View style={styles.centerWrap}>
           <ActivityIndicator color={colors.careBlue} size="large" />
         </View>
@@ -455,5 +478,17 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
     lineHeight: 21,
+  },
+  retryButton: {
+    marginTop: 8,
+    backgroundColor: colors.careBlue,
+    borderRadius: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+  },
+  retryButtonText: {
+    fontFamily: fonts.semiBold,
+    fontSize: 14,
+    color: colors.mistWhite,
   },
 })

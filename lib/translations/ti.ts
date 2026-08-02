@@ -156,6 +156,9 @@ const ti: TranslationKeys = {
   endedChats: 'ዝተወድአ',
   noMessages: 'ክሳዕ ሕጂ መልእኽቲ የለን',
   noMessagesDesc: 'ንምዝርራብ ምኽሪ ጀምር',
+  messagesConnectionError: 'ርክብ ኣይሰለጠን',
+  messagesConnectionErrorDesc: 'ምስ መልእኽትታት ምትእስሳር ኣይተኻእለን። ኢንተርነትካ ኣረጋግጽ እሞ ደጊምካ ፈትን።',
+  retry: 'ደጊምካ ፈትን',
 
   consultationsTab: 'ምኽርታት',
   incomingConsultations: 'ዝኣቱ ዘሎ',

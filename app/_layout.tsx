@@ -216,7 +216,15 @@ function AppInitializer() {
       userRole === 'doctor'
         ? (consultationType === 'video' ? '/(doctor)/video-consultation' : consultationType === 'phone' ? '/(doctor)/phone-consultation' : '/(doctor)/chat-consultation')
         : (consultationType === 'video' ? '/(patient)/video-consultation' : consultationType === 'phone' ? '/(patient)/phone-consultation' : '/(patient)/chat-consultation')
-    const params = { consultationId, channelId: consultationId }
+    const params: Record<string, string> = { consultationId, channelId: consultationId }
+    // Populated by lib/callkeep.ts's Android Notifee fallback for the
+    // patient-facing ring (phone-account-unavailable case) — the screens
+    // tolerate these being absent (they self-heal via a live doctor-info
+    // fetch), but passing them through avoids a blank header for the first
+    // render.
+    if (data.doctorName) params.doctorName = data.doctorName as string
+    if (data.doctorId) params.doctorId = data.doctorId as string
+    if (data.doctorPhotoUrl) params.doctorPhotoUrl = data.doctorPhotoUrl as string
     if (userRole === 'doctor') {
       navigateDoctorConsultationRoute(router, currentDoctorRouteRef.current, pathname, params, 'replace', getNavRootState())
     } else {
@@ -309,6 +317,14 @@ function AppInitializer() {
 
     // 1. Initialise CallKeep (sets up ConnectionService / CallKit)
     callkeep.init()
+
+    // 1b. Verify Android's ConnectionService PhoneAccount is actually
+    //    enabled (not just registered) — see the doc comment on
+    //    ensurePhoneAccountEnabled in lib/callkeep.ts. Checked again when a
+    //    doctor goes online (useDoctorOnlineToggle.ts) since that's the
+    //    moment they're about to start receiving calls; this app-start call
+    //    covers the case where the app is relaunched while already online.
+    callkeep.ensurePhoneAccountEnabled()
 
     // 2. Wire the answer handler — fires when the patient or doctor taps
     //    Accept on the OS call screen (see navigateToConsultation's

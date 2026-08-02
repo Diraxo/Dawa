@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next'
 
 import { BookingModal } from '@/components/ui/BookingModal'
 import { DoctorCard, Doctor } from '@/components/ui/DoctorCard'
+import { computeDoctorPresence } from '@/lib/doctorPresence'
 import { QuickActionCard } from '@/components/ui/QuickActionCard'
 import { colors } from '@/constants/colors'
 import { fonts } from '@/constants/fonts'
@@ -258,7 +259,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredOnline.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
+              <DoctorCard key={doc.id} doctor={doc} presence={computeDoctorPresence(doc)} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}
@@ -287,7 +288,7 @@ export default function HomeScreen() {
             style={styles.mt12}
           >
             {filteredTop.map((doc) => (
-              <DoctorCard key={doc.id} doctor={doc} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
+              <DoctorCard key={doc.id} doctor={doc} presence={computeDoctorPresence(doc)} cardWidth={doctorCardWidth} onPress={handleDoctorPress} onBook={setBookingDoctor} />
             ))}
           </ScrollView>
         )}

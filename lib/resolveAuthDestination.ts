@@ -22,7 +22,7 @@ export async function resolveAuthDestination(
     .from('users')
     .select('id, role')
     .eq('clerk_id', clerkId)
-    .single()
+    .maybeSingle()
   if (error) throw error
 
   if (userData?.role === 'patient') {

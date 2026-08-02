@@ -29,11 +29,11 @@ import { fonts } from '@/constants/fonts'
 import { gradients } from '@/constants/gradients'
 import { shadow } from '@/lib/shadow'
 import { useNavGuard } from '@/hooks/useNavGuard'
-import { waitForModalDismiss } from '@/lib/imagePicker'
+import { prepareImageForUpload, UnsupportedImageFormatError, waitForModalDismiss } from '@/lib/imagePicker'
 import { MIN_AGE_PATIENT, meetsAgeRequirement } from '@/lib/ageValidation'
 import { sanitize } from '@/lib/sanitize'
 import { pushOwnNameToStream, pushOwnPhotoToStream } from '@/lib/stream'
-import { getAuthClient } from '@/lib/supabase'
+import { deleteProfilePhotos, getAuthClient, uploadProfilePhoto } from '@/lib/supabase'
 import { useAppStore } from '@/store/appStore'
 import { useTranslation } from 'react-i18next'
 
@@ -607,6 +607,7 @@ export default function EditPersonalInfoScreen() {
   const [country, setCountry] = useState('')
   const [address, setAddress] = useState('')
   const [localImageUri, setLocalImageUri] = useState<string | null>(null)
+  const [localImageMimeType, setLocalImageMimeType] = useState<string | null>(null)
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null)
   const [dbPhotoUrl, setDbPhotoUrl] = useState<string | null>(null)
   const [photoRemoved, setPhotoRemoved] = useState(false)
@@ -671,11 +672,14 @@ export default function EditPersonalInfoScreen() {
         initialCountryRef.current = loadedCountry
         initialAddressRef.current = loadedAddress
 
+        // maybeSingle, not single: a new patient has no patient_profiles row
+        // until their first gender/DOB save (see upsert below) — that's an
+        // expected 0-row result, not an error.
         const { data: pp, error: ppError } = await client
           .from('patient_profiles')
           .select('date_of_birth, gender')
           .eq('user_id', ud.id)
-          .single()
+          .maybeSingle()
         if (ppError) console.error('Failed to load patient profile:', ppError)
 
         if (pp) {
@@ -719,6 +723,7 @@ export default function EditPersonalInfoScreen() {
       })
       if (!result.canceled && result.assets[0]) {
         setLocalImageUri(result.assets[0].uri)
+        setLocalImageMimeType(result.assets[0].mimeType ?? null)
         setPhotoRemoved(false)
       }
     } else {
@@ -735,6 +740,7 @@ export default function EditPersonalInfoScreen() {
       })
       if (!result.canceled && result.assets[0]) {
         setLocalImageUri(result.assets[0].uri)
+        setLocalImageMimeType(result.assets[0].mimeType ?? null)
         setPhotoRemoved(false)
       }
     }
@@ -748,6 +754,7 @@ export default function EditPersonalInfoScreen() {
         style: 'destructive',
         onPress: () => {
           setLocalImageUri(null)
+          setLocalImageMimeType(null)
           setPhotoRemoved(true)
         },
       },
@@ -810,30 +817,22 @@ export default function EditPersonalInfoScreen() {
       // Upload profile photo if a new one was picked, or clear it if deleted
       let profilePhotoUrl: string | null | undefined = undefined
       let photoUploadFailed = false
-      const avatarPath = `${user.id}/avatar.jpg`
+      let photoUploadErrorMessage: string | null = null
       if (localImageUri) {
         try {
-          const response = await fetch(localImageUri)
-          const arrayBuffer = await response.arrayBuffer()
-          const { error: uploadError } = await client.storage
-            .from('profile-photos')
-            .upload(avatarPath, arrayBuffer, { contentType: 'image/jpeg', upsert: true })
-          if (uploadError) throw uploadError
-          const { data: urlData } = client.storage.from('profile-photos').getPublicUrl(avatarPath)
-          profilePhotoUrl = `${urlData.publicUrl}?v=${Date.now()}`
+          const prepared = await prepareImageForUpload(localImageUri, localImageMimeType)
+          profilePhotoUrl = await uploadProfilePhoto(token, prepared.buffer, prepared.mimeType)
         } catch (e) {
           console.error('Failed to upload profile photo:', e)
           photoUploadFailed = true
+          if (e instanceof UnsupportedImageFormatError) photoUploadErrorMessage = e.message
         }
       } else if (photoRemoved) {
         // Remove every file in this user's folder, not just avatar.jpg —
         // older upload flows used different filenames/extensions, and
         // leaving those behind orphans them in storage forever.
         try {
-          const { data: existing } = await client.storage.from('profile-photos').list(user.id)
-          if (existing && existing.length > 0) {
-            await client.storage.from('profile-photos').remove(existing.map((f) => `${user.id}/${f.name}`))
-          }
+          await deleteProfilePhotos(token)
         } catch {}
         profilePhotoUrl = null
       }
@@ -913,7 +912,10 @@ export default function EditPersonalInfoScreen() {
       }
 
       if (photoUploadFailed) {
-        Alert.alert('Saved with a Problem', 'Your profile was updated, but the photo failed to upload. Please try again.')
+        Alert.alert(
+          'Saved with a Problem',
+          photoUploadErrorMessage ?? 'Your profile was updated, but the photo failed to upload. Please try again.'
+        )
       } else {
         Alert.alert(t('profileSaved'), t('profileSavedMsg'))
       }

@@ -216,6 +216,19 @@ function _handleCallCancelData(data: Record<string, string>) {
   if (!uuid) return
   logger.log('[VoIPPush] cancel_call received for', uuid)
   callkeep.reportCallEnded(uuid, 'answeredElsewhere')
+  // Also cancel a chat request's tray notification — this signal fires
+  // whenever a ringing request leaves the state it represents regardless of
+  // consultation type (see the server's sendCallCancelSignal), but a chat
+  // request has no CallKeep screen to end, only the loopSound-ing Notifee
+  // notification below, which nothing else here would ever stop.
+  if (Platform.OS === 'android') {
+    try {
+      const notifee = require('@notifee/react-native').default
+      notifee.cancelNotification(`incoming-request-${uuid}`).catch(() => {})
+    } catch {
+      // development build required
+    }
+  }
 }
 
 // A new/ready consultation request, delivered as a silent FCM data message
@@ -224,33 +237,65 @@ function _handleCallCancelData(data: Record<string, string>) {
 // (Firebase only invokes it for background/killed), and this data message
 // previously had no `else`/`default` branch here — it was dropped entirely,
 // so the doctor's fastest possible signal (server push, arriving well ahead
-// of Home's 10s poll / realtime reconnect) was silently discarded. Fires an
-// immediate local notification with sound as a heads-up; Home's own
-// checkForWaitingRequest() still independently detects the row and shows the
-// full-screen incoming-request UI + vibration ring — this only closes the
-// gap between "push arrives" and "app's own polling/realtime notices".
+// of useIncomingConsultationAlert's 10s poll / realtime reconnect) was
+// silently discarded. Fires the same continuously-ringing notification as a
+// heads-up; that hook's own Realtime/poll detection still independently
+// finds the row and shows the full-screen incoming-request UI — this only
+// closes the gap between "push arrives" and "app's own polling/realtime
+// notices".
 function _handleIncomingRequestData(data: Record<string, string>) {
   logger.log('[FCM] Foreground incoming-request message')
   const patientName = data.patientName || 'A patient'
   const typeTitle = data.consultationType === 'phone'
     ? 'Voice Consultation' : data.consultationType === 'video' ? 'Video Consultation' : 'Chat'
-  Notifications.scheduleNotificationAsync({
-    content: {
-      title: `${typeTitle} with ${patientName}`,
-      body: `${patientName} has paid and is waiting for your response.`,
-      sound: 'default',
-      data: { screen: 'incoming_request', ...data },
-      ...(Platform.OS === 'android' ? { channelId: 'incoming_requests_v2' } : {}),
-    },
-    trigger: null,
-  }).catch(() => {})
+  const consultationId = data.consultationId
+
+  // Android: same Notifee call (id/tag, ongoing + loopSound) index.js's
+  // background handler uses, so this foreground path rings exactly as
+  // continuously — plain expo-notifications can't loop a notification's
+  // sound/vibration (no FLAG_INSISTENT equivalent in its API).
+  if (Platform.OS === 'android' && consultationId) {
+    try {
+      const { default: notifee, AndroidImportance } = require('@notifee/react-native')
+      notifee.displayNotification({
+        id: `incoming-request-${consultationId}`,
+        title: `${typeTitle} with ${patientName}`,
+        body: `${patientName} has paid and is waiting for your response.`,
+        data: { screen: 'incoming_request', ...data },
+        android: {
+          channelId: 'incoming_requests_v2',
+          importance: AndroidImportance.MAX,
+          category: 'call',
+          fullScreenAction: { id: 'default', launchActivity: 'default' },
+          pressAction: { id: 'default', launchActivity: 'default' },
+          autoCancel: true,
+          ongoing: true,
+          loopSound: true,
+          tag: `incoming-request-${consultationId}`,
+        },
+      }).catch(() => {})
+    } catch {
+      // development build required — no fallback needed here; index.js's
+      // background handler and useIncomingConsultationAlert.ts's own
+      // Realtime/poll-driven ring still cover this consultation.
+    }
+  } else {
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: `${typeTitle} with ${patientName}`,
+        body: `${patientName} has paid and is waiting for your response.`,
+        sound: 'default',
+        data: { screen: 'incoming_request', ...data },
+      },
+      trigger: null,
+    }).catch(() => {})
+  }
 
   // See the matching marker write in index.js's background handler — same
   // dedup contract, foreground side. The server's Expo push fallback for
   // this event carries the same consultationId and now the same callType,
   // so usePushNotifications.ts's setNotificationHandler can recognize this
   // one already displayed and skip stacking a second banner for it.
-  const consultationId = data.consultationId
   if (consultationId) {
     import('@react-native-async-storage/async-storage')
       .then(({ default: AsyncStorage }) =>
