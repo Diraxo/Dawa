@@ -1,70 +1,13 @@
 {
   "project_info": {
-    "project_number": "477015807021",
-    "project_id": "carehub-ce3e3",
-    "storage_bucket": "carehub-ce3e3.firebasestorage.app"
+    "project_number": "648059206141",
+    "project_id": "dawa-a1d52",
+    "storage_bucket": "dawa-a1d52.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:477015807021:android:f1e3e7c545d64c3a2154a4",
-        "android_client_info": {
-          "package_name": "com.carehub"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyCfEhuZelj7KW78S7hKxUrG7YldUqeUPuQ"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:477015807021:android:380b89f06e7b10952154a4",
-        "android_client_info": {
-          "package_name": "com.carehub.app"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyCfEhuZelj7KW78S7hKxUrG7YldUqeUPuQ"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:477015807021:android:1cef27b1c26831672154a4",
-        "android_client_info": {
-          "package_name": "com.dawa.app"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyCfEhuZelj7KW78S7hKxUrG7YldUqeUPuQ"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:477015807021:android:478256c0eaa8263c2154a4",
+        "mobilesdk_app_id": "1:648059206141:android:7df48f5e57f6f900090194",
         "android_client_info": {
           "package_name": "com.dawaapp.app"
         }
@@ -72,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyCfEhuZelj7KW78S7hKxUrG7YldUqeUPuQ"
+          "current_key": "AIzaSyCwq-yKCEMWh23wUjeOzOXFtcj7WNJXgbU"
         }
       ],
       "services": {
