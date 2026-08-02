@@ -191,6 +191,40 @@ if (Platform.OS === 'android') {
         return
       }
 
+      // Every "regular" notification (accepted/completed/summary_ready/
+      // declined/etc.) — sent by the edge function's Expo-relay fallback,
+      // which never actually auto-displays on Android (see the doc comment
+      // on sendGeneralNotificationFCMFallback in handle-consultation-
+      // notification/index.ts for why: @react-native-firebase/messaging's
+      // FirebaseMessagingService wins Android's one-listener-per-app FCM
+      // delivery over expo-notifications' own, so Expo's relay never gets a
+      // chance to build/show anything). Build and display it ourselves here
+      // instead, exactly like the 'incoming_request' branch above already
+      // does — this headless handler is the one Android actually invokes.
+      if (callType === 'general_notification') {
+        try {
+          const data = remoteMessage.data
+          let extra = {}
+          try { extra = data.payload ? JSON.parse(data.payload) : {} } catch (e) {}
+
+          const { default: notifee } = require('@notifee/react-native')
+          await notifee.displayNotification({
+            id: data.notificationId ? `notif-${data.notificationId}` : undefined,
+            title: data.title || 'Dawa',
+            body: data.body || '',
+            data: extra,
+            android: {
+              channelId: data.channelId || 'consultations',
+              pressAction: { id: 'default', launchActivity: 'default' },
+              autoCancel: true,
+            },
+          })
+        } catch (e) {
+          console.error('[GeneralNotification] Background display failed:', e)
+        }
+        return
+      }
+
       // Only handle incoming-call data messages below this point
       if (callType !== 'incoming_call') return
 

@@ -362,6 +362,20 @@ async function sendPushNotification(
   dedupeKey?: string,
 ) {
   const devices = await getActiveDevices(supabase, recipient?.userId)
+
+  // Android direct-FCM fallback (see sendGeneralNotificationFCMFallback doc
+  // comment) — every "regular" notification (accepted/completed/summary_
+  // ready/declined/etc.) relies on Expo's relay to auto-display on Android,
+  // which silently never happens. Skipped for 'incoming_call'/
+  // 'incoming_request' — those events already send their own dedicated FCM
+  // data message + Notifee/ConnectionService display elsewhere in this file
+  // (index.js), so firing this too would triple-notify the single highest-
+  // stakes event in the app.
+  const callType = (data as Record<string, unknown> | undefined)?.callType
+  if (callType !== 'incoming_call' && callType !== 'incoming_request') {
+    sendGeneralNotificationFCMFallback(supabase, recipient?.userId, channel, title, body, data).catch(() => {})
+  }
+
   if (devices.length === 0) {
     if (!token) return
     await _sendExpoPushOnce(token, title, body, data, channel, priority, imageUrl, badge, dedupeKey, async () => {
@@ -374,6 +388,46 @@ async function sendPushNotification(
       await supabase!.from('user_devices').update({ expo_push_token: null }).eq('id', d.id)
     })
   ))
+}
+
+// ── Android direct-FCM fallback for "regular" notifications ───────────────────
+// Root cause (Phase-7 audit): Android delivers each FCM message to exactly
+// ONE FirebaseMessagingService per app. This app has two — expo-notifications'
+// own (expo.modules.notifications.service.ExpoFirebaseMessagingService,
+// registered at android:priority="-1") and @react-native-firebase/messaging's
+// (io.invertase.firebase.messaging.ReactNativeFirebaseMessagingService,
+// registered with no explicit priority, i.e. the higher default of 0).
+// Android/FCM picks the higher-priority match, so RNFirebase's service wins
+// every time and Expo's own service — the one that auto-builds and displays
+// a system notification (with the right channel/sound) for a plain Expo
+// push — never runs. index.js's headless background handler and
+// voipPush.ts's foreground onMessage handler (both wired through
+// @react-native-firebase/messaging, i.e. the service that DOES win) already
+// reliably display 'incoming_call'/'incoming_request' pushes by explicitly
+// building a Notifee/local notification themselves instead of depending on
+// any native auto-display — this sends every OTHER notification through
+// that exact same proven path via a new 'general_notification' callType,
+// so it doesn't depend on Expo's relay ever actually displaying anything on
+// Android. (No equivalent issue on iOS — APNs delivers directly to the OS,
+// there is no second competing native service to lose a priority race to.)
+async function sendGeneralNotificationFCMFallback(
+  supabase: ReturnType<typeof createClient> | undefined,
+  userId:   string | null | undefined,
+  channel:  string,
+  title:    string,
+  body:     string,
+  data:     Record<string, unknown>,
+): Promise<void> {
+  if (!supabase || !userId) return
+  const payload: Record<string, string> = {
+    callType:       'general_notification',
+    channelId:      channel,
+    title,
+    body,
+    notificationId: String((data as any)?.notificationId ?? ''),
+    payload:        JSON.stringify(data ?? {}),
+  }
+  await sendFCMDataMessage('', payload, supabase, { userId, column: 'fcm_token' })
 }
 
 // ── Android FCM data message (triggers ConnectionService) ─────────────────────
@@ -888,11 +942,22 @@ Deno.serve(async (req: Request) => {
 
       let notificationId: string | null = null
       if (doctorId) {
-        // The 3-minute repeat cron (migration 067) re-fires this exact event
-        // while the request sits unanswered — without this branch each tick
-        // inserted a brand-new row, stacking 5+ "Incoming Consultation"
+        // The 3-minute repeat cron (migration 067/110) re-fires this exact
+        // event while the request sits unanswered — without this branch each
+        // tick inserted a brand-new row, stacking 5+ "Incoming Consultation"
         // entries for one unanswered 15-minute wait. Refresh the existing
-        // row's timestamp (and un-read it) instead of duplicating it.
+        // row's timestamp instead of duplicating it.
+        //
+        // Deliberately does NOT reset read_at back to null. Notification
+        // Center's unread count must be a one-way ratchet the user controls
+        // (mark read / mark all read) — resurrecting an already-read row
+        // every 3 minutes made "mark all as read" appear to silently undo
+        // itself, since the doctor had no way to distinguish a repeat-cron
+        // resurrection from a genuinely new unread notification (bug report:
+        // "unread count becomes zero, later returns to seven"). The repeat
+        // push/ring below is what actually re-alerts the doctor in real
+        // time — the in-app row's read state is a separate concern and stays
+        // whatever the doctor last set it to.
         if (payload.repeat) {
           const { data: existing } = await supabase
             .from('notifications')
@@ -905,7 +970,7 @@ Deno.serve(async (req: Request) => {
             .maybeSingle()
           if (existing?.id) {
             await supabase.from('notifications')
-              .update({ created_at: new Date().toISOString(), read_at: null })
+              .update({ created_at: new Date().toISOString() })
               .eq('id', existing.id)
             notificationId = existing.id
           }
@@ -1186,6 +1251,76 @@ Deno.serve(async (req: Request) => {
       }
       if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
         await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorPushBody, url: doctorPushUrl('consultations', consultation_id) })
+      }
+      break
+    }
+
+    // ── Scheduled booking's 5-minute doctor response window expired ─────────
+    // Written by mark_doctor_missed_scheduled_consultations() (migration 112)
+    // — never fires for on-demand requests (is_on_demand IS NOT TRUE guard
+    // lives in that sweep, mirroring the doctor_delayed sweep in migration 107).
+    case 'doctor_missed': {
+      const creditAmount = Number((consult as any).credit_amount ?? (consult as any).patient_amount ?? 0)
+
+      const patientId    = patient.id         ?? null
+      const patientToken = patient.push_token ?? null
+      const patientTitle = 'Doctor Did Not Respond'
+      const patientBody  = `${formatDoctorName(doctorUser.full_name, 'The doctor')} did not respond to your scheduled ${typeLabel} in time. Your consultation credit has been preserved. Please choose another doctor or reschedule.`
+
+      let patientNotifId: string | null = null
+      if (patientId) {
+        patientNotifId = await insertNotification(supabase, {
+          user_id:   patientId,
+          title:     patientTitle,
+          body:      patientBody,
+          type:      'doctor_missed',
+          data_json: {
+            ...sharedData,
+            screen:                'appointments',
+            consultationCredit:    true,
+            creditAmount:          creditAmount.toString(),
+            creditConsultationId:  consultation_id,
+          },
+        })
+      }
+      if (patientToken && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendPushNotification(patientToken, patientTitle, patientBody, {
+          screen:               'appointments',
+          consultationCredit:   true,
+          creditAmount:         creditAmount.toString(),
+          creditConsultationId: consultation_id,
+          notificationId:       patientNotifId ?? '',
+          ...sharedData,
+        }, 'consultations', 'normal', doctorUser.profile_photo_url || undefined, supabase, { userId: patientId, column: 'push_token' }, await getUnreadBadgeCount(supabase, patientId))
+      }
+      if (patientId && await isPushEnabled(supabase, patientId, 'consultation_request')) {
+        await sendWebPush(supabase, patientId, { title: patientTitle, body: patientBody, url: patientPushUrl('appointments', consultation_id, String(consult.type)) })
+      }
+
+      const doctorId    = doctorUser.id         ?? null
+      const doctorToken = doctorUser.push_token ?? null
+      const doctorTitle = 'Missed Consultation'
+      const doctorBody  = `You did not respond to the scheduled ${typeLabel} with ${patient.full_name ?? 'a patient'} in time. It has been recorded as missed.`
+
+      let doctorNotifId: string | null = null
+      if (doctorId) {
+        doctorNotifId = await insertNotification(supabase, {
+          user_id:   doctorId,
+          title:     doctorTitle,
+          body:      doctorBody,
+          type:      'doctor_missed',
+          data_json: { ...sharedData, screen: 'consultations' },
+        })
+      }
+      if (doctorToken && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
+        await sendPushNotification(doctorToken, doctorTitle, doctorBody, {
+          screen: 'consultations',
+          notificationId: doctorNotifId ?? '',
+          ...sharedData,
+        }, 'consultations', 'normal', undefined, supabase, { userId: doctorId, column: 'push_token' }, await getUnreadBadgeCount(supabase, doctorId))
+      }
+      if (doctorId && await isPushEnabled(supabase, doctorId, 'consultation_update')) {
+        await sendWebPush(supabase, doctorId, { title: doctorTitle, body: doctorBody, url: doctorPushUrl('consultations', consultation_id) })
       }
       break
     }

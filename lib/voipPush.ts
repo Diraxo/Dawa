@@ -189,6 +189,7 @@ async function _registerFCMToken(
       'consultationId=', remoteMessage?.data?.consultationId ?? remoteMessage?.data?.uuid)
     if (callType === 'cancel_call') return _handleCallCancelData(remoteMessage.data)
     if (callType === 'incoming_request') return _handleIncomingRequestData(remoteMessage.data)
+    if (callType === 'general_notification') return _handleGeneralNotificationData(remoteMessage.data)
     if (callType !== 'incoming_call') return
     logger.log('[FCM] Foreground incoming-call message')
     if (currentOnIncoming) handleIncomingCallData(remoteMessage.data, currentOnIncoming)
@@ -256,6 +257,48 @@ function _handleIncomingRequestData(data: Record<string, string>) {
         AsyncStorage.setItem(`@incoming_request_displayed_${consultationId}`, String(Date.now())))
       .catch(() => {})
   }
+}
+
+// Every "regular" notification (accepted/completed/summary_ready/declined/
+// etc.) delivered as a direct FCM data message — see the doc comment on
+// sendGeneralNotificationFCMFallback in handle-consultation-notification/
+// index.ts for why this exists: on Android, expo-notifications' own
+// FirebaseMessagingService loses the one-listener-per-app FCM delivery race
+// to @react-native-firebase/messaging's, so Expo's push relay (used by
+// every "regular" notification) never gets a chance to auto-display
+// anything — this local notification, scheduled through the same
+// expo-notifications channel the OS would have used, is what actually
+// produces the tray entry + sound while the app is foregrounded. Mirrors
+// index.js's headless handler, which does the Android-equivalent (Notifee)
+// for the background/killed case.
+function _handleGeneralNotificationData(data: Record<string, string>) {
+  logger.log('[FCM] Foreground general-notification message, channel=', data.channelId)
+  let extra: Record<string, unknown> = {}
+  try {
+    extra = data.payload ? JSON.parse(data.payload) : {}
+  } catch {
+    // best effort
+  }
+  Notifications.scheduleNotificationAsync({
+    // Deterministic identifier (matches index.js's Notifee `id` for the same
+    // event) — without this, scheduleNotificationAsync defaults to a random
+    // UUID per call, so FCM redelivering the same data message (its own
+    // retry-on-no-ack behavior, or the 3-minute repeat cron for
+    // still-waiting requests) would stack a second tray entry instead of
+    // replacing the first. Falls back to a random id only when the server
+    // didn't have a notification row to key off of (insertNotification
+    // failure) — a rare edge case where losing dedup is an acceptable
+    // degradation, not a regression from before this handler existed.
+    identifier: data.notificationId ? `notif-${data.notificationId}` : undefined,
+    content: {
+      title: data.title || 'Dawa',
+      body: data.body || '',
+      sound: 'default',
+      data: extra,
+      ...(Platform.OS === 'android' ? { channelId: data.channelId || 'consultations' } : {}),
+    },
+    trigger: null,
+  }).catch(() => {})
 }
 
 // ── Shared incoming-call data handler ────────────────────────────────────────
