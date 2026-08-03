@@ -113,6 +113,7 @@ export default function DoctorHomeScreen() {
       .gte('scheduled_at', startIso)
       .lt('scheduled_at', endIso)
       .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress', 'scheduled'])
+      .eq('is_on_demand', false)
       .order('scheduled_at', { ascending: true })
 
     if (data) {

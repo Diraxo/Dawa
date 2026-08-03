@@ -126,12 +126,14 @@ export default function DoctorSchedulePage() {
         .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name, profile_photo_url)')
         .eq('doctor_id', doctorProfileId)
         .in('status', ['pending', 'active', 'scheduled'])
+        .eq('is_on_demand', false)
         .order('scheduled_at', { ascending: true }),
       client
         .from('consultations')
         .select('id, type, status, started_at, scheduled_at, created_at, patient_amount, patient:users!patient_id(full_name, profile_photo_url)')
         .eq('doctor_id', doctorProfileId)
         .in('status', ['completed', 'cancelled'])
+        .eq('is_on_demand', false)
         .gte('created_at', weekStart.toISOString())
         .lt('created_at', weekEnd.toISOString())
         .order('created_at', { ascending: true }),

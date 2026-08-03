@@ -299,6 +299,7 @@ export default function ScheduleScreen() {
       .select('id, patient_id, type, status, scheduled_at, patient:users!consultations_patient_id_fkey(full_name, profile_photo_url)')
       .eq('doctor_id', doctorProfileId)
       .in('status', ['pending', 'active', 'waiting_for_doctor', 'accepted', 'in_progress', 'scheduled'])
+      .eq('is_on_demand', false)
       .gte('scheduled_at', todayStart)
       .order('scheduled_at', { ascending: true })
       .limit(20)
