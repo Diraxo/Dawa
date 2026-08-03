@@ -1,0 +1,124 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { supabase } from '@/lib/supabase'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
+import {
+  fetchNotificationsPage,
+  getUnreadCount,
+  markAllRead as markAllReadApi,
+  markNotificationRead as markNotificationReadApi,
+  refreshBadge,
+  NotificationRow,
+  NOTIFICATIONS_PAGE_SIZE,
+} from '@/lib/notificationCenter'
+
+// Backs the Notification Center screen: paginated list, pull-to-refresh,
+// live updates (new notifications insert at the top without a manual
+// refresh), mark-as-read / mark-all-read, and the badge count that drives
+// the doctor Home bell + profile menu row. One hook, shared by both role
+// screens (components/notifications/NotificationCenterView.tsx).
+export function useNotificationCenter(userId: string | null | undefined) {
+  const [items, setItems] = useState<NotificationRow[]>([])
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
+  const pageRef = useRef(0)
+
+  const loadFirstPage = useCallback(async () => {
+    if (!userId) return
+    pageRef.current = 0
+    const [page, count] = await Promise.all([
+      fetchNotificationsPage(supabase, userId, 0),
+      getUnreadCount(supabase, userId),
+    ])
+    setItems(page)
+    setUnreadCount(count)
+    setHasMore(page.length === NOTIFICATIONS_PAGE_SIZE)
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) return
+    setLoading(true)
+    loadFirstPage().finally(() => setLoading(false))
+  }, [userId, loadFirstPage])
+
+  // Realtime: a push notification arriving while this screen is open should
+  // appear immediately, and another device marking something read should
+  // reflect here too.
+  useEffect(() => {
+    if (!userId) return
+    // Shared, ref-counted channel: this hook mounts on multiple
+    // concurrently-live screens for the same user (e.g. doctor Home's bell
+    // badge and the pushed Notifications screen, which stays mounted
+    // underneath it) — they all reuse one subscription instead of each
+    // opening a duplicate.
+    return subscribeRealtime(
+      `notifications:user_id=eq.${userId}`,
+      [
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+        { event: 'UPDATE', schema: 'public', table: 'notifications', filter: `user_id=eq.${userId}` },
+      ],
+      (event, payload) => {
+        if (event === 'INSERT') {
+          setItems((prev) => [payload.new as NotificationRow, ...prev])
+          setUnreadCount((c) => c + 1)
+        } else if (event === 'UPDATE') {
+          const updated = payload.new as NotificationRow
+          setItems((prev) => prev.map((n) => (n.id === updated.id ? updated : n)))
+          // A read/mark-all-read from a DIFFERENT mounted instance of this hook
+          // (e.g. the Notifications screen, while Home's own bell-badge
+          // instance is still mounted underneath it) only lands here as a row
+          // UPDATE — without re-deriving unreadCount from the DB, that other
+          // instance's badge count would silently drift stale until something
+          // unrelated happened to remount it. Re-fetching the true count here
+          // (rather than guessing +1/-1 from possibly-incomplete local state)
+          // keeps every mounted screen's badge in sync immediately.
+          getUnreadCount(supabase, userId).then(setUnreadCount)
+        }
+      },
+    )
+  }, [userId])
+
+  const refresh = useCallback(async () => {
+    if (!userId) return
+    setRefreshing(true)
+    try {
+      await loadFirstPage()
+    } finally {
+      setRefreshing(false)
+    }
+  }, [userId, loadFirstPage])
+
+  const loadMore = useCallback(async () => {
+    if (!userId || loadingMore || !hasMore) return
+    setLoadingMore(true)
+    try {
+      const nextPage = pageRef.current + 1
+      const page = await fetchNotificationsPage(supabase, userId, nextPage)
+      pageRef.current = nextPage
+      setItems((prev) => [...prev, ...page])
+      setHasMore(page.length === NOTIFICATIONS_PAGE_SIZE)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [userId, loadingMore, hasMore])
+
+  const markRead = useCallback(async (id: string) => {
+    setItems((prev) => prev.map((n) => (n.id === id && !n.read_at) ? { ...n, read_at: new Date().toISOString() } : n))
+    setUnreadCount((c) => Math.max(0, c - 1))
+    await markNotificationReadApi(supabase, id)
+    await refreshBadge(supabase, userId)
+  }, [userId])
+
+  const markAllRead = useCallback(async () => {
+    if (!userId) return
+    const now = new Date().toISOString()
+    setItems((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })))
+    setUnreadCount(0)
+    await markAllReadApi(supabase, userId)
+    await refreshBadge(supabase, userId)
+  }, [userId])
+
+  return { items, unreadCount, loading, refreshing, loadingMore, hasMore, refresh, loadMore, markRead, markAllRead }
+}

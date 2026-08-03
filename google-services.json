@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "648059206141",
+    "project_id": "dawa-a1d52",
+    "storage_bucket": "dawa-a1d52.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:648059206141:android:7df48f5e57f6f900090194",
+        "android_client_info": {
+          "package_name": "com.dawaapp.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCwq-yKCEMWh23wUjeOzOXFtcj7WNJXgbU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

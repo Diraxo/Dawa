@@ -1,0 +1,26 @@
+diff --git a/node_modules/react-native-css/dist/commonjs/compiler/declarations.js b/node_modules/react-native-css/dist/commonjs/compiler/declarations.js
+index 22509fe..16815f2 100644
+--- a/node_modules/react-native-css/dist/commonjs/compiler/declarations.js
++++ b/node_modules/react-native-css/dist/commonjs/compiler/declarations.js
+@@ -1792,7 +1792,7 @@ function parseDisplay({
+ }
+ function parseDirection(declaration, builder) {
+   if (["ltr", "rtl"].includes(declaration.value)) {
+-    builder.addDescriptor("direction", declaration.value);
++    builder.addDescriptor("writingDirection", declaration.value);
+     builder.addDescriptor("--__rn-css-direction", declaration.value);
+   }
+   builder.addWarning("value", declaration.value);
+diff --git a/node_modules/react-native-css/dist/module/compiler/declarations.js b/node_modules/react-native-css/dist/module/compiler/declarations.js
+index 9f4abf1..dc0f7da 100644
+--- a/node_modules/react-native-css/dist/module/compiler/declarations.js
++++ b/node_modules/react-native-css/dist/module/compiler/declarations.js
+@@ -1711,7 +1711,7 @@ export function parseDisplay({
+ }
+ export function parseDirection(declaration, builder) {
+   if (["ltr", "rtl"].includes(declaration.value)) {
+-    builder.addDescriptor("direction", declaration.value);
++    builder.addDescriptor("writingDirection", declaration.value);
+     builder.addDescriptor("--__rn-css-direction", declaration.value);
+   }
+   builder.addWarning("value", declaration.value);

@@ -1,48 +1,161 @@
 {
   "expo": {
-    "name": "carehub",
+    "name": "Dawa",
     "slug": "carehub",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "carehub",
-    "userInterfaceStyle": "automatic",
+    "icon": "./assets/images/app-icon.png",
+    "scheme": "dawa",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/logo-white.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#070E27"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.dawa.app",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio",
+          "fetch",
+          "processing",
+          "remote-notification",
+          "voip"
+        ],
+        "NSMicrophoneUsageDescription": "Dawa needs microphone access for voice and video consultations.",
+        "NSCameraUsageDescription": "Dawa needs camera access for video consultations and profile photos.",
+        "NSPhotoLibraryUsageDescription": "Dawa needs photo access to upload profile photos and medical documents.",
+        "UIUserInterfaceStyle": "Light",
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationQueriesSchemes": ["whatsapp"]
+      },
+      "entitlements": {
+        "aps-environment": "production",
+        "com.apple.developer.pushkit.unrestricted-voip": true
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#070E27"
       },
+      "package": "com.dawaapp.app",
+      "versionCode": 2,
+      "allowBackup": false,
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
+        "android.permission.VIBRATE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.BLUETOOTH",
+        "android.permission.MANAGE_OWN_CALLS",
+        "android.permission.CALL_PHONE",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_PHONE_NUMBERS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.WAKE_LOCK",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.DISABLE_KEYGUARD",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ]
     },
     "web": {
-      "output": "static",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "./plugins/withFirebaseMessagingManifestFix.js",
+      "./plugins/withRemoveMediaProjectionPermission.js",
+      "./plugins/withScopedStoragePermissions.js",
+      "./plugins/withWhatsAppQueries.js",
       "expo-router",
+      "expo-font",
+      "expo-secure-store",
+      "@react-native-community/datetimepicker",
       [
-        "expo-splash-screen",
+        "expo-image-picker",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#000000"
+          "photosPermission": "Dawa needs photo access to upload profile photos and medical documents.",
+          "cameraPermission": "Dawa needs camera access for video consultations and profile photos."
+        }
+      ],
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Dawa needs microphone access for voice messages and calls."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#00BFA5",
+          "defaultChannel": "appointments",
+          "sounds": []
+        }
+      ],
+      "@react-native-firebase/app",
+      "@bacons/apple-targets",
+      [
+        "@config-plugins/react-native-callkeep",
+        {
+          "ios": {
+            "appName": "Dawa",
+            "hasVideo": true,
+            "imageName": "AppIcon",
+            "supportsVideo": true,
+            "maximumCallGroups": "1",
+            "maximumCallsPerCallGroup": "1",
+            "includesCallsInRecents": false,
+            "supportsHolding": false,
+            "supportsDTMF": false,
+            "supportsGrouping": false,
+            "supportsUngrouping": false
+          },
+          "android": {
+            "selfManaged": false,
+            "alertTitle": "Phone Account Required",
+            "alertDescription": "Dawa needs access to your phone accounts to show incoming consultation calls.",
+            "cancelButton": "Cancel",
+            "okButton": "Allow",
+            "imageName": "ic_launcher",
+            "additionalPermissions": [],
+            "foregroundService": {
+              "channelId": "dawa_incoming_call",
+              "channelName": "Incoming Consultations",
+              "notificationTitle": "Incoming Consultation",
+              "notificationIcon": "mipmap/ic_launcher"
+            }
           }
         }
       ]
     ],
+    "extra": {
+      "eas": {
+        "projectId": "f61eeefc-efbc-46ac-87f5-e4d7629e0448"
+      },
+      "router": {}
+    },
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "owner": "diraxoo"
   }
 }

@@ -1,0 +1,31 @@
+diff --git a/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/bundledNativeModules.js b/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/bundledNativeModules.js
+index 2a80244..c1c39ff 100644
+--- a/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/bundledNativeModules.js
++++ b/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/bundledNativeModules.js
+@@ -86,11 +86,7 @@ async function getVersionedNativeModulesAsync(projectRoot, sdkVersion, options =
+             debug('Fetching bundled native modules from the server...');
+             return await (0, _getNativeModuleVersions.getNativeModuleVersionsAsync)(sdkVersion);
+         } catch (error) {
+-            if (error instanceof _errors.CommandError && (error.code === 'OFFLINE' || error.code === 'API')) {
+-                _log.warn((0, _chalk().default)`Unable to reach well-known versions endpoint. Using local dependency map {bold expo/bundledNativeModules.json} for version validation`);
+-            } else {
+-                throw error;
+-            }
++            _log.warn((0, _chalk().default)`Unable to reach well-known versions endpoint (${error?.message ?? error}). Using local dependency map {bold expo/bundledNativeModules.json} for version validation`);
+         }
+     }
+     debug('Fetching bundled native modules from the local JSON file...');
+diff --git a/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/getVersionedPackages.js b/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/getVersionedPackages.js
+index b36bbbd..242dab2 100644
+--- a/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/getVersionedPackages.js
++++ b/node_modules/expo/node_modules/@expo/cli/build/src/start/doctor/dependencies/getVersionedPackages.js
+@@ -102,7 +102,8 @@ async function getRemoteVersionsForSdkAsync({ sdkVersion, skipCache } = {}) {
+                 skipCache
+             });
+         }
+-        throw error;
++        _log.Log.warn(`Unable to reach the Expo versions endpoint (${error?.message ?? error}). Skipping remote dependency version overrides.`);
++        return {};
+     }
+ }
+ async function getVersionedPackagesAsync(projectRoot, { packages, sdkVersion, pkg }) {

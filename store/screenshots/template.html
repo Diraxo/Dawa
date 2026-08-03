@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  @font-face {
+    font-family: 'Montserrat';
+    font-weight: 400;
+    src: url('data:font/ttf;base64,__FONT_400__') format('truetype');
+  }
+  @font-face {
+    font-family: 'Montserrat';
+    font-weight: 500;
+    src: url('data:font/ttf;base64,__FONT_500__') format('truetype');
+  }
+  @font-face {
+    font-family: 'Montserrat';
+    font-weight: 600;
+    src: url('data:font/ttf;base64,__FONT_600__') format('truetype');
+  }
+  @font-face {
+    font-family: 'Montserrat';
+    font-weight: 700;
+    src: url('data:font/ttf;base64,__FONT_700__') format('truetype');
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 1240px;
+    height: 2208px;
+    overflow: hidden;
+  }
+
+  .canvas {
+    position: relative;
+    width: 1240px;
+    height: 2208px;
+    background: #FFFFFF;
+    font-family: 'Montserrat', sans-serif;
+    overflow: hidden;
+  }
+
+  .blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(90px);
+    z-index: 0;
+  }
+  .blob-blue {
+    width: 900px;
+    height: 900px;
+    top: -320px;
+    left: -320px;
+    background: #1A4598;
+    opacity: 0.16;
+  }
+  .blob-teal {
+    width: 820px;
+    height: 820px;
+    bottom: -280px;
+    right: -300px;
+    background: #00BFA5;
+    opacity: 0.16;
+  }
+
+  .content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    padding-top: 150px;
+    padding-bottom: 72px;
+    box-sizing: border-box;
+  }
+
+  .headline {
+    font-weight: 700;
+    font-size: 84px;
+    line-height: 1.1;
+    color: #1A4598;
+    text-align: center;
+    max-width: 1040px;
+    letter-spacing: -1px;
+  }
+
+  .subtitle {
+    font-weight: 500;
+    font-size: 38px;
+    line-height: 1.4;
+    color: rgba(17, 24, 39, 0.68);
+    text-align: center;
+    max-width: 900px;
+    margin-top: 30px;
+  }
+
+  .phone-wrap {
+    margin-top: auto;
+  }
+
+  .phone-frame {
+    width: 750px;
+    height: 1626px;
+    border-radius: 62px;
+    background: linear-gradient(160deg, #232327, #08080a);
+    padding: 14px;
+    box-shadow:
+      0 70px 120px -40px rgba(26, 69, 152, 0.38),
+      0 30px 60px -20px rgba(0, 0, 0, 0.28);
+    position: relative;
+  }
+
+  .phone-screen {
+    width: 100%;
+    height: 100%;
+    border-radius: 48px;
+    overflow: hidden;
+    background-color: #F5F7FA;
+    background-image: url('__SCREENSHOT_URL__');
+    background-size: cover;
+    background-position: top center;
+    position: relative;
+  }
+
+  .camera-dot {
+    position: absolute;
+    top: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #000;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+    z-index: 2;
+  }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="blob blob-blue"></div>
+    <div class="blob blob-teal"></div>
+    <div class="content">
+      <div class="headline">__HEADLINE__</div>
+      <div class="subtitle">__SUBTITLE__</div>
+      <div class="phone-wrap">
+        <div class="phone-frame">
+          <div class="camera-dot"></div>
+          <div class="phone-screen"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

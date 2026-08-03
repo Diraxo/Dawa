@@ -1,0 +1,1419 @@
+import { Ionicons } from '@expo/vector-icons'
+import { useAuth, useUser } from '@clerk/clerk-expo'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { LinearGradient } from 'expo-linear-gradient'
+import { useNavigationContainerRef, useRouter } from 'expo-router'
+import * as Linking from 'expo-linking'
+import * as WebBrowser from 'expo-web-browser'
+import { useRef, useEffect, useState } from 'react'
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+
+import MedicalDisclaimer from '@/components/shared/MedicalDisclaimer'
+import { AlertButton, AlertVariant, DawaAlert } from '@/components/ui/DawaAlert'
+import { Doctor } from '@/components/ui/DoctorCard'
+import { DoctorPresence } from '@/lib/doctorPresence'
+import { colors } from '@/constants/colors'
+import { fonts } from '@/constants/fonts'
+import { gradients } from '@/constants/gradients'
+import { getAuthClient, supabase } from '@/lib/supabase'
+import { navigateFamilyRoute } from '@/lib/notificationNav'
+import { ghostDebug } from '@/lib/logger'
+import { PENDING_PAYMENT_KEY } from '@/lib/pendingPayment'
+import { useServerNow } from '@/lib/serverClock'
+import { subscribeRealtime } from '@/lib/realtimeChannelManager'
+import {
+  SLOT_DURATION_MINS,
+  isSlotPast,
+  getAvailableSlots,
+  getNextDays,
+  parseScheduledAt,
+  ethiopiaDayRange,
+  formatSlotFromIso,
+} from '@/lib/slotGeneration'
+
+type ConsultationType = 'chat' | 'phone' | 'video'
+type TimingType = 'now' | 'schedule'
+
+interface ActiveCredit {
+  creditConsultationId: string
+  creditAmount:         number
+  type:                 ConsultationType
+}
+
+type Props = {
+  visible: boolean
+  doctor: Doctor | null
+  onClose: () => void
+  // Lets a caller land the sheet straight on the date/time picker (step 2)
+  // with the same consultation type as before — used when a patient reopens
+  // scheduling for a doctor whose previous consultation was cancelled/
+  // declined, so they see available dates/times immediately instead of
+  // re-picking a consultation type first.
+  initialStep?: 1 | 2 | 3
+  initialConsultType?: ConsultationType
+}
+
+const CONSULT_TYPES: { id: ConsultationType; label: string; icon: string; color: string }[] = [
+  { id: 'chat', label: 'Chat', icon: 'chatbubble-ellipses', color: colors.tealGreen },
+  { id: 'phone', label: 'Phone Call', icon: 'call', color: colors.careBlue },
+  { id: 'video', label: 'Video Call', icon: 'videocam', color: '#7C3AED' },
+]
+
+// Thrown for book_appointment_slot() rejections (slot taken, doctor busy,
+// outside hours, etc.) so the catch handler in initiateChapaPayment can tell
+// these apart from actual payment/network failures — no charge was ever
+// attempted for these, so they must never show a "Payment Failed" title.
+class BookingConflictError extends Error {
+  code: string
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
+const BOOKING_CONFLICT_TITLES: Record<string, string> = {
+  SLOT_TAKEN:            'Time No Longer Available',
+  DOCTOR_BUSY:           'Doctor Busy',
+  DOCTOR_SCHEDULED_SOON: 'Scheduled Consultation Starting Soon',
+  DOCTOR_OFFLINE:        'Doctor Unavailable',
+  DOCTOR_UNAVAILABLE:    'Doctor Unavailable',
+  SLOT_EXPIRED:          'Time No Longer Available',
+  ON_DEMAND_DISABLED:    'On-Demand Unavailable',
+  PATIENT_BUSY:          'Active Consultation In Progress',
+  SCHEDULED_DISABLED:    'Scheduling Unavailable',
+  DAY_OFF:               'Doctor Unavailable',
+  DATE_BLOCKED:          'Doctor Unavailable',
+  OUTSIDE_HOURS:         'Outside Working Hours',
+  RATE_LIMITED:          'Too Many Attempts',
+}
+
+// One conflict title reads as an error, the rest as a soft "try something
+// else" nudge — matches how DawaAlert's variant governs icon/color.
+const BOOKING_CONFLICT_VARIANTS: Record<string, AlertVariant> = {
+  SLOT_TAKEN: 'warning',
+  DOCTOR_SCHEDULED_SOON: 'warning',
+  DOCTOR_OFFLINE: 'warning',
+  DOCTOR_UNAVAILABLE: 'warning',
+  SLOT_EXPIRED: 'warning',
+  DAY_OFF: 'warning',
+  DATE_BLOCKED: 'warning',
+  OUTSIDE_HOURS: 'warning',
+  RATE_LIMITED: 'warning',
+}
+
+// Bounds any promise that has no built-in timeout (Clerk's getToken(), plain
+// supabase-js calls without an abortSignal) — without this, a stalled request
+// left the booking button stuck on its loading state forever with no error
+// and no way to recover.
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      err => { clearTimeout(timer); reject(err) },
+    )
+  })
+}
+
+export function BookingModal({ visible, doctor, onClose, initialStep, initialConsultType }: Props) {
+  const insets = useSafeAreaInsets()
+  const router = useRouter()
+  const navContainerRef = useNavigationContainerRef()
+  const { getToken } = useAuth()
+  const { user } = useUser()
+  const slideAnim = useRef(new Animated.Value(300)).current
+  const [step, setStep] = useState<1 | 2 | 3>(1)
+  const [consultType, setConsultType] = useState<ConsultationType>('chat')
+  const [timing, setTiming] = useState<TimingType>('now')
+  const [selectedDay, setSelectedDay] = useState(0)
+  const [selectedTime, setSelectedTime] = useState('')
+  const [confirming, setConfirming] = useState(false)
+  const [paying, setPaying] = useState(false)
+  const [activeCredit, setActiveCredit] = useState<ActiveCredit | null>(null)
+  const [creditLoading, setCreditLoading] = useState(false)
+  const [doctorBusy, setDoctorBusy] = useState(false)
+  const [doctorScheduledSoon, setDoctorScheduledSoon] = useState(false)
+  // Authoritative — mirrors get_doctor_presence() (migration 113), the same
+  // function book_appointment_slot() checks server-side before payment.
+  // doctor.is_online alone is stale/untrustworthy: it doesn't reflect a
+  // doctor whose app died/backgrounded past the heartbeat timeout.
+  const [doctorPresence, setDoctorPresence] = useState<DoctorPresence | 'busy'>('offline')
+  const [conflictAlert, setConflictAlert] = useState<{
+    visible: boolean
+    variant: AlertVariant
+    title: string
+    message: string
+    buttons: AlertButton[]
+  }>({ visible: false, variant: 'warning', title: '', message: '', buttons: [] })
+  const [bookedTimes, setBookedTimes] = useState<Set<string>>(new Set())
+  // Device-clock-independent "now", synced against Postgres' own now() —
+  // see lib/serverClock.ts. Both re-syncs periodically and ticks every 30s,
+  // so a slot that just became past disappears without the patient touching
+  // anything, and can't be kept bookable by a wrong/rolled-back device clock.
+  const nowMs = useServerNow()
+  const days = getNextDays(14, doctor?.availability ?? undefined, nowMs)
+  const selectedDayValue = days[selectedDay]?.value
+
+  const canStartNow = doctorPresence === 'available' && !doctorBusy && !doctorScheduledSoon
+
+  // Doctor is BUSY when they already have an accepted/in-progress consultation.
+  // Checked via RPC (not a direct table read) so a patient never needs SELECT
+  // access to another patient's consultation row just to see a boolean.
+  const checkDoctorBusy = async (doctorId: string) => {
+    const { data } = await supabase.rpc('is_doctor_busy', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
+  // Server-authoritative presence — 'available' | 'away' | 'offline' | 'busy'.
+  // 'away' means the toggle is on but the doctor's mobile heartbeat has gone
+  // stale for 2+ minutes (migration 113); treated the same as offline here.
+  const checkDoctorPresence = async (doctorId: string): Promise<DoctorPresence | 'busy'> => {
+    const { data } = await supabase.rpc('get_doctor_presence', { p_doctor_id: doctorId })
+    return (data as DoctorPresence | 'busy') ?? 'offline'
+  }
+
+  // Doctor has a scheduled consultation starting within the configurable
+  // on-demand safety buffer (platform_settings.on_demand_buffer_minutes,
+  // 5 min by default — see migration 083). Checked client-side so the
+  // "On-Demand" option greys out with the real reason *before* the patient
+  // reaches payment, instead of only discovering it from a server rejection.
+  const checkDoctorScheduledSoon = async (doctorId: string) => {
+    const { data } = await supabase.rpc('is_doctor_scheduled_soon', { p_doctor_id: doctorId })
+    return Boolean(data)
+  }
+
+  // Poll busy/scheduled-soon state while the sheet is open — mirrors the
+  // "Start Now stopped being valid" pattern below (doctor going offline/
+  // disabling on-demand), but for conditions that can only be observed via
+  // RPC.
+  useEffect(() => {
+    if (!visible || !doctor) return
+    let cancelled = false
+    const refresh = () => {
+      checkDoctorBusy(doctor.id).then(busy => { if (!cancelled) setDoctorBusy(busy) })
+      checkDoctorScheduledSoon(doctor.id).then(soon => { if (!cancelled) setDoctorScheduledSoon(soon) })
+      checkDoctorPresence(doctor.id).then(presence => { if (!cancelled) setDoctorPresence(presence) })
+    }
+    refresh()
+    const interval = setInterval(refresh, 10_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [visible, doctor?.id])
+
+  // Which generated time slots for the selected day are already booked, so
+  // they can be shown locked/disabled instead of only failing at submit time
+  // with the server's SLOT_TAKEN error (which remains as defense-in-depth).
+  // Re-runs whenever the doctor, sheet visibility, timing mode, or selected
+  // day changes. slot_locks (not consultations, which RLS restricts to a
+  // patient's own rows) is the readable-by-any-patient source of truth here.
+  // Exposed via ref (not just the effect below) so a SLOT_TAKEN rejection
+  // from book_appointment_slot() can force an immediate re-check instead of
+  // waiting on the slot_locks realtime subscription to notice the conflict.
+  const fetchBookedTimesRef = useRef<() => void>(() => {})
+
+  useEffect(() => {
+    if (!visible || !doctor || timing !== 'schedule' || !selectedDayValue) {
+      setBookedTimes(new Set())
+      return
+    }
+    let cancelled = false
+    // Ethiopia-anchored bounds, not device-local `T00:00:00` — every other
+    // slot-availability calculation in this file is anchored the same way
+    // (Phase-4 audit M2); using the device's own timezone here could show a
+    // free slot as "Booked" (or vice versa) for a patient whose device isn't
+    // set to Africa/Addis_Ababa.
+    const { startIso: dayStartIso, endIso: dayEndIso } = ethiopiaDayRange(selectedDayValue)
+
+    const fetchBookedTimes = () => {
+      supabase
+        .from('slot_locks')
+        .select('slot_start')
+        .eq('doctor_id', doctor.id)
+        .gte('slot_start', dayStartIso)
+        .lt('slot_start', dayEndIso)
+        .gt('expires_at', new Date().toISOString())
+        .then(({ data, error }) => {
+          if (cancelled) return
+          if (error || !data) {
+            setBookedTimes(new Set())
+            return
+          }
+          setBookedTimes(new Set(
+            data.map((row: any) => formatSlotFromIso(row.slot_start))
+          ))
+        })
+    }
+
+    fetchBookedTimesRef.current = fetchBookedTimes
+    fetchBookedTimes()
+
+    // Another patient booking/cancelling the same day while this sheet is
+    // already open must flip that slot's availability live — without this,
+    // only re-opening the sheet (or changing day and back) picked it up.
+    // Stable per-doctor-per-day topic through the shared ref-counted manager
+    // (not a Date.now()-suffixed one-off channel) — Phase-4 audit M9.
+    const unsubscribe = subscribeRealtime(
+      `booking-slot-locks:${doctor.id}:${selectedDayValue}`,
+      [{ event: '*', schema: 'public', table: 'slot_locks', filter: `doctor_id=eq.${doctor.id}` }],
+      () => fetchBookedTimes(),
+    )
+
+    return () => { cancelled = true; unsubscribe() }
+  }, [visible, doctor?.id, timing, selectedDayValue])
+
+  useEffect(() => {
+    if (visible) {
+      setStep(initialStep ?? 1)
+      setConsultType(initialConsultType ?? 'chat')
+      setTiming(canStartNow ? 'now' : 'schedule')
+      setSelectedDay(0)
+      setSelectedTime('')
+      setConfirming(false)
+      setPaying(false)
+      setActiveCredit(null)
+      setCreditLoading(false)
+      Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start()
+    } else {
+      Animated.timing(slideAnim, { toValue: 300, duration: 220, useNativeDriver: true }).start()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible])
+
+  // "Start Now" stopped being valid while the modal is open (doctor went
+  // offline) — fall back to scheduling for later.
+  useEffect(() => {
+    if (visible && !canStartNow && timing === 'now') {
+      setTiming('schedule')
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canStartNow, visible])
+
+  // Check for active consultation credit as soon as the sheet opens — not
+  // just at the review step — so Step 1's type selector can be locked to the
+  // credit's original consultation type from the start. A credit is only
+  // ever redeemable against the SAME type it was paid for (never converted
+  // chat -> video, etc.), so consultType is force-set here too.
+  useEffect(() => {
+    if (!visible || !user) return
+    let cancelled = false
+    setCreditLoading(true)
+    ;(async () => {
+      try {
+        const token = await getToken()
+        if (!token || cancelled) return
+        const client = getAuthClient(token)
+
+        const { data: userData } = await client.from('users').select('id').eq('clerk_id', user.id).single()
+        if (!userData || cancelled) return
+
+        const { data: credits } = await client
+          .from('consultations')
+          .select('id, credit_amount, type')
+          .eq('patient_id', userData.id)
+          .eq('consultation_credit', true)
+          .eq('credit_used', false)
+          .order('created_at', { ascending: false })
+          .limit(1)
+
+        if (cancelled) return
+        if (credits && credits.length > 0) {
+          const creditType = (credits[0].type ?? 'chat') as ConsultationType
+          setActiveCredit({
+            creditConsultationId: credits[0].id,
+            creditAmount:         Number(credits[0].credit_amount ?? 0),
+            type:                 creditType,
+          })
+          setConsultType(creditType)
+        } else {
+          setActiveCredit(null)
+        }
+      } catch {
+        // credit check is best-effort
+      } finally {
+        if (!cancelled) setCreditLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible])
+
+  if (!doctor) return null
+
+  const getPrice = (type: ConsultationType) => {
+    if (type === 'chat') return doctor.chat_price
+    if (type === 'phone') return doctor.phone_price
+    return doctor.video_price
+  }
+
+  const selectedType = CONSULT_TYPES.find(t => t.id === consultType)!
+  const newFee = getPrice(consultType)
+  const creditCoversAll = activeCredit !== null && newFee <= activeCredit.creditAmount
+  const additionalRequired = activeCredit ? Math.max(0, newFee - activeCredit.creditAmount) : newFee
+
+  // ── Apply full credit (no Chapa needed) ──────────────────────────────────
+  const applyFullCredit = async (consultationId: string, creditConsultationId: string) => {
+    const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
+    const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+    const clerkToken      = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+
+    // Bounded with a timeout — without it, a stalled network/edge-function
+    // call left this promise unresolved forever, stranding the UI on
+    // "Applying your credit…" with no way to recover (see initialize-payment
+    // below, which has always had this same protection).
+    const controller = new AbortController()
+    const timeoutId  = setTimeout(() => controller.abort(), 20_000)
+
+    let resp: Response
+    try {
+      resp = await fetch(`${supabaseUrl}/functions/v1/apply-credit`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${clerkToken}`,
+          'apikey':        supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          credit_consultation_id: creditConsultationId,
+          new_consultation_id:    consultationId,
+        }),
+      })
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('Applying your credit timed out. Please try again.')
+      }
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+    }
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data?.error ?? 'Failed to apply credit')
+    return data
+  }
+
+  // Branded replacement for Alert.alert on booking-conflict paths (Issue 3 —
+  // a native platform dialog for an expected business-rule rejection reads
+  // as "the app is broken"; DawaAlert matches the rest of the app's UI).
+  const showConflictAlert = (variant: AlertVariant, title: string, message: string, buttons: AlertButton[]) => {
+    setConflictAlert({ visible: true, variant, title, message, buttons })
+  }
+  const closeConflictAlert = () => setConflictAlert(a => ({ ...a, visible: false }))
+
+  const initiateChapaPayment = async () => {
+    setPaying(true)
+    let consultationId: string | null = null
+    // Hoisted above the try block so the PATIENT_BUSY recovery path in catch
+    // (below) can use it without re-fetching — see that block for why.
+    let patientUserId: string | null = null
+    const chargeAmount = creditCoversAll ? 0 : additionalRequired
+
+    // Set up Linking listener BEFORE opening the browser so we catch the
+    // dawa:// deep link even when Chapa's flow goes through an external
+    // banking app (CBE Birr, Telebirr, etc.) that breaks the
+    // ASWebAuthenticationSession context.
+    // dawa://payment-return matches app/(patient)/payment-return.tsx via
+    // Expo Router (route groups are transparent in URL paths).
+    const deepLinkReturn = 'dawa://payment-return'
+    let capturedLinkingUrl: string | null = null
+    let resolveLinking: (url: string) => void = () => {}
+    const linkingPromise = new Promise<string>(res => { resolveLinking = res })
+    const linkingSub = Linking.addEventListener('url', ({ url }) => {
+      if (url.startsWith(deepLinkReturn)) {
+        capturedLinkingUrl = url
+        resolveLinking(url)
+      }
+    })
+
+    const navigateToReturn = (chapaStatus: string, id: string, scheduledAt: string) => {
+      onClose()
+      // The same dawa://payment-return deep link can also be delivered
+      // straight to Expo Router's own linking handler (no consultationId,
+      // looked up from tx_ref instead) — reusing whichever payment-return
+      // instance is already on the stack instead of stacking a second one
+      // is what stops a stale duplicate mount from showing "Payment Failed"
+      // over an already-succeeded, already-visible Waiting Room (Issue 5/6).
+      navigateFamilyRoute(
+        router,
+        navContainerRef.current?.getRootState(),
+        '/(patient)/payment-return',
+        {
+          consultationId:   id,
+          doctorId:         doctor.id,
+          doctorName:       doctor.name,
+          consultationType: consultType,
+          chapaStatus,
+          timing,
+          scheduledAt: timing !== 'now' ? scheduledAt : '',
+        },
+        'push',
+      )
+    }
+
+    try {
+      const token = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+      if (!token || !user) throw new Error('Not authenticated')
+
+      const client = getAuthClient(token)
+
+      const { data: userData, error: userErr } = await withTimeout(
+        client.from('users').select('id').eq('clerk_id', user.id).single(),
+        15000,
+        'Connection timed out. Please check your network and try again.',
+      )
+
+      if (userErr || !userData) throw new Error('Could not find your user profile.')
+      patientUserId = userData.id
+
+      // Final presence/busy/scheduled-soon re-check right before payment —
+      // the periodic poll above could be stale by up to 10s, and the patient
+      // must never be charged for an On-Demand consultation with a doctor
+      // who became unavailable (including going Away) in that window.
+      // book_appointment_slot() also enforces all of this server-side as the
+      // authoritative last-resort guard.
+      if (timing === 'now') {
+        const presence = await checkDoctorPresence(doctor.id)
+        setDoctorPresence(presence)
+        if (presence === 'away' || presence === 'offline') {
+          showConflictAlert(
+            'warning',
+            'Doctor Unavailable',
+            presence === 'away'
+              ? 'This doctor appears to be away right now. Please try again shortly or choose another doctor.'
+              : 'This doctor is currently offline. Please choose another doctor.',
+            [
+              { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+              { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
+            ],
+          )
+          return
+        }
+      }
+
+      if (timing === 'now' && await checkDoctorBusy(doctor.id)) {
+        setDoctorBusy(true)
+        showConflictAlert(
+          'warning',
+          'Doctor Busy',
+          'This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.',
+          [
+            { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+            { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
+          ],
+        )
+        return
+      }
+
+      if (timing === 'now' && await checkDoctorScheduledSoon(doctor.id)) {
+        setDoctorScheduledSoon(true)
+        showConflictAlert(
+          'warning',
+          'Scheduled Consultation Starting Soon',
+          'This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.',
+          [
+            { text: 'Choose Another Doctor', style: 'outline', onPress: () => { closeConflictAlert(); onClose() } },
+            { text: 'Schedule for Later', onPress: () => { closeConflictAlert(); setTiming('schedule'); setStep(2) } },
+          ],
+        )
+        return
+      }
+
+      const scheduledAt = timing === 'now'
+        ? new Date().toISOString()
+        : parseScheduledAt(days[selectedDay].value, selectedTime)
+
+      const price = getPrice(consultType)
+
+      // Atomically claims the slot (prevents two patients double-booking the
+      // same doctor at the same scheduled time) before creating the row.
+      const { data: newConsultationId, error: consultErr } = await withTimeout(
+        client.rpc('book_appointment_slot', {
+          p_patient_id:      userData.id,
+          p_doctor_id:       doctor.id,
+          p_type:            consultType,
+          p_slot_start:      scheduledAt,
+          p_slot_duration:   SLOT_DURATION_MINS,
+          p_patient_amount:  price,
+          p_is_on_demand:    timing === 'now',
+        }),
+        15000,
+        'Booking request timed out. Please check your connection and try again.',
+      )
+
+      ghostDebug('[creation] book_appointment_slot resolved', {
+        consultationId: newConsultationId ?? null,
+        error: consultErr?.message ?? null,
+        timing,
+        consultType,
+        doctorId: doctor.id,
+      })
+
+      if (consultErr || !newConsultationId) {
+        const msg = consultErr?.message ?? ''
+        if (msg.includes('SLOT_TAKEN')) {
+          throw new BookingConflictError('SLOT_TAKEN', 'This time slot was just booked by someone else. Please pick another time.')
+        }
+        if (msg.includes('ON_DEMAND_DISABLED')) {
+          throw new BookingConflictError('ON_DEMAND_DISABLED', 'This doctor is not accepting on-demand consultations right now.')
+        }
+        if (msg.includes('DOCTOR_SCHEDULED_SOON')) {
+          throw new BookingConflictError('DOCTOR_SCHEDULED_SOON', 'This doctor has a scheduled consultation starting soon. Please choose another doctor or schedule a consultation.')
+        }
+        if (msg.includes('DOCTOR_BUSY')) {
+          throw new BookingConflictError('DOCTOR_BUSY', 'This doctor is currently in another consultation. Please try again in a few minutes or choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_OFFLINE')) {
+          throw new BookingConflictError('DOCTOR_OFFLINE', 'This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('DOCTOR_UNAVAILABLE')) {
+          throw new BookingConflictError('DOCTOR_UNAVAILABLE', 'This doctor is currently unavailable. Please choose another doctor.')
+        }
+        if (msg.includes('SLOT_EXPIRED')) {
+          throw new BookingConflictError('SLOT_EXPIRED', 'This time slot has already passed. Please select another available time.')
+        }
+        if (msg.includes('PATIENT_BUSY')) {
+          throw new BookingConflictError('PATIENT_BUSY', 'You already have an active consultation. Please finish it before starting a new one.')
+        }
+        if (msg.includes('SCHEDULED_DISABLED')) {
+          throw new BookingConflictError('SCHEDULED_DISABLED', 'This doctor is not accepting scheduled appointments right now.')
+        }
+        if (msg.includes('DAY_OFF')) {
+          throw new BookingConflictError('DAY_OFF', 'This doctor is not available on the selected day.')
+        }
+        if (msg.includes('DATE_BLOCKED')) {
+          throw new BookingConflictError('DATE_BLOCKED', 'This doctor is unavailable on the selected date.')
+        }
+        if (msg.includes('OUTSIDE_HOURS')) {
+          throw new BookingConflictError('OUTSIDE_HOURS', 'This time is outside the doctor\'s working hours. Please pick another time.')
+        }
+        if (msg.includes('RATE_LIMITED')) {
+          throw new BookingConflictError('RATE_LIMITED', 'Too many booking attempts in a short time. Please wait a moment and try again.')
+        }
+        throw new BookingConflictError('BOOKING_FAILED', 'We couldn\'t complete this booking. Please try again.')
+      }
+      consultationId = newConsultationId as string
+
+      const supabaseUrl     = process.env.EXPO_PUBLIC_SUPABASE_URL     ?? ''
+      const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''
+
+      // ── Full credit coverage — skip Chapa entirely ───────────────────────
+      if (creditCoversAll && activeCredit) {
+        await applyFullCredit(consultationId, activeCredit.creditConsultationId)
+        onClose()
+        // "Now" bookings go straight to the waiting room. Scheduled bookings
+        // must not — apply-credit already left status='scheduled' for these,
+        // matching the Chapa path in payment-return.tsx.
+        if (timing === 'now') {
+          // A waiting-room instance from an earlier attempt/recovery may
+          // already be mounted — reuse it instead of stacking a duplicate
+          // (Issue 2/6: repeated Waiting Room screens).
+          navigateFamilyRoute(
+            router,
+            navContainerRef.current?.getRootState(),
+            '/(patient)/waiting-room',
+            {
+              consultationId,
+              doctorId:         doctor.id,
+              doctorName:       doctor.name,
+              consultationType: consultType,
+            },
+            'push',
+          )
+        } else {
+          router.push('/(patient)/(tabs)/appointments')
+        }
+        return
+      }
+
+      // ── Partial credit — call apply-credit first (stores credit_source_id) ─
+      // A genuine validation failure here (e.g. the credit was already used,
+      // or a type mismatch) must not be silently swallowed — doing so let the
+      // booking fall through to initialize-payment, which re-validates
+      // independently and can surface a differently-worded, confusing error
+      // for what was really this same failure (Issue 7). Propagates to the
+      // catch block below, which already renders it via showConflictAlert/
+      // Alert.alert same as every other booking failure.
+      if (activeCredit) {
+        await applyFullCredit(consultationId, activeCredit.creditConsultationId)
+      }
+
+      // ── DEV-ONLY: simulate payment instead of opening Chapa ─────────────────
+      // Patient Mobile App only. __DEV__ is compiled to false in release
+      // builds (React Native strips it), so this can never run in a shipped
+      // app even if the env var were somehow left on. Never touches the
+      // Chapa integration, webhook, or edge functions — it only marks this
+      // row 'paid' exactly like chapa-webhook does after verifying a real
+      // payment, then hands off to the unmodified payment-return.tsx, which
+      // performs the identical status flip, notification trigger, and
+      // waiting-room routing as a real payment.
+      if (__DEV__ && process.env.EXPO_PUBLIC_DEV_PAYMENT_BYPASS === 'true') {
+        const bypassAmount = chargeAmount > 0 ? chargeAmount : price
+        const proceed = await new Promise<boolean>(resolve => {
+          Alert.alert(
+            'Development Payment',
+            `This is a simulated payment used for development.\n\nAmount: ETB ${bypassAmount}\n\nContinue?`,
+            [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Continue', onPress: () => resolve(true) },
+            ],
+          )
+        })
+
+        if (!proceed) {
+          await client
+            .from('consultations')
+            .update({ status: 'cancelled' })
+            .eq('id', consultationId)
+            .eq('status', 'pending_payment')
+          return
+        }
+
+        console.log('DEV PAYMENT BYPASS ENABLED', { consultationId, amount: bypassAmount })
+
+        // chapa_tx_ref is deliberately left null — setting it would arm the
+        // refund trigger (migration 008_chapa_refund.sql), which calls the
+        // real Chapa refund API if this consultation is later cancelled or
+        // declined. No real money was collected here, so no refund must ever
+        // be attempted, and no Chapa endpoint must ever be contacted.
+        //
+        // The payment_status flip itself must go through the dev-payment-
+        // bypass edge function (service-role), not a direct client update —
+        // migration 089's financial-column guard trigger rejects any
+        // non-service-role write to payment_status, which used to make this
+        // write fail silently (never checked) and leave the patient stuck on
+        // the verification screen forever.
+        //
+        // Fetches a fresh token rather than reusing the one captured before
+        // the confirmation Alert above — the user can leave that dialog open
+        // arbitrarily long, and this mirrors the live Chapa path's own
+        // just-in-time token fetch right before initialize-payment below.
+        const bypassToken = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+        const bypassResp = await fetch(`${supabaseUrl}/functions/v1/dev-payment-bypass`, {
+          method: 'POST',
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${bypassToken}`,
+            'apikey':        supabaseAnonKey,
+          },
+          body: JSON.stringify({ consultation_id: consultationId }),
+        })
+
+        if (!bypassResp.ok) {
+          let bypassMsg = 'Dev payment bypass failed.'
+          try { bypassMsg = (await bypassResp.json())?.error ?? bypassMsg } catch {}
+          throw new Error(bypassMsg)
+        }
+
+        navigateToReturn('success', consultationId, scheduledAt)
+        return
+      }
+
+      // Chapa requires an https:// return_url and strips all custom query params it
+      // didn't add — so we use the bare edge function URL with no extra params.
+      // The edge function always 302-redirects to dawa://payment/return which
+      // ASWebAuthenticationSession intercepts (matching deepLinkReturn sentinel below).
+      const chapaReturnUrl = `${supabaseUrl}/functions/v1/payment-redirect`
+
+      const controller = new AbortController()
+      const timeoutId  = setTimeout(() => controller.abort(), 30_000)
+
+      // initialize-payment verifies this Clerk session server-side and
+      // re-derives the charge amount from the DB itself — the anon key alone
+      // used to be sent here, which let any caller act on any consultation.
+      const paymentClerkToken = await withTimeout(getToken(), 15000, 'Connection timed out. Please check your network and try again.')
+
+      let payResp: Response
+      try {
+        payResp = await fetch(`${supabaseUrl}/functions/v1/initialize-payment`, {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${paymentClerkToken}`,
+            'apikey':        supabaseAnonKey,
+          },
+          body: JSON.stringify({
+            consultation_id:  consultationId,
+            amount:           chargeAmount > 0 ? chargeAmount : price,
+            email:            user.primaryEmailAddress?.emailAddress ?? '',
+            first_name:       user.firstName  ?? 'Patient',
+            last_name:        user.lastName   ?? user.firstName ?? 'User',
+            type:             consultType,
+            doctor_name:      doctor.name,
+            return_url:       chapaReturnUrl,
+            ...(activeCredit ? { credit_source_id: activeCredit.creditConsultationId } : {}),
+          }),
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
+
+      let payData: any
+      try { payData = await payResp.json() } catch { payData = {} }
+
+      if (!payResp.ok || !payData?.checkout_url) {
+        const raw = payData?.error
+        const msg = typeof raw === 'string' && raw.length
+          ? raw
+          : typeof raw === 'object' && raw !== null
+            ? JSON.stringify(raw)
+            : `Payment initialization failed (HTTP ${payResp.status}). Please try again.`
+        throw new Error(msg)
+      }
+
+      // Persist before opening the checkout — if the app gets killed while
+      // an external banking app (CBE Birr, Telebirr) is in front and the OS
+      // later relaunches us fresh, splash.tsx reads this to route straight
+      // back to payment-return instead of defaulting to Home.
+      try {
+        await AsyncStorage.setItem(PENDING_PAYMENT_KEY, JSON.stringify({
+          consultationId,
+          doctorId:         doctor.id,
+          doctorName:       doctor.name,
+          consultationType: consultType,
+          timing,
+          scheduledAt: timing !== 'now' ? scheduledAt : '',
+        }))
+      } catch {}
+
+      // Open Chapa checkout. deepLinkReturn is the sentinel: when the web
+      // return page does window.location.replace('dawa://...'), the
+      // in-app browser catches it and resolves with type:'success'.
+      const result = await WebBrowser.openAuthSessionAsync(payData.checkout_url, deepLinkReturn)
+
+      // ── Success: deep-link caught inside ASWebAuthenticationSession ────────
+      if (result.type === 'success') {
+        let chapaStatus = 'unknown'
+        try {
+          const urlObj = new URL(result.url ?? '')
+          chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
+        } catch {}
+        navigateToReturn(chapaStatus, consultationId, scheduledAt)
+        return
+      }
+
+      // ── Dismiss: browser closed ────────────────────────────────────────────
+      // When Chapa's flow opens an external banking app (CBE Birr, Telebirr…),
+      // ASWebAuthenticationSession breaks and returns 'dismiss'. The bank app
+      // completes the payment then iOS fires the dawa:// deep link via
+      // Linking. We wait up to 4 s for that event before assuming cancellation.
+      if (!capturedLinkingUrl) {
+        await Promise.race([
+          linkingPromise,
+          new Promise<void>(res => setTimeout(res, 4000)),
+        ])
+      }
+
+      if (capturedLinkingUrl) {
+        let chapaStatus = 'unknown'
+        try {
+          const urlObj = new URL(capturedLinkingUrl)
+          chapaStatus = urlObj.searchParams.get('status') ?? 'unknown'
+        } catch {}
+        navigateToReturn(chapaStatus, consultationId, scheduledAt)
+        return
+      }
+
+      // No deep link. The user may have paid and hit X on the receipt, or may
+      // have cancelled without paying. We don't know here, so we hand off to
+      // payment-return which polls the DB for up to 60 s and cancels only after
+      // confirming the webhook never arrived. The verifying screen also has a
+      // manual "I didn't pay" button for users who genuinely cancelled.
+      navigateToReturn('unknown', consultationId, scheduledAt)
+    } catch (err: any) {
+      if (consultationId) {
+        const token = await getToken().catch(() => null)
+        if (token) {
+          // Guarded to payment_status='pending': an exception here (e.g. a
+          // network blip while opening the checkout) doesn't mean the Chapa
+          // payment itself failed — initialize-payment above may have already
+          // succeeded and chapa-webhook may confirm it moments later. Without
+          // this guard a booking that actually got paid could be cancelled
+          // out from under a payment already in flight.
+          getAuthClient(token)
+            .from('consultations')
+            .update({ status: 'cancelled' })
+            .eq('id', consultationId)
+            .eq('payment_status', 'pending')
+            .then(() => {})
+        }
+      }
+
+      // A BookingConflictError means book_appointment_slot() rejected the
+      // request BEFORE any charge was ever attempted — showing "Payment
+      // Failed" here would wrongly imply money was charged and declined.
+      // Title it as an availability/scheduling problem instead, and force
+      // an immediate re-fetch of booked slots so the conflicting time flips
+      // to "Booked" right away rather than waiting on the realtime
+      // subscription to catch up.
+      if (err instanceof BookingConflictError) {
+        if (err.code === 'DOCTOR_BUSY') setDoctorBusy(true)
+        if (err.code === 'DOCTOR_SCHEDULED_SOON') setDoctorScheduledSoon(true)
+        fetchBookedTimesRef.current()
+
+        // PATIENT_BUSY also fires for a consultation that's already fully
+        // paid but stuck at 'pending_payment' — book_appointment_slot()
+        // treats that status as "busy" too (it can't tell "abandoned" from
+        // "still resolving"), which previously blocked the patient from ever
+        // retrying, even though nothing failed and no new charge is needed.
+        // This happens when payment succeeded but the client never learned
+        // it (killed app, dropped network) before both the passive poll and
+        // the active-verify call in payment-return.tsx got a chance to flip
+        // the row forward. Route back into the existing paid consultation
+        // instead of dead-ending on a blocking alert.
+        if (err.code === 'PATIENT_BUSY' && patientUserId) {
+          try {
+            const token = await getToken().catch(() => null)
+            if (token) {
+              const { data: stuck } = await getAuthClient(token)
+                .from('consultations')
+                .select('id, type, scheduled_at, doctor_id, doctor_profiles!doctor_id(users!inner(full_name))')
+                .eq('patient_id', patientUserId)
+                .eq('status', 'pending_payment')
+                .eq('payment_status', 'paid')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+
+              if (stuck) {
+                onClose()
+                router.push({
+                  pathname: '/(patient)/payment-return',
+                  params: {
+                    consultationId:   (stuck as any).id,
+                    doctorId:         (stuck as any).doctor_id ?? doctor.id,
+                    doctorName:       (stuck as any).doctor_profiles?.users?.full_name ?? doctor.name,
+                    consultationType: (stuck as any).type ?? consultType,
+                    chapaStatus:      'success',
+                    timing,
+                    scheduledAt: (stuck as any).scheduled_at ?? '',
+                  },
+                })
+                return
+              }
+            }
+          } catch {
+            // fall through to the generic alert below
+          }
+        }
+
+        showConflictAlert(
+          BOOKING_CONFLICT_VARIANTS[err.code] ?? 'error',
+          BOOKING_CONFLICT_TITLES[err.code] ?? 'Booking Unavailable',
+          err.message,
+          [{ text: 'OK', onPress: closeConflictAlert }],
+        )
+        return
+      }
+
+      Alert.alert(
+        'Payment Failed',
+        err?.message ?? 'Something went wrong. Please try again.',
+        [{ text: 'OK' }],
+      )
+    } finally {
+      linkingSub.remove()
+      setPaying(false)
+    }
+  }
+
+  const canGoNext = () => {
+    if (step === 2 && timing === 'now') return canStartNow
+    if (step === 2 && timing === 'schedule') {
+      if (days.length === 0) return false
+      if (selectedTime === '') return false
+      if (bookedTimes.has(selectedTime)) return false
+      if (isSlotPast(days[selectedDay]?.value ?? '', selectedTime, nowMs)) return false
+      return true
+    }
+    return true
+  }
+
+  const handleNext = () => {
+    if (step === 1) setStep(2)
+    else if (step === 2) setStep(3)
+    else initiateChapaPayment()
+  }
+
+  return (
+    <>
+    <Modal visible={visible} transparent animationType="none" onRequestClose={paying ? undefined : onClose}>
+      <Pressable style={styles.backdrop} onPress={paying ? undefined : onClose} />
+      <Animated.View style={[styles.sheet, { paddingBottom: 12 + insets.bottom, transform: [{ translateY: slideAnim }] }]}>
+        {/* Handle */}
+        <View style={styles.handle} />
+
+        {/* Header */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.title}>Book Consultation</Text>
+            <Text style={styles.doctorName}>{doctor.name}</Text>
+          </View>
+          <Pressable onPress={paying ? undefined : onClose} style={styles.closeBtn}>
+            <Ionicons name="close" size={22} color="#6B7280" />
+          </Pressable>
+        </View>
+
+        {/* Step indicators */}
+        <View style={styles.stepRow}>
+          {[1, 2, 3].map(s => (
+            <View key={s} style={[styles.stepDot, step >= s && styles.stepDotActive]} />
+          ))}
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} style={styles.body}>
+          {/* ── Step 1: Choose consultation type ── */}
+          {step === 1 && (
+            <View style={styles.stepContent}>
+              <Text style={styles.stepLabel}>Choose Consultation Type</Text>
+              {activeCredit && !creditLoading && (
+                <View style={styles.creditBanner}>
+                  <Ionicons name="wallet-outline" size={16} color="#059669" />
+                  <Text style={styles.creditBannerText}>
+                    You have an unused {CONSULT_TYPES.find(t => t.id === activeCredit.type)?.label ?? activeCredit.type} credit —
+                    it can only be applied to another {CONSULT_TYPES.find(t => t.id === activeCredit.type)?.label ?? activeCredit.type} consultation.
+                  </Text>
+                </View>
+              )}
+              {CONSULT_TYPES.map(type => {
+                const locked = Boolean(activeCredit) && type.id !== activeCredit?.type
+                return (
+                  <Pressable
+                    key={type.id}
+                    style={[styles.typeCard, consultType === type.id && styles.typeCardSelected, locked && styles.typeCardLocked]}
+                    onPress={() => { if (!locked) setConsultType(type.id) }}
+                    disabled={locked}
+                  >
+                    <View style={[styles.typeIconWrap, { backgroundColor: `${type.color}18` }]}>
+                      <Ionicons name={locked ? 'lock-closed' : (type.icon as any)} size={locked ? 20 : 26} color={locked ? '#9CA3AF' : type.color} />
+                    </View>
+                    <View style={styles.typeInfo}>
+                      <Text style={[styles.typeLabel, locked && styles.typeLabelLocked]}>{type.label}</Text>
+                      <Text style={styles.typePrice}>ETB {getPrice(type.id)}</Text>
+                    </View>
+                    {!locked && (
+                      <View style={[styles.radioOuter, consultType === type.id && styles.radioSelected]}>
+                        {consultType === type.id && <View style={styles.radioInner} />}
+                      </View>
+                    )}
+                  </Pressable>
+                )
+              })}
+            </View>
+          )}
+
+          {/* ── Step 2: Choose timing ── */}
+          {step === 2 && (
+            <View style={styles.stepContent}>
+              <Text style={styles.stepLabel}>When do you want to consult?</Text>
+              <View style={styles.timingRow}>
+                <Pressable
+                  style={[
+                    styles.timingCard,
+                    timing === 'now' && styles.timingCardSelected,
+                    !canStartNow && styles.timingCardDisabled,
+                  ]}
+                  disabled={!canStartNow}
+                  onPress={() => setTiming('now')}
+                >
+                  <Ionicons name="flash" size={22} color={timing === 'now' ? colors.mistWhite : colors.tealGreen} />
+                  <Text style={[styles.timingLabel, timing === 'now' && styles.timingLabelSelected]}>On-Demand</Text>
+                  <Text style={[styles.timingSub, timing === 'now' && styles.timingSubSelected]}>
+                    {doctorPresence === 'offline'
+                      ? 'Doctor Offline'
+                      : doctorPresence === 'away'
+                        ? 'Doctor Away'
+                        : doctorBusy
+                          ? 'In Another Consultation'
+                          : doctorScheduledSoon
+                            ? 'Scheduled Appointment Soon'
+                            : 'Start Now'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.timingCard,
+                    timing === 'schedule' && styles.timingCardSelected,
+                  ]}
+                  onPress={() => setTiming('schedule')}
+                >
+                  <Ionicons name="calendar" size={22} color={timing === 'schedule' ? colors.mistWhite : colors.careBlue} />
+                  <Text style={[styles.timingLabel, timing === 'schedule' && styles.timingLabelSelected]}>Schedule</Text>
+                  <Text style={[styles.timingSub, timing === 'schedule' && styles.timingSubSelected]}>
+                    Pick a time
+                  </Text>
+                </Pressable>
+              </View>
+
+              {timing === 'schedule' && (
+                <>
+                  <Text style={styles.pickerLabel}>Select Date</Text>
+                  {days.length === 0 ? (
+                    <View style={styles.noSlotsWrap}>
+                      <Text style={styles.noSlotsText}>No available dates in the next two weeks.</Text>
+                    </View>
+                  ) : (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dayScroll}>
+                      {days.map((day, idx) => (
+                        <Pressable
+                          key={day.value}
+                          onPress={() => { setSelectedDay(idx); setSelectedTime('') }}
+                          style={[styles.dayChip, selectedDay === idx && styles.dayChipSelected]}
+                        >
+                          <Text style={[styles.dayText, selectedDay === idx && styles.dayTextSelected]}>
+                            {day.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  )}
+
+                  {days.length > 0 && (() => {
+                    const slots = getAvailableSlots(doctor?.availability ?? null, days[selectedDay]?.value ?? '')
+                    return (
+                      <>
+                        <Text style={styles.pickerLabel}>Select Time</Text>
+                        {slots.length === 0 ? (
+                          <View style={styles.noSlotsWrap}>
+                            <Text style={styles.noSlotsText}>Doctor is not available on this day.</Text>
+                          </View>
+                        ) : (
+                          <>
+                            <View style={styles.legendRow}>
+                              <View style={styles.legendItem}>
+                                <View style={[styles.legendSwatch, styles.legendSwatchAvailable]} />
+                                <Text style={styles.legendText}>Available</Text>
+                              </View>
+                              <View style={styles.legendItem}>
+                                <View style={[styles.legendSwatch, styles.legendSwatchBooked]} />
+                                <Text style={styles.legendText}>Booked</Text>
+                              </View>
+                            </View>
+                            <View style={styles.timeGrid}>
+                              {slots.map(slot => {
+                                const isBooked = bookedTimes.has(slot)
+                                const isPast = !isBooked && isSlotPast(days[selectedDay]?.value ?? '', slot, nowMs)
+                                return (
+                                  <Pressable
+                                    key={slot}
+                                    onPress={() => setSelectedTime(slot)}
+                                    disabled={isBooked || isPast}
+                                    style={[
+                                      styles.timeChip,
+                                      selectedTime === slot && styles.timeChipSelected,
+                                      isBooked && styles.timeChipDisabled,
+                                      isPast && styles.timeChipPast,
+                                    ]}
+                                  >
+                                    <Text style={[
+                                      styles.timeText,
+                                      selectedTime === slot && styles.timeTextSelected,
+                                      (isBooked || isPast) && styles.timeTextDisabled,
+                                    ]}>
+                                      {slot}
+                                    </Text>
+                                  </Pressable>
+                                )
+                              })}
+                            </View>
+                          </>
+                        )}
+                      </>
+                    )
+                  })()}
+                </>
+              )}
+            </View>
+          )}
+
+          {/* ── Step 3: Review & Payment ── */}
+          {step === 3 && (
+            <View style={styles.stepContent}>
+              <Text style={styles.stepLabel}>Review & Pay</Text>
+              <View style={styles.summaryCard}>
+                <Row label="Doctor" value={doctor.name} />
+                <Row label="Type" value={selectedType.label} />
+                <Row label="Timing" value={timing === 'now' ? 'On-Demand (Now)' : `${days[selectedDay].label} at ${selectedTime}`} />
+                <View style={styles.summaryDivider} />
+                <Row label="Consultation Fee" value={`ETB ${newFee}`} bold />
+                {activeCredit && (
+                  <>
+                    <Row label="Consultation Credit" value={`-ETB ${activeCredit.creditAmount}`} bold />
+                  </>
+                )}
+                <View style={styles.summaryDivider} />
+                {activeCredit ? (
+                  creditCoversAll
+                    ? <Row label="Total Due" value="ETB 0 (Credit Applied)" bold teal />
+                    : <Row label="Additional Payment" value={`ETB ${additionalRequired}`} bold teal />
+                ) : (
+                  <Row label="Total" value={`ETB ${newFee}`} bold teal />
+                )}
+              </View>
+
+              <View style={{ marginTop: 12 }}>
+                <MedicalDisclaimer dismissible={false} />
+              </View>
+
+              {/* Credit banner */}
+              {activeCredit && !creditLoading && (
+                <View style={styles.creditBanner}>
+                  <Ionicons name="wallet-outline" size={16} color="#059669" />
+                  <Text style={styles.creditBannerText}>
+                    {creditCoversAll
+                      ? 'Your consultation credit covers the full amount. No payment required.'
+                      : `Your ETB ${activeCredit.creditAmount} credit is applied. Pay only ETB ${additionalRequired} via Chapa.`}
+                  </Text>
+                </View>
+              )}
+
+              {/* Chapa payment methods — only when payment needed */}
+              {!creditCoversAll && (
+                <View style={styles.chapaCard}>
+                  <Text style={styles.chapaTitle}>Pay securely with Chapa</Text>
+                  <View style={styles.chapaMethodsRow}>
+                    {['CBE Birr', 'Telebirr', 'Awash', 'HelloCash'].map(m => (
+                      <View key={m} style={styles.chapaMethod}>
+                        <Text style={styles.chapaMethodText}>{m}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={styles.chapaNote}>
+                    You will be redirected to Chapa to complete your payment. Your booking is confirmed only after successful payment.
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
+        </ScrollView>
+
+        {/* CTA Button */}
+        <View style={styles.footer}>
+          {step > 1 && (
+            <Pressable
+              style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.75 }]}
+              onPress={() => setStep(s => (s - 1) as 1 | 2 | 3)}
+              disabled={confirming}
+            >
+              <Text style={styles.backBtnText}>Back</Text>
+            </Pressable>
+          )}
+          <Pressable
+            onPress={handleNext}
+            disabled={!canGoNext() || paying}
+            style={({ pressed }) => [styles.nextBtnWrap, pressed && { opacity: 0.88 }, (!canGoNext() || paying) && styles.btnDisabled]}
+          >
+            <LinearGradient
+              colors={gradients.interactive}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.nextBtn}
+            >
+              {paying ? (
+                <ActivityIndicator color={colors.mistWhite} />
+              ) : (
+                <Text style={styles.nextBtnText}>
+                  {step === 3
+                    ? creditCoversAll
+                      ? 'Confirm Booking (Free with Credit)'
+                      : activeCredit
+                        ? `Pay ETB ${additionalRequired} with Chapa`
+                        : `Pay ETB ${newFee} with Chapa`
+                    : 'Continue →'}
+                </Text>
+              )}
+            </LinearGradient>
+          </Pressable>
+        </View>
+      </Animated.View>
+    </Modal>
+    <DawaAlert
+      visible={conflictAlert.visible}
+      variant={conflictAlert.variant}
+      title={conflictAlert.title}
+      message={conflictAlert.message}
+      buttons={conflictAlert.buttons}
+      onClose={closeConflictAlert}
+    />
+    </>
+  )
+}
+
+function Row({ label, value, bold, teal }: { label: string; value: string; bold?: boolean; teal?: boolean }) {
+  return (
+    <View style={styles.summaryRow}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text style={[styles.summaryValue, bold && styles.summaryBold, teal && styles.summaryTeal]}>
+        {value}
+      </Text>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)' },
+  // paddingBottom is overridden inline with the device safe-area inset added — see JSX.
+  sheet: {
+    backgroundColor: colors.mistWhite,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '88%',
+    paddingBottom: 12,
+  },
+  handle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: colors.steelGrey,
+    alignSelf: 'center', marginTop: 12, marginBottom: 4,
+  },
+  header: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
+    paddingHorizontal: 20, paddingVertical: 16,
+  },
+  title: { fontFamily: fonts.bold, fontSize: 18, color: colors.inkBlack },
+  doctorName: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginTop: 2 },
+  closeBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.cloudGrey,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 20, marginBottom: 4 },
+  stepDot: {
+    flex: 1, height: 4, borderRadius: 2, backgroundColor: colors.cloudGrey,
+  },
+  stepDotActive: { backgroundColor: colors.tealGreen },
+  body: { paddingHorizontal: 20 },
+  stepContent: { paddingBottom: 20 },
+  stepLabel: { fontFamily: fonts.semiBold, fontSize: 16, color: colors.inkBlack, marginBottom: 16 },
+
+  // Consult type cards
+  typeCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    borderRadius: 14, borderWidth: 1.5, borderColor: colors.steelGrey,
+    padding: 14, marginBottom: 10, backgroundColor: colors.mistWhite,
+  },
+  typeCardSelected: { borderColor: colors.tealGreen, backgroundColor: '#F0FDFB' },
+  typeCardLocked: { opacity: 0.5 },
+  typeLabelLocked: { color: '#9CA3AF' },
+  typeIconWrap: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  typeInfo: { flex: 1 },
+  typeLabel: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  typePrice: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', marginTop: 2 },
+  radioOuter: {
+    width: 22, height: 22, borderRadius: 11,
+    borderWidth: 2, borderColor: colors.steelGrey,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  radioSelected: { borderColor: colors.tealGreen },
+  radioInner: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.tealGreen },
+
+  // Timing
+  timingRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
+  timingCard: {
+    flex: 1, borderRadius: 14, borderWidth: 1.5, borderColor: colors.steelGrey,
+    padding: 18, alignItems: 'center', gap: 6,
+  },
+  timingCardSelected: { borderColor: colors.tealGreen, backgroundColor: colors.tealGreen },
+  timingCardDisabled: { opacity: 0.4 },
+  timingLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
+  timingLabelSelected: { color: colors.mistWhite },
+  timingSub: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
+  timingSubSelected: { color: 'rgba(255,255,255,0.8)' },
+
+  // Schedule pickers
+  pickerLabel: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack, marginBottom: 10 },
+  dayScroll: { marginBottom: 20 },
+  noSlotsWrap: { paddingVertical: 14, paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.cloudGrey, marginBottom: 16 },
+  noSlotsText: { fontFamily: fonts.regular, fontSize: 13, color: '#6B7280', textAlign: 'center' },
+  dayChip: {
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
+    borderWidth: 1.5, borderColor: colors.steelGrey,
+    marginRight: 8, backgroundColor: colors.mistWhite,
+  },
+  dayChipSelected: { backgroundColor: colors.careBlue, borderColor: colors.careBlue },
+  dayText: { fontFamily: fonts.medium, fontSize: 13, color: '#374151' },
+  dayTextSelected: { color: colors.mistWhite },
+  legendRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 10 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendSwatch: {
+    width: 14, height: 14, borderRadius: 4,
+    borderWidth: 1.5,
+  },
+  legendSwatchAvailable: { borderColor: colors.success, backgroundColor: 'rgba(0,203,83,0.12)' },
+  legendSwatchBooked: { borderColor: colors.error, backgroundColor: 'rgba(211,47,47,0.12)' },
+  legendText: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280' },
+  timeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  timeChip: {
+    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12,
+    borderWidth: 1.5, borderColor: colors.success, backgroundColor: 'rgba(0,203,83,0.08)',
+  },
+  timeChipSelected: { backgroundColor: colors.careBlue, borderColor: colors.careBlue },
+  // Red tint mirrors legendSwatchBooked so the grid matches the legend;
+  // opacity keeps the existing dampened/disabled affordance on top of it.
+  timeChipDisabled: { borderColor: colors.error, backgroundColor: 'rgba(211,47,47,0.08)', opacity: 0.7 },
+  // Neutral grey (not red) — a past slot isn't "taken by someone else", so it
+  // shouldn't read the same as timeChipDisabled.
+  timeChipPast: { borderColor: colors.steelGrey, backgroundColor: 'rgba(212,217,225,0.3)', opacity: 0.6 },
+  timeText: { fontFamily: fonts.medium, fontSize: 13, color: '#374151' },
+  timeTextSelected: { color: colors.mistWhite },
+  timeTextDisabled: { color: '#9CA3AF' },
+
+  // Summary
+  summaryCard: {
+    borderRadius: 14, borderWidth: 1, borderColor: colors.steelGrey,
+    padding: 16, gap: 12, marginBottom: 14,
+  },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  summaryLabel: { fontFamily: fonts.regular, fontSize: 14, color: '#6B7280' },
+  summaryValue: { fontFamily: fonts.medium, fontSize: 14, color: colors.inkBlack },
+  summaryBold: { fontFamily: fonts.bold },
+  summaryTeal: { color: colors.tealGreen },
+  summaryDivider: { height: 1, backgroundColor: colors.cloudGrey },
+
+  // Credit banner (step 3)
+  creditBanner: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 8,
+    borderRadius: 12, padding: 14, marginBottom: 14,
+    backgroundColor: 'rgba(5,150,105,0.1)',
+    borderWidth: 1, borderColor: 'rgba(5,150,105,0.3)',
+  },
+  creditBannerText: {
+    flex: 1, fontFamily: fonts.regular, fontSize: 13, color: '#059669', lineHeight: 18,
+  },
+
+  // Chapa payment section
+  chapaCard: {
+    borderRadius: 14, borderWidth: 1, borderColor: colors.steelGrey,
+    padding: 16, gap: 12, marginBottom: 14,
+    backgroundColor: '#F0FDFB',
+  },
+  chapaTitle: { fontFamily: fonts.semiBold, fontSize: 14, color: colors.inkBlack },
+  chapaMethodsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chapaMethod: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+    backgroundColor: colors.mistWhite, borderWidth: 1, borderColor: colors.steelGrey,
+  },
+  chapaMethodText: { fontFamily: fonts.medium, fontSize: 12, color: '#374151' },
+  chapaNote: { fontFamily: fonts.regular, fontSize: 12, color: '#6B7280', lineHeight: 18 },
+
+  // Footer
+  footer: { flexDirection: 'row', gap: 10, paddingHorizontal: 20, paddingTop: 16 },
+  backBtn: {
+    height: 52, paddingHorizontal: 20, borderRadius: 14,
+    borderWidth: 1.5, borderColor: colors.steelGrey,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  backBtnText: { fontFamily: fonts.semiBold, fontSize: 15, color: colors.inkBlack },
+  nextBtnWrap: { flex: 1, borderRadius: 14, overflow: 'hidden' },
+  nextBtn: { height: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 14 },
+  nextBtnText: { fontFamily: fonts.bold, fontSize: 16, color: colors.mistWhite },
+  btnDisabled: { opacity: 0.5 },
+})

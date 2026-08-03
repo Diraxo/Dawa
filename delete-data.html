@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delete Your Data — Dawa</title>
+<meta name="description" content="How to request deletion of specific data from your Dawa account, without deleting the account itself." />
+<style>
+  :root {
+    --teal: #00BFA5;
+    --ink: #111827;
+    --grey: #D4D9E1;
+    --muted: #9CA3AF;
+    --bg: #FFFFFF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  header.page-header {
+    margin-bottom: 32px;
+  }
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    line-height: 1.2;
+  }
+  .updated {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  section {
+    padding: 28px 0;
+    border-top: 1px solid var(--grey);
+  }
+  section:first-of-type {
+    border-top: none;
+  }
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--teal);
+    margin: 0 0 14px;
+  }
+  p {
+    font-size: 14px;
+    margin: 0 0 12px;
+    white-space: pre-line;
+  }
+  h3.sub {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  ul, ol {
+    margin: 0 0 14px;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    display: flex;
+    gap: 10px;
+    font-size: 14px;
+    margin-bottom: 7px;
+  }
+  li::before {
+    content: "•";
+    color: var(--teal);
+    flex-shrink: 0;
+  }
+  ol li {
+    counter-increment: step;
+  }
+  ol { counter-reset: step; }
+  ol li::before {
+    content: counter(step) ".";
+    color: var(--teal);
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 18px;
+  }
+  a { color: var(--teal); }
+  .contact-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 191, 165, 0.06);
+    border: 1px solid rgba(0, 191, 165, 0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    text-decoration: none;
+    color: var(--ink);
+    font-size: 14px;
+    margin-top: 20px;
+  }
+  .contact-card strong { color: var(--teal); }
+  .note {
+    background: rgba(41, 98, 255, 0.06);
+    border: 1px solid rgba(41, 98, 255, 0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    font-size: 13px;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page-header">
+    <h1>Delete Your Dawa Data</h1>
+    <div class="updated">Last updated: July 26, 2026 · Dawa, developed by Diraxo</div>
+  </header>
+
+  <section>
+    <p>You don't have to delete your entire Dawa account to remove specific data. This page covers deleting individual items — like an uploaded document or your profile photo — while keeping your account active. If you'd rather delete everything, including your login, see <a href="./delete-account.html">Delete Your Account</a> instead.</p>
+  </section>
+
+  <section>
+    <h2>OPTION 1: DELETE SPECIFIC ITEMS IN THE APP</h2>
+
+    <h3 class="sub">Uploaded medical documents</h3>
+    <ol>
+      <li>Open the Dawa app and sign in as a patient.</li>
+      <li>Go to <strong>Medical Records</strong>.</li>
+      <li>Tap the trash icon on the document you want to remove.</li>
+      <li>Confirm the deletion.</li>
+    </ol>
+    <p>The document and its file are deleted immediately — this cannot be undone.</p>
+
+    <h3 class="sub">Profile photo</h3>
+    <ol>
+      <li>Open the Dawa app and sign in.</li>
+      <li>Go to <strong>Profile → Edit Personal Info</strong>.</li>
+      <li>Tap <strong>Delete Photo</strong>.</li>
+      <li>Save your changes.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>OPTION 2: REQUEST DELETION OF OTHER DATA</h2>
+    <p>For data that isn't removable directly in the app — for example a specific consultation record, a chat message, or a category of information you'd like erased — email us:</p>
+    <a class="contact-card" href="mailto:dawasupport@gmail.com?subject=Data%20Deletion%20Request">
+      <strong>dawasupport@gmail.com</strong>
+    </a>
+    <p style="margin-top: 14px;">Tell us what to delete and send the request from the email address on your Dawa account (or include your registered phone number) so we can verify it's you. We confirm and process every request within 30 days. Your account stays active — only the data you name is removed.</p>
+  </section>
+
+  <section>
+    <h2>WHAT CAN BE DELETED</h2>
+    <ul>
+      <li>Uploaded medical documents and images (patient records)</li>
+      <li>Profile photo</li>
+      <li>Individual chat messages you sent, on request</li>
+      <li>Other personal data not required to keep your account or an in-progress/past consultation functional</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>WHAT IS KEPT, AND WHY</h2>
+    <p>Some data can't be deleted item-by-item while your account stays active, because it's needed for the service or for compliance:</p>
+    <ul>
+      <li><strong>Consultation records</strong> (summaries, diagnoses, prescriptions) tied to a completed consultation — retained for 5 years for medical record-keeping and healthcare compliance, as described in our <a href="./privacy-policy.html">Privacy Policy</a>.</li>
+      <li><strong>Financial transaction logs</strong> (payment amounts and dates, never card details) — retained for tax and accounting compliance.</li>
+      <li><strong>Approved doctor verification documents</strong> — retained as required by medical licensing regulations.</li>
+      <li>Core account fields (name, email, phone) needed to keep your account usable — delete these by deleting your account instead, via the link above.</li>
+    </ul>
+    <div class="note">Dawa does not collect or store your payment card details — consultation payments are processed directly by Chapa, our third-party payment processor.</div>
+  </section>
+
+  <section>
+    <h2>QUESTIONS</h2>
+    <p>Dawa Support Team</p>
+    <a class="contact-card" href="mailto:dawasupport@gmail.com">
+      Contact us: <strong>dawasupport@gmail.com</strong>
+    </a>
+  </section>
+
+</div>
+</body>
+</html>
